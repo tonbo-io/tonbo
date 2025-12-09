@@ -275,7 +275,7 @@ impl DynBatchPayload {
 /// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
-pub(crate) enum WalCommand {
+pub(super) enum WalCommand {
     /// Open an explicit transaction.
     TxnBegin {
         /// Provisional identifier reserved for this transaction.
@@ -695,7 +695,7 @@ where
     }
 }
 
-pub(crate) fn wal_segment_file_id(seq: u64) -> FileId {
+pub(super) fn wal_segment_file_id(seq: u64) -> FileId {
     let mut bytes = [0u8; 16];
     bytes[8..16].copy_from_slice(&seq.to_be_bytes());
     Ulid::from_bytes(bytes)

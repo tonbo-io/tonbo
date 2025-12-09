@@ -16,7 +16,7 @@ use crate::query::stream::{ScanStream, SourcePriority, StreamEntry, StreamError}
 
 pin_project! {
     /// Stream that merges multiple ordered sources respecting MVCC ordering semantics.
-    pub struct MergeStream<'t, E>
+    pub(crate) struct MergeStream<'t, E>
     where
         E: Executor,
     {

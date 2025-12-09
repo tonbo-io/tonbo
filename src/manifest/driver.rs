@@ -47,13 +47,13 @@ pub(crate) type ManifestResult<T> = Result<T, ManifestError>;
 /// Result of loading the latest state for a table tracked by the version manifest.
 
 #[derive(Debug, Clone)]
-pub(crate) struct VersionSnapshot {
+pub(super) struct VersionSnapshot {
     /// Underlying fusio snapshot guarding read leases.
-    pub(crate) manifest_snapshot: Snapshot,
+    pub(super) manifest_snapshot: Snapshot,
     /// Current table head.
-    pub(crate) head: TableHead,
+    pub(super) head: TableHead,
     /// Most recent committed version for the table, if any.
-    pub(crate) latest_version: Option<VersionState>,
+    pub(super) latest_version: Option<VersionState>,
 }
 
 /// Bundle of storage backends required by the manifest.
@@ -63,7 +63,7 @@ pub(crate) struct VersionSnapshot {
 /// isolate manifest families on disk or in object storage; sharing the same stores will co-locate
 /// them while still keeping key spaces separated at the type level.
 #[derive(Debug)]
-pub(crate) struct Stores<HS, SS, CS, LS> {
+pub(super) struct Stores<HS, SS, CS, LS> {
     /// Store used for the manifest head CAS object.
     pub(crate) head: HS,
     /// Store used for manifest segments.
@@ -77,7 +77,7 @@ pub(crate) struct Stores<HS, SS, CS, LS> {
 impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
     /// Construct a new bundle from the provided stores.
     #[must_use]
-    pub(crate) fn new(head: HS, segment: SS, checkpoint: CS, lease: LS) -> Self {
+    pub(super) fn new(head: HS, segment: SS, checkpoint: CS, lease: LS) -> Self {
         Self {
             head,
             segment,
@@ -88,7 +88,7 @@ impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
 }
 
 /// Manifest wrapper parameterized by the codec describing its key/value types.
-pub(crate) struct Manifest<C, HS, SS, CS, LS, E = fusio_manifest::DefaultExecutor>
+pub(super) struct Manifest<C, HS, SS, CS, LS, E = fusio_manifest::DefaultExecutor>
 where
     C: ManifestCodec,
     HS: HeadStore + MaybeSend + MaybeSync + 'static,

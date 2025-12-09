@@ -745,7 +745,7 @@ impl<'a> DynMemReadGuard<'a> {
 
 /// A lightweight reference wrapper for testing that delegates to DynMem's test methods.
 #[cfg(all(test, feature = "tokio"))]
-pub struct TestMemRef<'a>(pub(crate) &'a DynMem);
+pub(crate) struct TestMemRef<'a>(pub(crate) &'a DynMem);
 
 #[cfg(all(test, feature = "tokio"))]
 impl<'a> TestMemRef<'a> {

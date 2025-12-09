@@ -101,7 +101,7 @@ impl Snapshot {
 }
 
 /// In-memory staging buffer tracking mutations by primary key.
-pub(crate) struct StagedMutations {
+struct StagedMutations {
     /// Snapshot timestamp guarding conflict detection for this transaction.
     snapshot_ts: Timestamp,
     /// Per-key mutation map preserving deterministic commit ordering.

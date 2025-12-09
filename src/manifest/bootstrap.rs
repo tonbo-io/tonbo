@@ -25,7 +25,7 @@ use super::{
 use crate::{id::FileIdGenerator, mvcc::Timestamp};
 
 /// Concrete manifest type alias for a given filesystem and executor.
-pub(crate) type ManifestInstance<C, FS, E> = Manifest<
+pub(super) type ManifestInstance<C, FS, E> = Manifest<
     C,
     HeadStoreImpl<FS>,
     SegmentStoreImpl<FS>,
@@ -36,11 +36,11 @@ pub(crate) type ManifestInstance<C, FS, E> = Manifest<
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
 #[cfg(all(test, feature = "tokio"))]
-pub(crate) type InMemoryManifest<E> = ManifestInstance<VersionCodec, InMemoryFs, E>;
+pub(super) type InMemoryManifest<E> = ManifestInstance<VersionCodec, InMemoryFs, E>;
 
 /// In-memory catalog manifest type used for catalog-specific tests.
 #[cfg(all(test, feature = "tokio"))]
-pub(crate) type InMemoryCatalogManifest<E> = ManifestInstance<CatalogCodec, InMemoryFs, E>;
+pub(super) type InMemoryCatalogManifest<E> = ManifestInstance<CatalogCodec, InMemoryFs, E>;
 
 /// Snapshot combining catalog metadata with the latest version state.
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub(crate) struct TableSnapshot {
 }
 
 impl TableSnapshot {
-    pub(crate) fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
+    pub(super) fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
         Self {
             _manifest_snapshot: version.manifest_snapshot,
             head: version.head,
@@ -214,7 +214,7 @@ where
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
 #[cfg(all(test, feature = "tokio"))]
-pub(crate) async fn init_in_memory_manifest_raw<E>(
+pub(super) async fn init_in_memory_manifest_raw<E>(
     schema_version: u32,
     file_ids: &FileIdGenerator,
     executor: E,

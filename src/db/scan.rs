@@ -81,7 +81,8 @@ where
 {
     /// Execute the scan plan with MVCC visibility
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn execute_scan<'a>(
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn execute_scan<'a>(
         &'a self,
         plan: ScanPlan,
     ) -> Result<impl Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a, crate::db::DBError>

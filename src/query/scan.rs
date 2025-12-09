@@ -17,7 +17,7 @@ use crate::{
 ///   set result
 /// * limit: the raw limit
 /// * read_ts: snapshot/read timestamp
-pub struct ScanPlan {
+pub(crate) struct ScanPlan {
     pub(crate) _predicate: Predicate,
     pub(crate) immutable_indexes: Vec<usize>,
     pub(crate) residual_predicate: Option<Predicate>,

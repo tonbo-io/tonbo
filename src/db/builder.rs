@@ -184,7 +184,7 @@ impl WalConfig {
     }
 }
 
-pub(crate) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
+pub(super) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
 
 /// Durability classification for storage backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +333,7 @@ impl<FS> StorageConfig<FS> {
 ///
 /// This function is generic over the filesystem type, allowing it to work
 /// with local disk, OPFS, or any other filesystem that implements `Fs`.
-pub(crate) async fn ensure_storage_layout<FS>(root: &Path) -> Result<(), DbBuildError>
+async fn ensure_storage_layout<FS>(root: &Path) -> Result<(), DbBuildError>
 where
     FS: Fs,
 {

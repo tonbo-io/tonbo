@@ -811,7 +811,7 @@ impl SsTableMerger {
     }
 }
 
-pub(crate) fn extract_key_at(
+pub(super) fn extract_key_at(
     batch: &RecordBatch,
     extractor: &dyn KeyProjection,
     row: usize,
@@ -830,7 +830,7 @@ pub(crate) fn extract_key_at(
     KeyOwned::from_key_row(&key_row).map_err(SsTableError::KeyOwned)
 }
 
-pub(crate) fn extract_delete_key_at(
+pub(super) fn extract_delete_key_at(
     batch: &RecordBatch,
     extractor: &dyn KeyProjection,
     row: usize,
@@ -846,7 +846,7 @@ pub(crate) fn extract_delete_key_at(
     KeyOwned::from_key_row(&key_row).map_err(SsTableError::KeyOwned)
 }
 
-pub(crate) fn commit_ts_at(batch: &RecordBatch, row: usize) -> Result<Timestamp, SsTableError> {
+pub(super) fn commit_ts_at(batch: &RecordBatch, row: usize) -> Result<Timestamp, SsTableError> {
     let commit_col = batch
         .column_by_name(MVCC_COMMIT_COL)
         .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
@@ -860,7 +860,7 @@ pub(crate) fn commit_ts_at(batch: &RecordBatch, row: usize) -> Result<Timestamp,
     Ok(Timestamp::new(commit_col.value(row)))
 }
 
-pub(crate) fn commit_ts_at_delete(
+pub(super) fn commit_ts_at_delete(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<Timestamp, SsTableError> {
@@ -879,7 +879,7 @@ pub(crate) fn commit_ts_at_delete(
     Ok(Timestamp::new(commit_col.value(row)))
 }
 
-pub(crate) fn sequence_at(batch: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
+pub(super) fn sequence_at(batch: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
     if let Some(seq_col) = batch
         .column_by_name(MVCC_SEQUENCE_COL)
         .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
@@ -895,7 +895,7 @@ pub(crate) fn sequence_at(batch: &RecordBatch, row: usize) -> Result<u64, SsTabl
     Ok(row as u64)
 }
 
-pub(crate) fn sequence_at_delete(batch: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
+pub(super) fn sequence_at_delete(batch: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
     if let Some(seq_col) = batch
         .column_by_name(MVCC_SEQUENCE_COL)
         .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
@@ -911,7 +911,7 @@ pub(crate) fn sequence_at_delete(batch: &RecordBatch, row: usize) -> Result<u64,
     Ok(row as u64)
 }
 
-pub(crate) fn decode_delete_sidecar(
+pub(super) fn decode_delete_sidecar(
     batch: &RecordBatch,
     extractor: &dyn KeyProjection,
 ) -> Result<DeleteSidecar, SsTableError> {
@@ -936,7 +936,7 @@ pub(crate) fn decode_delete_sidecar(
     Ok(DeleteSidecar::new(keys, commit_ts))
 }
 
-pub(crate) fn concat_batches(
+pub(super) fn concat_batches(
     schema: &SchemaRef,
     batches: &[RecordBatch],
 ) -> Result<RecordBatch, ParquetError> {

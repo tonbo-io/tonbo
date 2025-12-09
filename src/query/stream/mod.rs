@@ -164,7 +164,7 @@ pub enum StreamError {
 }
 
 /// Unified entry yielded by the read stream for both in-memory and on-disk sources.
-pub enum StreamEntry {
+pub(crate) enum StreamEntry {
     /// Entry sourced from the staging buffer of a transaction.
     Txn((KeyTsViewRaw, DynRowRaw)),
     /// Tombstone emitted by the current transaction.

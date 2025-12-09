@@ -369,14 +369,14 @@ pub enum SsTableError {
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats
 /// that may not map 1:1 onto the persisted descriptor yet.
-pub(crate) struct StagedTableStats {
-    pub segments: usize,
-    pub rows: usize,
-    pub tombstones: usize,
-    pub min_key: Option<KeyOwned>,
-    pub max_key: Option<KeyOwned>,
-    pub min_commit_ts: Option<Timestamp>,
-    pub max_commit_ts: Option<Timestamp>,
+struct StagedTableStats {
+    segments: usize,
+    rows: usize,
+    tombstones: usize,
+    min_key: Option<KeyOwned>,
+    max_key: Option<KeyOwned>,
+    min_commit_ts: Option<Timestamp>,
+    max_commit_ts: Option<Timestamp>,
 }
 
 impl StagedTableStats {
@@ -452,7 +452,7 @@ struct StagedSegment {
     deletes: DeleteSidecar,
 }
 
-pub(crate) struct ParquetTableWriter {
+pub(super) struct ParquetTableWriter {
     config: Arc<SsTableConfig>,
     descriptor: SsTableDescriptor,
     staged: StagedTableStats,
@@ -461,7 +461,7 @@ pub(crate) struct ParquetTableWriter {
 }
 
 impl ParquetTableWriter {
-    pub(crate) fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
+    pub(super) fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
             config,
             descriptor,
@@ -471,11 +471,11 @@ impl ParquetTableWriter {
         }
     }
 
-    pub(crate) fn set_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
+    pub(super) fn set_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
         self.wal_ids = wal_ids;
     }
 
-    pub(crate) fn stage_immutable(
+    pub(super) fn stage_immutable(
         &mut self,
         segment: &ImmutableSegment,
     ) -> Result<(), SsTableError> {
@@ -528,7 +528,7 @@ impl ParquetTableWriter {
         Ok(())
     }
 
-    pub(crate) fn stage_stream_batch(
+    pub(super) fn stage_stream_batch(
         &mut self,
         batch: &SsTableStreamBatch,
         extractor: &dyn KeyProjection,
@@ -600,7 +600,7 @@ impl ParquetTableWriter {
         Ok(())
     }
 
-    pub(crate) async fn finish<E>(self, executor: E) -> Result<SsTable, SsTableError>
+    pub(super) async fn finish<E>(self, executor: E) -> Result<SsTable, SsTableError>
     where
         E: Executor + Clone,
     {
@@ -627,7 +627,7 @@ impl ParquetTableWriter {
     }
 
     #[cfg(all(test, feature = "tokio"))]
-    pub(crate) fn plan(&self) -> &StagedTableStats {
+    fn plan(&self) -> &StagedTableStats {
         &self.staged
     }
 }
@@ -828,7 +828,7 @@ where
     }
 }
 
-pub(crate) fn build_table_paths(
+fn build_table_paths(
     config: &SsTableConfig,
     level: usize,
     id: &SsTableId,

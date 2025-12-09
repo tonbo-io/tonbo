@@ -84,6 +84,7 @@ where
 }
 
 #[derive(Default)]
+#[allow(clippy::arc_with_non_send_sync)]
 pub(crate) struct SealState {
     pub(crate) immutables: Vec<Arc<ImmutableSegment>>,
     pub(crate) immutable_wal_ranges: Vec<Option<WalFrameRange>>,
@@ -382,6 +383,7 @@ where
         self.record_mutable_wal_range(WalFrameRange { first, last });
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     pub(crate) fn add_immutable(&self, seg: ImmutableSegment, wal_range: Option<WalFrameRange>) {
         let mut seal = self.seal_state_lock();
         seal.immutables.push(Arc::new(seg));
