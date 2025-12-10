@@ -1,4 +1,4 @@
-//! Dynamic mode configuration and helpers.
+//! Dynamic mode configuration and tuning for the canonical layout.
 //!
 //! Tonbo previously abstracted storage layouts behind a `Mode` trait so that
 //! multiple implementations could plug into the same `DB` surface. We are

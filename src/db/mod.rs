@@ -1,4 +1,4 @@
-//! Dynamic DB implementation for Tonbo.
+//! Dynamic Arrow-first database surface (`DB`, `DbBuilder`) and runtime wiring.
 //!
 //! The database is now specialised to the dynamic Arrow `RecordBatch` layout;
 //! the earlier `Mode` trait indirection has been removed to simplify the core
@@ -27,13 +27,12 @@ mod tests;
 mod wal;
 
 pub use builder::{
-    AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
+    AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig, wal_tuning,
 };
 pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
-pub use crate::mode::DynModeConfig;
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
@@ -53,6 +52,12 @@ use crate::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
         replay::Replayer, state::WalStateHandle,
     },
+};
+pub use crate::{
+    mode::DynModeConfig,
+    query::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue},
+    schema::SchemaBuilder,
+    wal::WalSyncPolicy,
 };
 
 /// Internal shared handle for the database backed by an `Arc`.
@@ -111,17 +116,32 @@ impl MinorCompactionState {
 /// and concurrent access. This is the primary type users interact with.
 ///
 /// # Example
-/// ```ignore
-/// let db = DbBuilder::from_schema_key_name(schema, "id")?
-///     .on_disk("/tmp/mydb")?
-///     .open()
-///     .await?;
+/// ```no_run
+/// use std::sync::Arc;
 ///
-/// // Clone is cheap (just Arc clone)
-/// let db2 = db.clone();
+/// use arrow_schema::{DataType, Field, Schema};
+/// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
+/// use tonbo::{db::DB, schema::SchemaBuilder};
 ///
-/// // Begin a transaction
-/// let mut tx = db.begin_transaction().await?;
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+///     let config = SchemaBuilder::from_schema(Arc::clone(&schema))
+///         .primary_key("id")
+///         .build()?;
+///
+///     let db: DB<InMemoryFs, TokioExecutor> = DB::<InMemoryFs, TokioExecutor>::builder(config)
+///         .in_memory("example-db")?
+///         .build()
+///         .await?;
+///
+///     // Clone is cheap (just Arc clone)
+///     let _db2 = db.clone();
+///
+///     // Begin a transaction
+///     let _tx = db.begin_transaction().await?;
+///     Ok(())
+/// }
 /// ```
 pub struct DB<FS, E>
 where
@@ -242,6 +262,7 @@ where
     }
 
     /// Whether a background compaction worker was spawned for this DB.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn has_compaction_worker(&self) -> bool {
         self.inner.has_compaction_worker()
     }
@@ -296,16 +317,17 @@ where
     ///
     /// This is primarily for testing and prototyping.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub async fn new(config: DynModeConfig, executor: Arc<E>) -> Result<Self, KeyExtractError> {
+    pub(crate) async fn new(
+        config: DynModeConfig,
+        executor: Arc<E>,
+    ) -> Result<Self, KeyExtractError> {
         let inner = DbInner::new(config, executor).await?;
         Ok(Self::from_inner(Arc::new(inner)))
     }
 
     /// Create a new in-memory DB with a custom seal policy.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub async fn new_with_policy(
+    pub(crate) async fn new_with_policy(
         config: DynModeConfig,
         executor: Arc<E>,
         policy: Arc<dyn crate::inmem::policy::SealPolicy + Send + Sync>,

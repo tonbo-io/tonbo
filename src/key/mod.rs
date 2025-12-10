@@ -1,4 +1,4 @@
-//! Zero-copy key projection scaffolding.
+//! Zero-copy key views and owned key wrappers over Arrow buffers.
 //!
 //! This module introduces the skeleton for the zero-copy key design.
 //! The goal is to keep hot-path key handling on borrow-based views
@@ -9,7 +9,6 @@ mod owned;
 mod row;
 mod ts;
 
-pub use heap_size::KeyHeapSize;
 pub use owned::{KeyOwned, KeyOwnedError};
 pub use row::{KeyRow, KeyRowError};
 pub use ts::{KeyTsOwned, KeyTsViewRaw};

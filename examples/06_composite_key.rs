@@ -5,10 +5,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
-use tonbo::{
-    db::DbBuilder,
-    query::{ColumnRef, Predicate, ScalarValue},
-};
+use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,7 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create DB with composite key using column indices [0, 1]
     let db = DbBuilder::from_schema_key_indices(schema.clone(), vec![0, 1])?
         .on_disk("/tmp/tonbo_composite_key")?
-        .create_dirs(true)
         .open()
         .await?;
 

@@ -1,26 +1,34 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, dead_code)]
-//! Arrow-based, in-memory building blocks for Tonbo.
+//! Tonbo is an Arrow-native embedded database for serverless and edge analytics, built to keep data
+//! in Arrow/Parquet on object storage.
 //!
-//! The current focus is the dynamic runtime-schema path: callers work with
-//! Arrow `RecordBatch` values, and the engine derives logical keys at runtime.
-//! The engine is intentionally single-mode: the earlier `Mode` abstraction was
-//! flattened so the dynamic layout is the canonical storage path.
+//! This crate hosts the core runtime: Arrow-first ingestion, in-memory segments, WAL + manifest
+//! plumbing, and Fusio-backed async I/O. The engine is currently single-mode and dynamic: callers
+//! pass Arrow `RecordBatch` values and logical keys are derived at runtime; the former `Mode` split
+//! was flattened, making this dynamic layout the canonical storage path. Use `DbBuilder` to
+//! construct the database and `DB` for reads/writes; other modules expose WAL, manifest, MVCC, and
+//! compaction scaffolding.
 
-pub mod extractor;
+pub(crate) mod extractor;
 /// File and object identifiers.
-pub mod id;
+pub(crate) mod id;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
-pub mod key;
-pub mod mode;
+pub(crate) mod key;
+pub(crate) mod mode;
 pub(crate) mod mutation;
 pub mod schema;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
-pub use crate::db::DB;
 // Re-export in-memory sealing policy helpers for embedders that tweak durability.
-pub use crate::inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy};
+pub use crate::{
+    db::{
+        ColumnRef, ComparisonOp, DB, Operand, Predicate, PredicateNode, ScalarValue, WalSyncPolicy,
+    },
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+    transaction::CommitAckMode,
+};
 
 #[cfg(test)]
 mod test;
@@ -28,23 +36,22 @@ mod test;
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
 
-/// Minimal key-focused expression tree and helpers.
-pub mod query;
+pub(crate) mod query;
 
 /// Write-ahead log framework (async, fusio-backed).
-pub mod wal;
+pub(crate) mod wal;
 
 /// Manifest integration atop `fusio-manifest`.
-pub mod manifest;
+pub(crate) mod manifest;
 
 /// MVCC primitives shared across modules.
-pub mod mvcc;
+pub(crate) mod mvcc;
 
 /// Optimistic transaction scaffolding (write path focus for now).
-pub mod transaction;
+pub(crate) mod transaction;
 
 /// On-disk persistence scaffolding (SSTable skeletons).
-pub mod ondisk;
+pub(crate) mod ondisk;
 
 /// Simple compaction orchestrators.
-pub mod compaction;
+pub(crate) mod compaction;

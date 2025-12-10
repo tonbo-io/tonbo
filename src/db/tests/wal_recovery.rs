@@ -65,7 +65,6 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let executor = Arc::new(TokioExecutor::default());
     let db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(build_config)
         .on_disk(root_str.clone())?
-        .create_dirs(true)
         .open_with_executor(Arc::clone(&executor))
         .await?;
 
@@ -90,7 +89,6 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
@@ -171,7 +169,6 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let mut db: DbInner<TokioFs, TokioExecutor> =
         DB::<TokioFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_builder_cfg.clone())
             .open_with_executor(Arc::clone(&executor))
             .await?
@@ -214,7 +211,6 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_builder_cfg)
             .open_with_executor(Arc::clone(&executor))
             .await?;
@@ -269,7 +265,6 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let executor = Arc::new(TokioExecutor::default());
     let db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())?
-        .create_dirs(true)
         .open_with_executor(Arc::clone(&executor))
         .await?;
 
@@ -289,7 +284,6 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
@@ -480,7 +474,6 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     let mut db: DbInner<TokioFs, TokioExecutor> =
         DB::<TokioFs, TokioExecutor>::builder(mode_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
@@ -515,7 +508,6 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
@@ -549,7 +541,6 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let executor = Arc::new(TokioExecutor::default());
     let db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())?
-        .create_dirs(true)
         .wal_segment_bytes(1)
         .wal_flush_interval(Duration::from_millis(0))
         .wal_sync_policy(WalSyncPolicy::Always)
@@ -584,7 +575,6 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_segment_bytes(1)
             .wal_flush_interval(Duration::from_millis(0))
             .wal_sync_policy(WalSyncPolicy::Always)
@@ -648,7 +638,6 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     let executor = Arc::new(TokioExecutor::default());
     let db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())?
-        .create_dirs(true)
         .open_with_executor(Arc::clone(&executor))
         .await?;
 
@@ -673,7 +662,6 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     let mut recovered: DbInner<TokioFs, TokioExecutor> =
         DB::<TokioFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();

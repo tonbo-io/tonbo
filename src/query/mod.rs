@@ -1,6 +1,9 @@
-//! Key predicate helpers built on the shared `predicate` crate.
+#![allow(dead_code)]
+//! Predicate and scan-planning helpers for Tonbo’s read path.
 //!
-//! Predicate helpers and type conversions for query planning.
+//! This module bridges user-facing predicates into the internal scan planner
+//! and stream executor. It re-exports the `predicate` crate’s surface and adds
+//! conversions for key types used in scan planning.
 
 pub(crate) mod scan;
 pub(crate) mod stream;

@@ -1,4 +1,4 @@
-#![cfg(feature = "tokio")]
+#![cfg(all(feature = "tokio", feature = "test-helpers"))]
 
 use std::{sync::Arc, time::Duration};
 

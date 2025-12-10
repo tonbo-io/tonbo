@@ -1,4 +1,4 @@
-//! Arrow `RecordBatch` key extraction helpers.
+//! Arrow `RecordBatch` key extraction into zero-copy key views.
 //!
 //! These APIs are Tonbo-specific shims that turn Arrow batches into the
 //! zero-copy key views defined under [`crate::key`]. The compile-time typed

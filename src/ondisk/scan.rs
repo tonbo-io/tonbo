@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! SSTable scan with MVCC visibility filtering.
 
 use std::{

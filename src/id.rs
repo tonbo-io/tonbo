@@ -1,3 +1,5 @@
+//! Stable identifiers for files and objects across storage backends.
+
 use std::sync::Mutex;
 
 use ulid::{Generator, Ulid};

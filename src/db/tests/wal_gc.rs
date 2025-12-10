@@ -136,7 +136,6 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let mut db: DbInner<TokioFs, TokioExecutor> =
         DB::<TokioFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_segment_bytes(512)
             .wal_flush_interval(Duration::from_millis(1))
             .wal_sync_policy(WalSyncPolicy::Disabled)
@@ -200,7 +199,6 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     // would have dropped the segment here which meant WAL replay lost data.
     let recovered = DB::<LocalFs, TokioExecutor>::builder(recovery_config)
         .on_disk(root_str.clone())?
-        .create_dirs(true)
         .wal_segment_bytes(512)
         .wal_flush_interval(Duration::from_millis(1))
         .wal_sync_policy(WalSyncPolicy::Disabled)
@@ -218,7 +216,6 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let mut db: DbInner<TokioFs, TokioExecutor> =
         DB::<TokioFs, TokioExecutor>::builder(reopen_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_segment_bytes(512)
             .wal_flush_interval(Duration::from_millis(1))
             .wal_sync_policy(WalSyncPolicy::Disabled)

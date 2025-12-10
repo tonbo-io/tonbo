@@ -21,6 +21,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Whether a background compaction worker was spawned for this DB.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn has_compaction_worker(&self) -> bool {
         self.compaction_worker.is_some()
     }

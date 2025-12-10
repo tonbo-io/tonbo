@@ -1,14 +1,15 @@
-//! SSTable skeleton definitions.
+#![allow(dead_code)]
+//! SSTable format for Tonbo’s on-disk and object-store runs (Arrow/Parquet).
 //!
-//! The goal of this module is to capture the public surface for Tonbo's
-//! on-disk runs without committing to a specific encoding or IO strategy just
-//! yet. Future patches will flesh out the concrete dynamic and typed builders,
-//! readers, and range scans using this scaffolding.
+//! SSTables are immutable, fusio-backed Parquet runs that carry:
+//! - data pages in Arrow schema order (projection-friendly),
+//! - optional delete sidecar for tombstones,
+//! - per-segment stats (min/max/nulls, row count, bytes),
+//! - target compaction level and optional PK extractor for merge planning.
 //!
-//! Design note: all SST readers/writers are expected to use fusio-backed async
-//! Parquet I/O (no std fs) to stay object-store friendly and non-blocking per
-//! `docs/overview.md`/RFC 0005/0006. Readers will stream via Parquet async
-//! reader with projection + page/index pruning; no eager whole-file loads.
+//! Writers/readers are fully async (no std fs), stream through Parquet with
+//! projection and page/index pruning, and are safe for both local disk and
+//! S3-compatible backends.
 
 use std::{convert::TryFrom, fmt, sync::Arc};
 
@@ -35,7 +36,7 @@ use parquet::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use crate::ondisk::merge::{SsTableMergeSource, SsTableMerger, SsTableStreamBatch};
+pub use crate::ondisk::merge::{SsTableMerger, SsTableStreamBatch};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
@@ -1039,6 +1040,7 @@ mod tests {
         inmem::immutable::memtable::{ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar},
         key::KeyTsViewRaw,
         mvcc::Timestamp,
+        ondisk::merge::SsTableMergeSource,
         test::build_batch,
     };
 

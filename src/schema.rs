@@ -1,4 +1,9 @@
-//! Schema builder utilities aligning with RFC 0009.
+//! Declarative schema utilities for defining primary keys and runtime layouts.
+//!
+//! Use `SchemaBuilder` to wrap an Arrow `Schema`, declare single or composite primary keys,
+//! and optionally backfill `tonbo.keys` metadata so downstream tools see the same intent.
+//! The builder validates key columns and produces the `DynModeConfig` used by `DbBuilder`,
+//! preferring Arrow metadata over ad hoc extractors for the primary key path.
 
 use std::sync::Arc;
 

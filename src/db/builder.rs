@@ -324,6 +324,32 @@ impl<FS> StorageConfig<FS> {
     }
 }
 
+/// Extension helpers for advanced WAL tuning without widening the main builder surface.
+pub mod wal_tuning {
+    use fusio::{
+        DynFs,
+        dynamic::{MaybeSend, MaybeSync},
+        fs::FsCas as FusioCas,
+    };
+
+    use super::{DbBuilder, StorageConfig, WalConfig};
+
+    /// Extension trait exposing WAL overrides for callers that need explicit control.
+    pub trait WalConfigExt<FS>: Sized {
+        /// Apply a batch of WAL overrides supplied via [`WalConfig`].
+        fn wal_config(self, overrides: WalConfig) -> Self;
+    }
+
+    impl<FS> WalConfigExt<FS> for DbBuilder<StorageConfig<FS>>
+    where
+        FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
+    {
+        fn wal_config(self, overrides: WalConfig) -> Self {
+            DbBuilder::wal_config(self, overrides)
+        }
+    }
+}
+
 /// Ensure required directories exist for storage.
 ///
 /// This creates the standard Tonbo directory layout:
@@ -379,7 +405,31 @@ where
 ///
 /// The builder enforces that callers explicitly select a storage backend
 /// (in-memory, local disk, or object storage) before the database can be
-/// materialised.
+/// materialised. Fields are intentionally private; use the fluent methods to
+/// configure storage, compaction, and durability.
+///
+/// # Example
+/// ```no_run
+/// use std::sync::Arc;
+///
+/// use arrow_schema::{DataType, Field, Schema};
+/// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
+/// use tonbo::{
+///     db::{DB, DbBuilder},
+///     schema::SchemaBuilder,
+/// };
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+///
+///     let _db: DB<InMemoryFs, TokioExecutor> = DbBuilder::from_schema_key_name(schema, "id")?
+///         .in_memory("builder-example")?
+///         .build()
+///         .await?;
+///     Ok(())
+/// }
+/// ```
 pub struct DbBuilder<S = Unconfigured> {
     mode_config: DynModeConfig,
     state: S,
@@ -825,18 +875,8 @@ impl<FS> DbBuilder<StorageConfig<FS>>
 where
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
-    /// Enable or disable provisioning of the storage layout prior to build/recovery.
-    ///
-    /// When `enable` is `true` (the default for `on_disk()`), the builder will create
-    /// the required directory structure (`wal/`, `sst/`, `manifest/`) before opening
-    /// the database.
-    #[must_use]
-    pub fn create_dirs(mut self, enable: bool) -> Self {
-        self.state.create_layout = enable;
-        self
-    }
-
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
         self.compaction_strategy = strategy;
@@ -844,6 +884,7 @@ where
     }
 
     /// Configure minor compaction (immutable flush) with a simple segment-count trigger.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn with_minor_compaction(
         mut self,
@@ -1032,6 +1073,7 @@ where
 {
     /// Configure an optional background compaction interval (current-thread Tokio only).
     /// This is a temporary opt-in; a proper scheduler/lease should replace it.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn with_compaction_interval(mut self, interval: Duration) -> Self {
         self.compaction_interval = Some(interval);
@@ -1040,6 +1082,7 @@ where
 
     /// Enable a background compaction loop on the provided executor. This is a temporary,
     /// dyn-mode-only helper; a proper scheduler/lease should replace it.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn with_compaction_loop(
         mut self,
@@ -1076,9 +1119,8 @@ where
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].
-    #[cfg(feature = "tokio")]
     #[must_use]
-    pub fn wal_config(mut self, overrides: WalConfig) -> Self {
+    pub(crate) fn wal_config(mut self, overrides: WalConfig) -> Self {
         if let Some(ref mut existing) = self.state.wal_config {
             existing.merge(overrides);
         } else if self.state.durability.is_durable() {

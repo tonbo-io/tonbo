@@ -27,8 +27,8 @@
 use std::env;
 
 use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
     db::{AwsCreds, DbBuilder, ObjectSpec, S3Spec},
-    query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 

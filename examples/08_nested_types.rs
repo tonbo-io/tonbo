@@ -41,7 +41,6 @@ struct Person {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = DbBuilder::from_schema_key_name(Person::schema(), "id")?
         .on_disk("/tmp/tonbo_nested_types")?
-        .create_dirs(true)
         .open()
         .await?;
 

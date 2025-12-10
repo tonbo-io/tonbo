@@ -286,10 +286,10 @@ pub(crate) struct StagedOverlay<'a> {
 
 /// Fluent builder for constructing scan queries.
 ///
-/// Use [`DB::scan`], [`Snapshot::scan`](crate::transaction::Snapshot::scan),
-/// or [`Transaction::scan`](crate::transaction::Transaction::scan)
-/// to create a new builder, then chain methods to configure the scan before
-/// executing with [`stream`](ScanBuilder::stream) or [`collect`](ScanBuilder::collect).
+/// Use [`crate::DB::scan`] to create a new builder, then chain methods to
+/// configure the scan before executing with [`stream`](ScanBuilder::stream) or
+/// [`collect`](ScanBuilder::collect). Transaction and snapshot scan variants
+/// wrap the same builder internally.
 ///
 /// # Scan Hierarchy
 ///
@@ -300,26 +300,50 @@ pub(crate) struct StagedOverlay<'a> {
 ///
 /// # Example
 ///
-/// ```ignore
-/// // Snapshot scan (explicit snapshot, read-only)
-/// let snapshot = db.begin_snapshot().await?;
-/// let batches = snapshot.scan(&db)
-///     .filter(predicate)
-///     .collect()
-///     .await?;
+/// ```no_run
+/// use std::sync::Arc;
 ///
-/// // DB scan (implicit snapshot)
-/// let batches = db.scan()
-///     .filter(Predicate::eq(col, value))
-///     .limit(100)
-///     .collect()
-///     .await?;
+/// use arrow_array::{Int32Array, RecordBatch, StringArray};
+/// use arrow_schema::{DataType, Field, Schema};
+/// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
+/// use tonbo::{
+///     ColumnRef, Predicate, ScalarValue,
+///     db::{DB, DbBuilder},
+///     schema::SchemaBuilder,
+/// };
 ///
-/// // Transaction scan (includes uncommitted writes)
-/// let batches = tx.scan()
-///     .filter(Predicate::eq(col, value))
-///     .collect()
-///     .await?;
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let schema = Arc::new(Schema::new(vec![
+///         Field::new("id", DataType::Utf8, false),
+///         Field::new("value", DataType::Int32, false),
+///     ]));
+///     let config = SchemaBuilder::from_schema(Arc::clone(&schema))
+///         .primary_key("id")
+///         .build()?;
+///
+///     // In-memory DB; use DbBuilder::on_disk/object_store for durable backends.
+///     let db: DB<InMemoryFs, TokioExecutor> = DbBuilder::from_schema_key_name(schema, "id")?
+///         .in_memory("scan-example")?
+///         .open_with_executor(Arc::new(TokioExecutor::default()))
+///         .await?;
+///
+///     // Seed data
+///     let batch = RecordBatch::try_new(
+///         Arc::clone(&config.schema()),
+///         vec![
+///             Arc::new(StringArray::from(vec!["a", "b"])) as _,
+///             Arc::new(Int32Array::from(vec![1, 2])) as _,
+///         ],
+///     )?;
+///     db.ingest(batch).await?;
+///
+///     // Scan with predicate + limit
+///     let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a"));
+///     let batches = db.scan().filter(pred).limit(1).collect().await?;
+///     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+///     Ok(())
+/// }
 /// ```
 pub struct ScanBuilder<'a, FS, E>
 where

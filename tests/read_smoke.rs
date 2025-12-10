@@ -3,13 +3,7 @@ use std::sync::Arc;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use tonbo::{
-    BatchesThreshold, DB,
-    key::KeyOwned,
-    mode::DynModeConfig,
-    query::{ColumnRef, Predicate, ScalarValue},
-    transaction::Transaction,
-};
+use tonbo::{ColumnRef, DB, Predicate, ScalarValue, db::DbBuilder};
 use typed_arrow_dyn::{DynCell, DynRow};
 const PACKAGE_ROWS: usize = 1024;
 
@@ -59,18 +53,15 @@ async fn make_db() -> (DB<InMemoryFs, NoopExecutor>, Arc<Schema>) {
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
     ]));
-    let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-    let db = DB::new_with_policy(
-        config,
-        Arc::new(NoopExecutor),
-        Arc::new(BatchesThreshold { batches: 1 }),
-    )
-    .await
-    .expect("db");
+    let db = DbBuilder::from_schema_key_name(schema.clone(), "id")
+        .expect("config")
+        .in_memory("read-smoke")
+        .expect("in memory config")
+        .open_with_executor(Arc::new(NoopExecutor))
+        .await
+        .expect("db");
     (db, schema)
 }
-
-type BlockingTx = Transaction<InMemoryFs, NoopExecutor>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_streams_mutable_and_immutable() {
@@ -97,7 +88,7 @@ async fn read_smoke_snapshot_honors_tombstones() {
     let (db, schema) = make_db().await;
 
     // Insert initial rows via transaction
-    let mut init_tx: BlockingTx = db.begin_transaction().await.expect("init tx");
+    let mut init_tx = db.begin_transaction().await.expect("init tx");
     init_tx
         .upsert(DynRow(vec![
             Some(DynCell::Str("user-a".into())),
@@ -113,19 +104,17 @@ async fn read_smoke_snapshot_honors_tombstones() {
     init_tx.commit().await.expect("commit init");
 
     // Start a snapshot transaction before making changes
-    let txn: BlockingTx = db.begin_transaction().await.expect("snapshot transaction");
+    let txn = db.begin_transaction().await.expect("snapshot transaction");
 
     // Update user-a and delete user-b via a new transaction
-    let mut update_tx: BlockingTx = db.begin_transaction().await.expect("update tx");
+    let mut update_tx = db.begin_transaction().await.expect("update tx");
     update_tx
         .upsert(DynRow(vec![
             Some(DynCell::Str("user-a".into())),
             Some(DynCell::I32(99)),
         ]))
         .expect("update user-a");
-    update_tx
-        .delete(KeyOwned::from("user-b"))
-        .expect("delete user-b");
+    update_tx.delete("user-b").expect("delete user-b");
     update_tx.commit().await.expect("commit updates");
 
     let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(-1i64));
@@ -408,7 +397,7 @@ async fn read_smoke_plan_scan_applies_limit() {
 
 async fn collect_rows_for_predicate(
     db: &DB<InMemoryFs, NoopExecutor>,
-    predicate: &tonbo::query::Predicate,
+    predicate: &Predicate,
 ) -> Vec<(String, i32)> {
     let batches = db
         .scan()

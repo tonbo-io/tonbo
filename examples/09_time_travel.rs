@@ -25,7 +25,6 @@ struct Product {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = DbBuilder::from_schema_key_name(Product::schema(), "id")?
         .on_disk("/tmp/tonbo_time_travel")?
-        .create_dirs(true)
         .open()
         .await?;
 

@@ -4,8 +4,8 @@
 
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
     db::{DB, DbBuilder},
-    query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 
@@ -21,7 +21,6 @@ struct Product {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = DbBuilder::from_schema_key_name(Product::schema(), "id")?
         .on_disk("/tmp/tonbo_filter_example")?
-        .create_dirs(true)
         .open()
         .await?;
 

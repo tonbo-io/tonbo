@@ -4,9 +4,8 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
-    BatchesThreshold, DB, NeverSeal,
-    db::{DbInner, WalConfig as BuilderWalConfig},
-    query::{ColumnRef, Predicate},
+    BatchesThreshold, ColumnRef, DB, NeverSeal, Predicate,
+    db::{DbInner, WalConfig as BuilderWalConfig, wal_tuning::WalConfigExt},
     wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
 };
 
@@ -129,7 +128,6 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg.clone())
             .with_minor_compaction(1, 0, 1)
             .open_with_executor(Arc::clone(&executor))
@@ -167,7 +165,6 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg)
             .open_with_executor(Arc::clone(&executor))
             .await?;
@@ -206,7 +203,6 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg.clone())
             .open_with_executor(Arc::clone(&executor))
             .await?
@@ -238,7 +234,6 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg)
             .open_with_executor(Arc::clone(&executor))
             .await?;
@@ -278,7 +273,6 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg.clone())
             .with_minor_compaction(1, 0, 10)
             .open_with_executor(Arc::clone(&executor))
@@ -325,7 +319,6 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg)
             .open_with_executor(Arc::clone(&executor))
             .await?;
@@ -374,7 +367,6 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
         let mut db: DbInner<LocalFs, TokioExecutor> =
             DB::<LocalFs, TokioExecutor>::builder(reopen_config)
                 .on_disk(root.to_string())?
-                .create_dirs(true)
                 .wal_config(wal_cfg.clone())
                 .open_with_executor(Arc::clone(&executor))
                 .await?
@@ -458,7 +450,6 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg.clone())
             .open_with_executor(Arc::clone(&executor))
             .await?
@@ -488,7 +479,6 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     let recovered: DB<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
-            .create_dirs(true)
             .wal_config(wal_cfg)
             .open_with_executor(Arc::clone(&executor))
             .await?;

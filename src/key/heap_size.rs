@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use typed_arrow_dyn::DynCell;
 
 use super::{KeyOwned, KeyRow};

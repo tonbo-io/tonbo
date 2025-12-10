@@ -1,9 +1,9 @@
-//! Transactional write scaffolding (work in progress).
+//! Transactional write path: staging, conflict detection, WAL commit, and snapshot-aware scans.
 //!
-//! The initial revision introduces the core data structures used to stage
-//! dynamic mutations before they are committed through the WAL. Follow-up
-//! patches will wire these pieces into `DB::begin_transaction`, WAL plumbing,
-//! and recovery.
+//! This module implements optimistic transactions for the dynamic layout: stage mutations,
+//! detect conflicts against mutable/immutable state, publish through the WAL, and expose
+//! snapshot-bound scans with read-your-writes semantics. It integrates with the DB’s MVCC
+//! clock and manifest/WAL plumbing for durable commits.
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 

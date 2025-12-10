@@ -1,8 +1,11 @@
-//! Asynchronous write-ahead log framework scaffolding.
+#![allow(dead_code)]
+//! Async write-ahead log (fusio-backed) with framing, replay, retention, and metrics.
 //!
-//! This module exposes the public API surface described in RFC 0002 and acts
-//! as the coordination layer between ingest, the frame encoder, storage
-//! backends, and recovery. Implementations will live in the sibling modules.
+//! The WAL coordinates ingest, frame encoding, storage backends, and recovery for Tonbo.
+//! Frames are written via fusio-backed async I/O (disk or S3-compatible), rotated with size/time
+//! policies, tracked in `state.json`, and replayed with configurable recovery modes. Companion
+//! modules handle encoding (`frame`), storage backends (`storage`), state (`state`), metrics, and
+//! manifest integration (`manifest_ext`).
 
 use std::{
     fmt,

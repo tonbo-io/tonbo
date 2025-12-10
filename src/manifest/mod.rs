@@ -1,4 +1,4 @@
-//! Manifest integration layered on top of `fusio-manifest`.
+//! Manifest coordination atop `fusio-manifest` for versioned metadata.
 //!
 //! Internals are generic, but we expose concrete helpers for the supported
 //! filesystem backends instead of a new abstraction layer.

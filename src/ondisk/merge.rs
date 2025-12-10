@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Merge pipeline for SSTables.
 //!
 //! This module hosts the streaming merge implementation used by major

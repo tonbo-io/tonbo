@@ -2,10 +2,7 @@
 //!
 //! Run: cargo run --example 02_transaction
 
-use tonbo::{
-    db::DbBuilder,
-    query::{ColumnRef, Predicate},
-};
+use tonbo::{ColumnRef, Predicate, db::DbBuilder};
 use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 
 #[derive(Record)]
@@ -19,7 +16,6 @@ struct User {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
         .on_disk("/tmp/tonbo_tx_example")?
-        .create_dirs(true)
         .open()
         .await?;
 

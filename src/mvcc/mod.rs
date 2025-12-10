@@ -1,4 +1,4 @@
-//! MVCC core utilities (timestamps, read views, and commit clock helpers).
+//! MVCC timestamps, read visibility, and commit clock helpers.
 
 use std::fmt;
 

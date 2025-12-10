@@ -5,10 +5,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
-use tonbo::{
-    db::DbBuilder,
-    query::{ColumnRef, Predicate, ScalarValue},
-};
+use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
 use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 
 #[derive(Record)]
@@ -24,7 +21,6 @@ struct Order {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = DbBuilder::from_schema_key_name(Order::schema(), "id")?
         .on_disk("/tmp/tonbo_scan_options")?
-        .create_dirs(true)
         .open()
         .await?;
 

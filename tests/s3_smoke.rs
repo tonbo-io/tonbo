@@ -12,7 +12,7 @@ use arrow_array::{Array, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field};
 use fusio::{executor::tokio::TokioExecutor, impls::remotes::aws::fs::AmazonS3};
 use tonbo::{
-    db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
+    db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec, wal_tuning::WalConfigExt},
     wal::{WalConfig, WalExt, WalSyncPolicy, frame::WalEvent, replay::Replayer},
 };
 

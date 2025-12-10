@@ -1,7 +1,8 @@
-//! Lightweight compaction orchestrators and planners.
+//! Compaction coordinators and planners for merging SSTables across all backends.
 //!
 //! These helpers sit on top of the in-memory staging surfaces and decide when
-//! to drain immutable runs into on-disk SSTables.
+//! to drain immutable runs into SSTables, whether those SSTables live on local
+//! disk or object storage (S3-compatible) via Fusio-backed Parquet writers.
 
 /// Compaction driver for orchestrating compaction operations.
 mod driver;
