@@ -306,8 +306,10 @@ pub(crate) struct StagedOverlay<'a> {
 /// use arrow_array::{Int32Array, RecordBatch, StringArray};
 /// use arrow_schema::{DataType, Field, Schema};
 /// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
-/// use tonbo::db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue};
-/// use tonbo::schema::SchemaBuilder;
+/// use tonbo::{
+///     db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue},
+///     schema::SchemaBuilder,
+/// };
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
