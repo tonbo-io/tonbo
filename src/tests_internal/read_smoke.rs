@@ -5,7 +5,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::{ColumnRef, DB, Predicate, ScalarValue, db::DbBuilder};
+use crate::db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue};
 const PACKAGE_ROWS: usize = 1024;
 
 /// Helper to extract (id, value) pairs from scan result batches.

@@ -6,7 +6,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 
-use crate::{BatchesThreshold, ColumnRef, Predicate, db::DB};
+use crate::db::{BatchesThreshold, ColumnRef, DB, Predicate};
 
 #[path = "common/mod.rs"]
 mod common;

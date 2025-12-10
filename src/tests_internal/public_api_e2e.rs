@@ -7,9 +7,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 
 use crate::{
-    ColumnRef, DB, NeverSeal, Predicate, ScalarValue,
-    db::DbBuilder,
-    inmem::policy::BatchesThreshold,
+    db::{BatchesThreshold, ColumnRef, DB, DbBuilder, NeverSeal, Predicate, ScalarValue},
     tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
     wal::{WalExt, WalSyncPolicy},
 };

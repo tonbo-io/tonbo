@@ -7,7 +7,7 @@ use arrow_schema::{DataType, Field};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
 
 use crate::{
-    BatchesThreshold, ColumnRef, Predicate,
+    db::{BatchesThreshold, ColumnRef, Predicate},
     test_support::{
         TestFsWalStateStore as FsWalStateStore, TestSsTableConfig as SsTableConfig,
         TestSsTableDescriptor as SsTableDescriptor, TestSsTableId as SsTableId,

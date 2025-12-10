@@ -6,7 +6,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{executor::NoopExecutor, impls::mem::fs::InMemoryFs};
 
-use crate::{BatchesThreshold, ColumnRef, Predicate, WalSyncPolicy, db::DB};
+use crate::db::{BatchesThreshold, ColumnRef, DB, Predicate, WalSyncPolicy};
 
 #[path = "common/mod.rs"]
 mod common;

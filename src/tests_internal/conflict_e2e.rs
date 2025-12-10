@@ -6,7 +6,7 @@ use arrow_schema::{DataType, Field};
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::{ColumnRef, Predicate, db::DB};
+use crate::db::{ColumnRef, DB, Predicate};
 
 #[path = "common/mod.rs"]
 mod common;

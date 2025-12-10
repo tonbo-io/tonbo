@@ -8,8 +8,7 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use futures::TryStreamExt;
 
 use crate::{
-    BatchesThreshold, ColumnRef, NeverSeal, Predicate, ScalarValue,
-    db::DB,
+    db::{BatchesThreshold, ColumnRef, DB, NeverSeal, Predicate, ScalarValue},
     test_support::{execute_scan_plan, plan_scan_snapshot},
 };
 

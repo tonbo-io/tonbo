@@ -5,9 +5,11 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
 
 use crate::{
-    BatchesThreshold, ColumnRef, DB, NeverSeal, Predicate,
-    db::{DbInner, WalConfig as BuilderWalConfig},
-    wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
+    db::{
+        BatchesThreshold, ColumnRef, DB, DbInner, NeverSeal, Predicate,
+        WalConfig as BuilderWalConfig, WalSyncPolicy,
+    },
+    wal::{WalExt, state::FsWalStateStore},
 };
 
 #[path = "common/mod.rs"]

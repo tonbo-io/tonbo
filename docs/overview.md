@@ -193,10 +193,7 @@ When low-level tweaks are required (e.g., forcing synchronous fsyncs for benchma
 
 ```rust,no_run
 use std::time::Duration;
-use tonbo::{
-    db::{DB, DbBuildError, DbBuilder, DynMode, WalConfig},
-    wal::WalSyncPolicy,
-};
+use tonbo::db::{DB, DbBuildError, DbBuilder, DynMode, WalConfig, WalSyncPolicy};
 
 async fn bootstrap(schema: arrow_schema::SchemaRef) -> Result<(), DbBuildError> {
     let overrides = WalConfig::default()
@@ -384,7 +381,7 @@ Public API (dynamic mode today):
 ```rust,no_run
 use std::sync::Arc;
 use fusio::executor::BlockingExecutor;
-use tonbo::{CommitAckMode, DB, DbBuilder, DynMode, Transaction};
+use tonbo::db::{CommitAckMode, DB, DbBuilder, DynMode, Transaction};
 use tonbo::key::KeyOwned;
 
 async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {

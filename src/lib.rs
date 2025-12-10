@@ -24,7 +24,7 @@
 //!
 //! use arrow_array::{Int64Array, RecordBatch, StringArray};
 //! use arrow_schema::{DataType, Field, Schema};
-//! use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
+//! use tonbo::db::{ColumnRef, DbBuilder, Predicate, ScalarValue};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,11 +60,13 @@
 //! }
 //! ```
 //!
-//! For a more ergonomic API, use [`typed_arrow`]'s `#[derive(Record)]` (re-exported by default).
+//! For a more ergonomic API, use [`typed_arrow`]'s `#[derive(Record)]` via `tonbo::prelude::*`
+//! (`typed-arrow` feature is enabled by default). Mark your primary key field with
+//! `#[metadata(k = "tonbo.key", v = "true")]`:
 //! Mark your primary key field with `#[metadata(k = "tonbo.key", v = "true")]`:
 //!
 //! ```rust,ignore
-//! use tonbo::{db::DbBuilder, typed_arrow::{Record, prelude::*, schema::SchemaMeta}};
+//! use tonbo::prelude::*;
 //!
 //! #[derive(Record)]
 //! struct User {
@@ -109,11 +111,12 @@
 //!
 //! ## Schema Definition
 //!
-//! Use the `#[derive(Record)]` macro from [`typed_arrow`] to define your schema.
+//! Use the `#[derive(Record)]` macro from [`typed_arrow`] (available via `tonbo::prelude::*`) to
+//! define your schema.
 //! Mark primary key fields with `#[metadata(k = "tonbo.key", v = "true")]`:
 //!
 //! ```rust,ignore
-//! use tonbo::typed_arrow::Record;
+//! use tonbo::prelude::Record;
 //!
 //! #[derive(Record)]
 //! struct Event {
@@ -154,7 +157,7 @@
 //! Build query filters using [`Predicate`]:
 //!
 //! ```rust,ignore
-//! use tonbo::{ColumnRef, Predicate, ScalarValue};
+//! use tonbo::db::{ColumnRef, Predicate, ScalarValue};
 //!
 //! // Equality
 //! let filter = Predicate::eq(ColumnRef::new("status"), ScalarValue::from("active"));
@@ -174,7 +177,7 @@
 //! Tonbo uses feature flags to configure runtime and storage backends:
 //!
 //! - **`tokio`** *(default)* - Tokio async runtime with local filesystem support
-//! - **`typed-arrow`** *(default)* - Re-exports [`typed_arrow`] for `#[derive(Record)]` schemas
+//! - **`typed-arrow`** *(default)* - Provides [`typed_arrow`] derive helpers via `tonbo::prelude`
 //! - **`web`** - WebAssembly support for browsers and edge runtimes
 //! - **`web-opfs`** - Browser Origin Private File System storage (requires `web`)
 //!
@@ -242,22 +245,6 @@ pub(crate) mod mutation;
 /// Convenience re-exports for common usage.
 pub mod prelude;
 pub mod schema;
-
-// Re-export the unified DB so users can do `tonbo::DB`.
-// Re-export in-memory sealing policy helpers for embedders that tweak durability.
-/// Re-export `typed-arrow` for ergonomic schema definition via `#[derive(Record)]`.
-///
-/// Enabled by the `typed-arrow` feature (on by default).
-#[cfg(feature = "typed-arrow")]
-pub use typed_arrow;
-
-pub use crate::{
-    db::{
-        ColumnRef, ComparisonOp, DB, Operand, Predicate, PredicateNode, ScalarValue, WalSyncPolicy,
-    },
-    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
-    transaction::CommitAckMode,
-};
 
 #[cfg(test)]
 /// Test helper re-exports for crate-internal tests.

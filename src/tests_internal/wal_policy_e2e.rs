@@ -8,7 +8,7 @@ use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as 
 use tokio::time::sleep;
 
 use crate::{
-    BatchesThreshold, WalSyncPolicy,
+    db::{BatchesThreshold, WalSyncPolicy},
     test_support::{TestFsWalStateStore, TestWalExt as WalExt},
 };
 
