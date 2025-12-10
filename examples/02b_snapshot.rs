@@ -2,11 +2,7 @@
 //!
 //! Run: cargo run --example 02b_snapshot
 
-use tonbo::{
-    ColumnRef, Predicate,
-    db::DbBuilder,
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 #[derive(Record)]
 struct User {

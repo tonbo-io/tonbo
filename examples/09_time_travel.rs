@@ -11,10 +11,7 @@
 //!
 //! Run: cargo run --example 09_time_travel
 
-use tonbo::{
-    db::DbBuilder,
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 #[derive(Record)]
 struct Product {

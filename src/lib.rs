@@ -239,6 +239,8 @@ mod inmem;
 pub(crate) mod key;
 pub(crate) mod mode;
 pub(crate) mod mutation;
+/// Convenience re-exports for common usage.
+pub mod prelude;
 pub mod schema;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
