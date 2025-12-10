@@ -9,7 +9,8 @@ members = [".", "predicate"]
 
 
 [features]
-default = ["tokio"]
+default = ["tokio", "typed-arrow"]
+typed-arrow = ["dep:typed-arrow"]
 tokio = [
     "dep:tokio",
     "fusio-manifest/tokio",
@@ -74,8 +75,14 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ], optional = true }
+typed-arrow = { version = "0.5.1", features = ["ext-hooks"], optional = true }
 typed-arrow-dyn = { version = "0.0.6", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Ensure getrandom picks the JS backend via cfg flag when building wasm32-unknown-unknown.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+js-sys = "0.3"
 
 
 [dev-dependencies]
@@ -94,6 +101,11 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
+
 [[test]]
 name = "read_smoke"
 path = "tests/read_smoke.rs"
@@ -109,12 +121,18 @@ name = "s3_smoke"
 path = "tests/s3_smoke.rs"
 required-features = ["tokio"]
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-wasm-bindgen-test = "0.3"
+[[example]]
+name = "10a_dynamic_basic"
+path = "examples/10_dynamic/10a_dynamic_basic.rs"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-# Ensure getrandom picks the JS backend via cfg flag when building wasm32-unknown-unknown.
-getrandom = { version = "0.3", features = ["wasm_js"] }
-js-sys = "0.3"
+[[example]]
+name = "10b_dynamic_metadata"
+path = "examples/10_dynamic/10b_dynamic_metadata.rs"
+
+[[example]]
+name = "10c_dynamic_composite"
+path = "examples/10_dynamic/10c_dynamic_composite.rs"
+
+[[example]]
+name = "10d_dynamic_transaction"
+path = "examples/10_dynamic/10d_dynamic_transaction.rs"
