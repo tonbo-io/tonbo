@@ -260,7 +260,7 @@ where
     }
 
     /// Begin building a scan query with fluent API.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
         ScanBuilder::new(self)
     }

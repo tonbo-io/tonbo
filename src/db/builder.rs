@@ -903,7 +903,7 @@ where
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[must_use]
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
         self.compaction_strategy = strategy;
@@ -911,7 +911,7 @@ where
     }
 
     /// Configure minor compaction (immutable flush) with a simple segment-count trigger.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[must_use]
     pub fn with_minor_compaction(
         mut self,
@@ -1100,7 +1100,7 @@ where
 {
     /// Configure an optional background compaction interval (current-thread Tokio only).
     /// This is a temporary opt-in; a proper scheduler/lease should replace it.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[must_use]
     pub fn with_compaction_interval(mut self, interval: Duration) -> Self {
         self.compaction_interval = Some(interval);
@@ -1109,7 +1109,7 @@ where
 
     /// Enable a background compaction loop on the provided executor. This is a temporary,
     /// dyn-mode-only helper; a proper scheduler/lease should replace it.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[must_use]
     pub fn with_compaction_loop(
         mut self,

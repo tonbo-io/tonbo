@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "${ROOT_DIR}"
 
-HOOK_NAME="lotus-agent pre-commit"
+HOOK_NAME="tonbo pre-commit"
+S3_ENV_SCRIPT="${ROOT_DIR}/tests/s3_localstack_env.sh"
 
 log() {
   echo "[${HOOK_NAME}] $1"
@@ -47,5 +48,16 @@ run_step "$FMT_CHECK_CMD"
 run_step "$CLIPPY_CMD"
 run_step "$BUILD_CMD"
 run_step "$TEST_CMD"
+
+log "bootstrap LocalStack (if available) for S3-backed public_api_e2e"
+if source "${S3_ENV_SCRIPT}"; then
+  run_step "cargo test public_api_e2e:: -- --nocapture"
+  if [ "${TONBO_LOCALSTACK_STARTED_BY_SCRIPT:-0}" = "1" ] && command -v docker >/dev/null 2>&1; then
+    docker rm -f "${TONBO_LOCALSTACK_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+else
+  log "LocalStack not available; running public_api_e2e (local only)"
+  run_step "cargo test public_api_e2e:: -- --nocapture"
+fi
 
 exit 0

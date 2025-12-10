@@ -260,7 +260,14 @@ pub use crate::{
 };
 
 #[cfg(test)]
-mod test;
+/// Test helper re-exports for crate-internal tests.
+pub mod test {
+    pub use crate::test_support::*;
+}
+#[cfg(test)]
+pub mod test_support;
+#[cfg(test)]
+mod tests_internal;
 
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;

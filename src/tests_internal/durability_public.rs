@@ -3,9 +3,10 @@ use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
-use tonbo::{
+
+use crate::{
     BatchesThreshold, ColumnRef, DB, NeverSeal, Predicate,
-    db::{DbInner, WalConfig as BuilderWalConfig, wal_tuning::WalConfigExt},
+    db::{DbInner, WalConfig as BuilderWalConfig},
     wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
 };
 
