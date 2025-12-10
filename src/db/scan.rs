@@ -286,7 +286,7 @@ pub(crate) struct StagedOverlay<'a> {
 
 /// Fluent builder for constructing scan queries.
 ///
-/// Use [`crate::DB::scan`] to create a new builder, then chain methods to
+/// Use [`crate::db::DB::scan`] to create a new builder, then chain methods to
 /// configure the scan before executing with [`stream`](ScanBuilder::stream) or
 /// [`collect`](ScanBuilder::collect). Transaction and snapshot scan variants
 /// wrap the same builder internally.

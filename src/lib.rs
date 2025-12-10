@@ -146,7 +146,7 @@
 //! - **[`DbBuilder::from_schema`](db::DbBuilder::from_schema)** - Create DB with auto-detected key
 //!   from metadata
 //! - **[`DbBuilder`](db::DbBuilder)** - Configure and open a database
-//! - **[`DB`]** - The main database handle for reads and writes
+//! - **[`DB`](db::DB)** - The main database handle for reads and writes
 //! - **[`DB::ingest`](db::DB::ingest)** - Batch insert records
 //! - **[`DB::scan`](db::DB::scan)** - Query with filters and projections
 //! - **[`DB::begin_transaction`](db::DB::begin_transaction)** - MVCC transactions with
@@ -154,7 +154,7 @@
 //!
 //! ## Predicates
 //!
-//! Build query filters using [`Predicate`]:
+//! Build query filters using [`Predicate`](db::Predicate):
 //!
 //! ```rust,ignore
 //! use tonbo::db::{ColumnRef, Predicate, ScalarValue};
