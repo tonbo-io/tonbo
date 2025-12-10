@@ -859,6 +859,7 @@ where
         self
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn build_minor_compaction_state(
         &self,
         layout: &StorageLayout<FS>,

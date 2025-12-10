@@ -1,25 +1,22 @@
 //! Persistence helpers for `wal/state.json`.
 
-use std::{fmt, sync::Arc};
+use std::{fmt, pin::Pin, sync::Arc};
 
 use fusio::{
     Error as FusioError,
-    dynamic::{MaybeSend, MaybeSync},
+    dynamic::{MaybeSend, MaybeSendFuture, MaybeSync},
     fs::{CasCondition, FsCas},
     path::{Path, PathPart},
 };
-#[cfg(not(target_arch = "wasm32"))]
-use futures::future::BoxFuture;
-#[cfg(target_arch = "wasm32")]
-use futures::future::LocalBoxFuture as BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use super::{WalError, WalResult};
 use crate::{id::FileId, mvcc::Timestamp};
 
 const STATE_FILE_NAME: &str = "state.json";
-type WalStateLoadFuture<'a> = BoxFuture<'a, WalResult<Option<(Vec<u8>, String)>>>;
-type WalStatePutFuture<'a> = BoxFuture<'a, WalResult<String>>;
+type WalStateLoadFuture<'a> =
+    Pin<Box<dyn MaybeSendFuture<Output = WalResult<Option<(Vec<u8>, String)>>> + 'a>>;
+type WalStatePutFuture<'a> = Pin<Box<dyn MaybeSendFuture<Output = WalResult<String>> + 'a>>;
 
 /// Serialized WAL metadata persisted alongside segments in `wal/state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

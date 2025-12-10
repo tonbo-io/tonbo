@@ -23,100 +23,72 @@
 Tonbo is an embedded database for serverless data-intensive applications.
 - Arrow-native schemas with rich, typed structures
 - Stores data as Parquet directly on object storage
-- Fully asynchronouse and can run in lots of runtimes: browsers, edge functions, or inside other databases
+- Fully asynchronous and can run in lots of runtimes: browsers, edge functions, or inside other databases
 
 No server process to manage. Each database is just a manifest on S3, adding more is trivial.
 
 ## Quick Start
 
-```bash
-cargo add tonbo typed-arrow tokio --features tonbo/tokio
-```
-
 ```rust
-use tonbo::{
-    db::DbBuilder,
-    query::{ColumnRef, Predicate, ScalarValue},
-};
-use typed_arrow::{
-    Record,
-    prelude::*,
-    schema::{BuildRows, SchemaMeta},
-};
-
-// 1. Define your schema as a Rust struct
-//    The `Record` derive macro generates Arrow schema automatically
-//    Rust types map to Arrow types: String -> Utf8, Option<i64> -> nullable Int64
 #[derive(Record)]
-struct User {
-    id: String,         // primary key
-    name: String,
-    score: Option<i64>, // nullable field
-}
+struct User { id: String, name: String, age: i64 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 2. Open database with the schema
-    //    `from_schema_key_name` specifies which field is the primary key
-    //    `.on_disk()` stores data locally; use `.on_s3()` for object storage
-    let db = DbBuilder::from_schema_key_name(<User as SchemaMeta>::schema(), "id")?
-        .on_disk("/tmp/tonbo_example")?
-        .create_dirs(true)
-        .open()
-        .await?;
+// Open database on local disk or S3
+let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
+    .on_disk("/tmp/users")?
+    .open().await?;
 
-    // 3. Insert data within a transaction
-    //    Tonbo uses Arrow RecordBatch for efficient columnar storage
-    let mut tx = db.begin_transaction().await?;
-    let users = vec![
-        User { id: "u1".into(), name: "Alice".into(), score: Some(100) },
-        User { id: "u2".into(), name: "Bob".into(), score: Some(85) },
-    ];
-    // Convert Rust structs to Arrow RecordBatch
-    let mut builders = User::new_builders(users.len());
-    builders.append_rows(users);
-    tx.upsert_batch(&builders.finish().into_record_batch())?;
-    tx.commit().await?;
+// Insert
+db.ingest(users.into_record_batch()).await?;
 
-    // 4. Query with predicate
-    //    Filter data by conditions
-    let predicate = Predicate::gt(ColumnRef::new("score"), ScalarValue::from(90_i64));
-    let batches = db.scan().filter(predicate).collect().await?;
-
-    // 5. Read results as typed views (zero-copy)
-    for batch in &batches {
-        for user in batch.iter_views::<User>()?.try_flatten()? {
-            println!("{}: {} (score: {:?})", user.id, user.name, user.score);
-        }
-    }
-    Ok(())
-}
+// Query
+let batches = db.scan()
+    .filter(Predicate::gt(col("age"), 18))
+    .collect().await?;
 ```
+
+## Installation
+
+```bash
+cargo add tonbo typed-arrow tokio
+```
+
+## Examples
+
+Run with `cargo run --example <name>`:
+
+- `01_basic`: Define schema, insert, and query in 30 lines
+- `02_transaction`: MVCC transactions with upsert, delete, and read-your-writes
+- `02b_snapshot`: Consistent point-in-time reads while writes continue
+- `03_filter`: Predicates: eq, gt, in, is_null, and, or, not
+- `04_s3`: Store Parquet files on S3/R2/MinIO with zero server config
+- `05_scan_options`: Projection pushdown reads only the columns you need
+- `06_composite_key`: Multi-column keys for time-series and partitioned data
+- `07_streaming`: Process millions of rows without loading into memory
+- `08_nested_types`: Deep struct nesting + Lists stored as Arrow StructArray
+- `09_time_travel`: Query historical snapshots via MVCC timestamps
+
+## Documentation
+
+- **User Guide**: [tonbo.io/docs](https://tonbo.io/docs): tutorials and concepts
+- **API Reference**: [docs.rs/tonbo](https://docs.rs/tonbo): full Rust API documentation
+- **RFCs**: [docs/rfcs/](./docs/rfcs/): design documents for contributors
 
 ## Features
 
 **Storage**
 - [x] Parquet files on object storage (S3, R2) or local filesystem
-- [x] LSM-tree with leveled compaction
 - [x] Manifest-driven coordination (CAS commits, no server needed)
-- [x] Write-ahead log for durability
+- [ ] Remote compaction (offload to serverless functions)
+- [ ] Branching (git-like fork and merge for datasets)
+- [ ] Time-window compaction strategy
 
-**Schema & Data**
+**Schema & Query**
 - [x] Arrow-native schemas (`#[derive(Record)]` or dynamic `Schema`)
-- [x] Rich types: strings, integers, floats, timestamps, nested structs
-- [x] Composite primary keys
-- [x] Nullable fields
-
-**Query**
 - [x] Projection pushdown (read only needed columns)
-- [x] Two-phase read: plan (prune) → execute (stream)
 - [x] Zero-copy reads via Arrow RecordBatch
 - [ ] Filter pushdown (predicates evaluated at storage layer)
-
-**Transactions**
-- [x] MVCC with snapshot isolation
-- [x] Optimistic transactions (begin, upsert, delete, commit)
-- [x] Read-your-own-writes within a transaction
+- [ ] More filter / projection / limit / order-by pushdown
 
 **Backends**
 - [x] Local filesystem
@@ -126,20 +98,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 **Runtime**
 - [x] Async-first (Tokio)
 - [x] Edge runtimes (Deno, Cloudflare Workers)
-- [ ] WebAssembly
-- [ ] Python bindings
-- [ ] JavaScript/TypeScript SDK
+- [x] WebAssembly
+- [ ] io_uring
+- [ ] Python async bindings
+- [ ] JavaScript/TypeScript async bindings
 
 **Integrations**
 - [ ] DataFusion TableProvider
 - [ ] Postgres Foreign Data Wrapper
-
-## Documentation
-
-- **User Guide**: [tonbo.io/docs](https://tonbo.io/docs) (coming soon)
-- **API Reference**: [docs.rs/tonbo](https://docs.rs/tonbo) (coming soon)
-- **Examples**: [examples/](./examples/) — runnable code for common use cases
-- **RFCs**: [docs/rfcs/](./docs/rfcs/) — design documents for contributors
 
 ## License
 
