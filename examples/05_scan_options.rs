@@ -5,11 +5,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::DbBuilder,
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 #[derive(Record)]
 struct Order {

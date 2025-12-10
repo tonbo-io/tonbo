@@ -3,10 +3,7 @@
 use std::sync::Arc;
 
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::{DB, DbBuilder},
-};
+use tonbo::prelude::*;
 use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},

@@ -2,10 +2,7 @@
 //!
 //! Run: cargo run --example 08_nested_types
 
-use tonbo::{
-    db::DbBuilder,
-    typed_arrow::{Record, bridge::List, prelude::*, schema::SchemaMeta},
-};
+use tonbo::{prelude::*, typed_arrow::bridge::List};
 
 // Level 1: Geo coordinates (innermost)
 #[derive(Record, Clone)]

@@ -3,11 +3,7 @@
 //! Run: cargo run --example 07_streaming
 
 use futures::StreamExt;
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::DbBuilder,
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 #[derive(Record)]
 struct LogEntry {

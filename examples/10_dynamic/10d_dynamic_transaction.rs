@@ -2,10 +2,7 @@
 
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use futures::StreamExt;
-use tonbo::{
-    ColumnRef, CommitAckMode, Predicate, ScalarValue,
-    db::{DB, DbBuilder},
-};
+use tonbo::prelude::*;
 use typed_arrow::{
     Record,
     arrow_array::{Int32Array, StringArray},

@@ -3,11 +3,7 @@
 //! Run: cargo run --example 03_filter
 
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::{DB, DbBuilder},
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 #[derive(Record)]
 struct Product {

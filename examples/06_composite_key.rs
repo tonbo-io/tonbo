@@ -2,11 +2,7 @@
 //!
 //! Run: cargo run --example 06_composite_key
 
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::DbBuilder,
-    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
-};
+use tonbo::prelude::*;
 
 // Define schema with composite key: (device_id, timestamp)
 // Use ordinal values in metadata for composite key ordering

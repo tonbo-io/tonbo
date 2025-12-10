@@ -3,10 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use tonbo::{
-    ColumnRef, Predicate, ScalarValue,
-    db::{DB, DbBuilder},
-};
+use tonbo::prelude::*;
 use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
