@@ -4,7 +4,7 @@ use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use futures::{TryStreamExt, executor::block_on};
-use predicate::{ColumnRef, Predicate};
+use tonbo_predicate::{ColumnRef, Predicate};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{

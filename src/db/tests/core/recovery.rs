@@ -15,7 +15,7 @@ use fusio::{
     path::{Path, PathPart},
 };
 use futures::{TryStreamExt, executor::block_on};
-use predicate::{ColumnRef, Predicate, ScalarValue};
+use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{

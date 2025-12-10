@@ -10,7 +10,9 @@ pub(crate) mod stream;
 
 use std::convert::TryFrom;
 
-pub use predicate::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue};
+pub use tonbo_predicate::{
+    ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue,
+};
 
 use crate::key::KeyOwned;
 

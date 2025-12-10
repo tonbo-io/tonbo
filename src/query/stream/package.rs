@@ -12,10 +12,10 @@ use arrow_schema::SchemaRef;
 use fusio::executor::Executor;
 use futures::Stream;
 use pin_project_lite::pin_project;
-use predicate::{
+use thiserror::Error;
+use tonbo_predicate::{
     ComparisonOp, Operand, Predicate, PredicateNode, PredicateVisitor, ScalarValue, VisitOutcome,
 };
-use thiserror::Error;
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
 use crate::query::stream::{StreamError, merge::MergeStream};

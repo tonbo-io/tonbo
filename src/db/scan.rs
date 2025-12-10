@@ -4,7 +4,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
 use futures::{Stream, StreamExt, TryStreamExt, stream};
-use predicate::Predicate;
+use tonbo_predicate::Predicate;
 use typed_arrow_dyn::DynRow;
 
 use crate::{

@@ -2,7 +2,11 @@
 edition = "2024"
 name = "tonbo"
 resolver = "2"
-version = "0.1.0"
+version = "0.4.0-a0"
+description = "Embedded database for serverless and edge runtimes, storing data as Parquet on S3"
+license = "Apache-2.0"
+repository = "https://github.com/tonbo-io/tonbo"
+readme = "README.md"
 
 [workspace]
 members = [".", "predicate"]
@@ -10,7 +14,6 @@ members = [".", "predicate"]
 
 [features]
 default = ["tokio", "typed-arrow"]
-typed-arrow = ["dep:typed-arrow"]
 tokio = [
     "dep:tokio",
     "fusio-manifest/tokio",
@@ -19,6 +22,7 @@ tokio = [
     "fusio/tokio",
     "fusio/tokio-http",
 ]
+typed-arrow = ["dep:typed-arrow"]
 # Web/wasm build using Fusio's WebExecutor and wasm-http client stack.
 web = [
     "fusio-manifest/web",
@@ -62,7 +66,6 @@ parquet = { version = "56.2.0", default-features = false, features = [
     "zstd",
 ] }
 pin-project-lite = "0.2"
-predicate = { version = "0.1.0", path = "predicate" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -75,6 +78,7 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ], optional = true }
+tonbo-predicate = { version = "0.1.0", path = "predicate" }
 typed-arrow = { version = "0.5.1", features = ["ext-hooks"], optional = true }
 typed-arrow-dyn = { version = "0.0.6", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }

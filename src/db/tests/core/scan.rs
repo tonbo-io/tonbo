@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use predicate::{ColumnRef, Predicate, ScalarValue};
+use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{
