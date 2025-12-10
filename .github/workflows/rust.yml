@@ -95,20 +95,30 @@ jobs:
     name: e2e (real S3)
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.TONBO_S3_BUCKET != '' && vars.TONBO_S3_REGION != '' && secrets.AWS_ROLE_ARN != '' }}
+    if: ${{ vars.TONBO_S3_BUCKET != '' && vars.TONBO_S3_REGION != '' }}
     permissions:
       id-token: write
       contents: read
+    env:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if AWS_ROLE_ARN not configured
+        if: ${{ env.AWS_ROLE_ARN == '' }}
+        run: |
+          echo "AWS_ROLE_ARN not configured; skipping e2e-s3-real job."
+          exit 0
+
       - name: Configure AWS (OIDC)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ vars.TONBO_S3_REGION }}
 
       - name: Ensure bucket exists
+        if: ${{ env.AWS_ROLE_ARN != '' }}
         run: |
           if [ "${{ vars.TONBO_S3_REGION }}" = "us-east-1" ]; then
             aws s3api create-bucket --bucket "${{ vars.TONBO_S3_BUCKET }}" || true
@@ -125,6 +135,7 @@ jobs:
           cache-on-failure: false
 
       - name: Run public API e2e (real S3)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
         env:
           TONBO_S3_BUCKET: ${{ vars.TONBO_S3_BUCKET }}
           TONBO_S3_REGION: ${{ vars.TONBO_S3_REGION }}
