@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use arrow_schema::{Schema, SchemaRef};
-use predicate::{Operand, Predicate, PredicateNode};
+use tonbo_predicate::{Operand, Predicate, PredicateNode};
 
 use crate::{
     extractor::KeyExtractError,

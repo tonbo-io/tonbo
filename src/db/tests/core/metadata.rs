@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use predicate::{ColumnRef, Predicate, ScalarValue};
+use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{db::DB, mode::DynModeConfig, test::build_batch};

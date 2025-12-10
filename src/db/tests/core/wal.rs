@@ -13,8 +13,8 @@ use futures::{
     StreamExt, TryStreamExt,
     channel::{mpsc, oneshot as futures_oneshot},
 };
-use predicate::{ColumnRef, Predicate};
 use tokio::sync::{Mutex, oneshot};
+use tonbo_predicate::{ColumnRef, Predicate};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use super::common::workspace_temp_dir;

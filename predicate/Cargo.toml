@@ -1,7 +1,11 @@
 [package]
 edition = "2024"
-name = "predicate"
+name = "tonbo-predicate"
 version = "0.1.0"
+description = "Predicate evaluation for Tonbo embedded database"
+license = "Apache-2.0"
+repository = "https://github.com/tonbo-io/tonbo"
+readme = "../README.md"
 
 [lib]
 path = "src/lib.rs"
@@ -11,6 +15,4 @@ default = []
 
 [dependencies]
 roaring = "0.11"
-typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package = "typed-arrow-dyn", features = [
-    "serde",
-] }
+typed-arrow-dyn = { version = "0.0.6", features = ["serde"] }
