@@ -5,11 +5,15 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
-use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
 #[derive(Record)]
 struct Order {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: String,
     customer: String,
     product: String,
@@ -19,7 +23,7 @@ struct Order {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DbBuilder::from_schema_key_name(Order::schema(), "id")?
+    let db = DbBuilder::from_schema(Order::schema())?
         .on_disk("/tmp/tonbo_scan_options")?
         .open()
         .await?;

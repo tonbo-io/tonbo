@@ -29,11 +29,18 @@ No server process to manage. Each database is just a manifest on S3, adding more
 ## Quick Start
 
 ```rust
-#[derive(Record)]
-struct User { id: String, name: String, age: i64 }
+use tonbo::{db::DbBuilder, typed_arrow::{Record, schema::SchemaMeta}};
 
-// Open database on local disk or S3
-let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
+#[derive(Record)]
+struct User {
+    #[metadata(k = "tonbo.key", v = "true")]
+    id: String,
+    name: String,
+    age: i64,
+}
+
+// Open database - key detected from schema metadata
+let db = DbBuilder::from_schema(User::schema())?
     .on_disk("/tmp/users")?
     .open().await?;
 
@@ -49,7 +56,7 @@ let batches = db.scan()
 ## Installation
 
 ```bash
-cargo add tonbo typed-arrow tokio
+cargo add tonbo tokio
 ```
 
 ## Examples

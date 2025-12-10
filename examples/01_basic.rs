@@ -2,11 +2,15 @@
 //!
 //! Run: cargo run --example 01_basic
 
-use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
 #[derive(Record)]
 struct User {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: String,
     name: String,
     score: Option<i64>,
@@ -14,8 +18,8 @@ struct User {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Open database
-    let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
+    // 1. Open database (key detected from schema metadata)
+    let db = DbBuilder::from_schema(User::schema())?
         .on_disk("/tmp/tonbo_example")?
         .open()
         .await?;

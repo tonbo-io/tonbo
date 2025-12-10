@@ -2,49 +2,69 @@
 //!
 //! Run: cargo run --example 06_composite_key
 
-use std::sync::Arc;
+use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
-use arrow_schema::{DataType, Field, Schema};
-use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
+// Define schema with composite key: (device_id, timestamp)
+// Use ordinal values in metadata for composite key ordering
+#[derive(Record)]
+struct SensorReading {
+    #[metadata(k = "tonbo.key", v = "0")]
+    device_id: String,
+    #[metadata(k = "tonbo.key", v = "1")]
+    timestamp: i64,
+    temperature: Option<f64>,
+    humidity: Option<f64>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Define schema with composite key: (device_id, timestamp)
-    // This is common for time-series data
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("device_id", DataType::Utf8, false),
-        Field::new("timestamp", DataType::Int64, false),
-        Field::new("temperature", DataType::Float64, true),
-        Field::new("humidity", DataType::Float64, true),
-    ]));
-
-    // Create DB with composite key using column indices [0, 1]
-    let db = DbBuilder::from_schema_key_indices(schema.clone(), vec![0, 1])?
+    // Create DB with composite key detected from schema metadata
+    let db = DbBuilder::from_schema(SensorReading::schema())?
         .on_disk("/tmp/tonbo_composite_key")?
         .open()
         .await?;
 
     // Insert time-series data
-    let batch = arrow_array::RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(arrow_array::StringArray::from(vec![
-                "sensor-1", "sensor-1", "sensor-1", "sensor-2", "sensor-2",
-            ])),
-            Arc::new(arrow_array::Int64Array::from(vec![
-                1000, 2000, 3000, // sensor-1 timestamps
-                1500, 2500, // sensor-2 timestamps
-            ])),
-            Arc::new(arrow_array::Float64Array::from(vec![
-                22.5, 23.0, 22.8, 25.0, 25.5,
-            ])),
-            Arc::new(arrow_array::Float64Array::from(vec![
-                45.0, 46.0, 44.5, 50.0, 51.0,
-            ])),
-        ],
-    )?;
+    let readings = vec![
+        SensorReading {
+            device_id: "sensor-1".into(),
+            timestamp: 1000,
+            temperature: Some(22.5),
+            humidity: Some(45.0),
+        },
+        SensorReading {
+            device_id: "sensor-1".into(),
+            timestamp: 2000,
+            temperature: Some(23.0),
+            humidity: Some(46.0),
+        },
+        SensorReading {
+            device_id: "sensor-1".into(),
+            timestamp: 3000,
+            temperature: Some(22.8),
+            humidity: Some(44.5),
+        },
+        SensorReading {
+            device_id: "sensor-2".into(),
+            timestamp: 1500,
+            temperature: Some(25.0),
+            humidity: Some(50.0),
+        },
+        SensorReading {
+            device_id: "sensor-2".into(),
+            timestamp: 2500,
+            temperature: Some(25.5),
+            humidity: Some(51.0),
+        },
+    ];
 
-    db.ingest(batch).await?;
+    let mut builders = SensorReading::new_builders(readings.len());
+    builders.append_rows(readings);
+    db.ingest(builders.finish().into_record_batch()).await?;
     println!("Inserted 5 sensor readings with composite key (device_id, timestamp)");
 
     // Query all data - results are ordered by composite key
@@ -77,16 +97,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nUpserting (sensor-1, 2000) and new (sensor-3, 1000):");
     let mut tx = db.begin_transaction().await?;
 
-    let update_batch = arrow_array::RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(arrow_array::StringArray::from(vec!["sensor-1", "sensor-3"])),
-            Arc::new(arrow_array::Int64Array::from(vec![2000, 1000])),
-            Arc::new(arrow_array::Float64Array::from(vec![99.9, 20.0])),
-            Arc::new(arrow_array::Float64Array::from(vec![99.9, 40.0])),
-        ],
-    )?;
-    tx.upsert_batch(&update_batch)?;
+    let updates = vec![
+        SensorReading {
+            device_id: "sensor-1".into(),
+            timestamp: 2000,
+            temperature: Some(99.9),
+            humidity: Some(99.9),
+        },
+        SensorReading {
+            device_id: "sensor-3".into(),
+            timestamp: 1000,
+            temperature: Some(20.0),
+            humidity: Some(40.0),
+        },
+    ];
+    let mut builders = SensorReading::new_builders(updates.len());
+    builders.append_rows(updates);
+    tx.upsert_batch(&builders.finish().into_record_batch())?;
     tx.commit().await?;
 
     let batches = db.scan().collect().await?;
@@ -96,37 +123,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_readings(batches: &[arrow_array::RecordBatch]) -> Result<(), Box<dyn std::error::Error>> {
-    use arrow_array::Array;
-
     for batch in batches {
-        let devices = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .unwrap();
-        let timestamps = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow_array::Int64Array>()
-            .unwrap();
-        let temps = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow_array::Float64Array>()
-            .unwrap();
-        let humidity = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<arrow_array::Float64Array>()
-            .unwrap();
-
-        for i in 0..batch.num_rows() {
+        for r in batch.iter_views::<SensorReading>()?.try_flatten()? {
+            let temp = r
+                .temperature
+                .map(|t| format!("{:.1}", t))
+                .unwrap_or("N/A".into());
+            let hum = r
+                .humidity
+                .map(|h| format!("{:.1}", h))
+                .unwrap_or("N/A".into());
             println!(
-                "  ({}, {}) -> temp={:.1}, humidity={:.1}",
-                devices.value(i),
-                timestamps.value(i),
-                temps.value(i),
-                humidity.value(i),
+                "  ({}, {}) -> temp={}, humidity={}",
+                r.device_id, r.timestamp, temp, hum
             );
         }
     }

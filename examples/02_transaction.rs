@@ -2,11 +2,15 @@
 //!
 //! Run: cargo run --example 02_transaction
 
-use tonbo::{ColumnRef, Predicate, db::DbBuilder};
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    ColumnRef, Predicate,
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
 #[derive(Record)]
 struct User {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: String,
     name: String,
     score: Option<i64>,
@@ -14,7 +18,7 @@ struct User {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
+    let db = DbBuilder::from_schema(User::schema())?
         .on_disk("/tmp/tonbo_tx_example")?
         .open()
         .await?;

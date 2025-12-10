@@ -60,19 +60,22 @@
 //! }
 //! ```
 //!
-//! For a more ergonomic API, use [`typed_arrow`]'s `#[derive(Record)]` (re-exported by default):
+//! For a more ergonomic API, use [`typed_arrow`]'s `#[derive(Record)]` (re-exported by default).
+//! Mark your primary key field with `#[metadata(k = "tonbo.key", v = "true")]`:
 //!
 //! ```rust,ignore
 //! use tonbo::{db::DbBuilder, typed_arrow::{Record, prelude::*, schema::SchemaMeta}};
 //!
 //! #[derive(Record)]
 //! struct User {
+//!     #[metadata(k = "tonbo.key", v = "true")]
 //!     id: String,
 //!     name: String,
 //!     score: Option<i64>,
 //! }
 //!
-//! let db = DbBuilder::from_schema_key_name(User::schema(), "id")?
+//! // Key is automatically detected from schema metadata
+//! let db = DbBuilder::from_schema(User::schema())?
 //!     .on_disk("/tmp/users")?
 //!     .open()
 //!     .await?;
@@ -106,21 +109,39 @@
 //!
 //! ## Schema Definition
 //!
-//! Use the `#[derive(Record)]` macro from [`typed-arrow`](https://docs.rs/typed-arrow) to define
-//! your schema. Tonbo works with Arrow [`RecordBatch`](arrow_array::RecordBatch) natively:
+//! Use the `#[derive(Record)]` macro from [`typed_arrow`] to define your schema.
+//! Mark primary key fields with `#[metadata(k = "tonbo.key", v = "true")]`:
 //!
 //! ```rust,ignore
+//! use tonbo::typed_arrow::Record;
+//!
 //! #[derive(Record)]
 //! struct Event {
-//!     id: String,              // Primary key
+//!     #[metadata(k = "tonbo.key", v = "true")]
+//!     id: String,
 //!     timestamp: i64,
 //!     event_type: String,
 //!     payload: Option<String>, // Nullable field
 //! }
 //! ```
 //!
+//! For composite keys, use ordinal values:
+//!
+//! ```rust,ignore
+//! #[derive(Record)]
+//! struct TimeSeries {
+//!     #[metadata(k = "tonbo.key", v = "0")]
+//!     device_id: String,
+//!     #[metadata(k = "tonbo.key", v = "1")]
+//!     timestamp: i64,
+//!     value: f64,
+//! }
+//! ```
+//!
 //! ## Database Operations
 //!
+//! - **[`DbBuilder::from_schema`](db::DbBuilder::from_schema)** - Create DB with auto-detected key
+//!   from metadata
 //! - **[`DbBuilder`](db::DbBuilder)** - Configure and open a database
 //! - **[`DB`]** - The main database handle for reads and writes
 //! - **[`DB::ingest`](db::DB::ingest)** - Batch insert records

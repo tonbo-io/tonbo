@@ -2,8 +2,10 @@
 //!
 //! Run: cargo run --example 08_nested_types
 
-use tonbo::db::DbBuilder;
-use typed_arrow::{Record, bridge::List, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    db::DbBuilder,
+    typed_arrow::{Record, bridge::List, prelude::*, schema::SchemaMeta},
+};
 
 // Level 1: Geo coordinates (innermost)
 #[derive(Record, Clone)]
@@ -30,6 +32,7 @@ struct Company {
 // Level 4: Person with deep nesting + List
 #[derive(Record)]
 struct Person {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: i64,
     name: String,
     company: Option<Company>,
@@ -39,7 +42,7 @@ struct Person {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DbBuilder::from_schema_key_name(Person::schema(), "id")?
+    let db = DbBuilder::from_schema(Person::schema())?
         .on_disk("/tmp/tonbo_nested_types")?
         .open()
         .await?;

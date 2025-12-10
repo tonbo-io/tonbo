@@ -11,11 +11,14 @@
 //!
 //! Run: cargo run --example 09_time_travel
 
-use tonbo::db::DbBuilder;
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
 #[derive(Record)]
 struct Product {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: i64,
     name: String,
     price: i64,
@@ -23,7 +26,7 @@ struct Product {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DbBuilder::from_schema_key_name(Product::schema(), "id")?
+    let db = DbBuilder::from_schema(Product::schema())?
         .on_disk("/tmp/tonbo_time_travel")?
         .open()
         .await?;

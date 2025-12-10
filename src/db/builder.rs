@@ -865,9 +865,36 @@ impl DbBuilder<Unconfigured> {
     }
 
     /// Create a builder by reading key metadata from the schema.
-    pub fn from_schema_metadata(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
+    ///
+    /// This method looks for `tonbo.key` metadata on fields to identify the primary key.
+    /// Use `#[metadata(k = "tonbo.key", v = "true")]` on your key field when using
+    /// `#[derive(Record)]`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use tonbo::{db::DbBuilder, typed_arrow::{Record, schema::SchemaMeta}};
+    ///
+    /// #[derive(Record)]
+    /// struct User {
+    ///     #[metadata(k = "tonbo.key", v = "true")]
+    ///     id: String,
+    ///     name: String,
+    /// }
+    ///
+    /// let db = DbBuilder::from_schema(User::schema())?
+    ///     .on_disk("/tmp/users")?
+    ///     .open()
+    ///     .await?;
+    /// ```
+    pub fn from_schema(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
         let cfg = DynModeConfig::from_metadata(schema).map_err(DbBuildError::Mode)?;
         Ok(Self::new(cfg))
+    }
+
+    /// Alias for [`from_schema`](Self::from_schema).
+    pub fn from_schema_metadata(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
+        Self::from_schema(schema)
     }
 }
 

@@ -3,11 +3,15 @@
 //! Run: cargo run --example 07_streaming
 
 use futures::StreamExt;
-use tonbo::{ColumnRef, Predicate, ScalarValue, db::DbBuilder};
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use tonbo::{
+    ColumnRef, Predicate, ScalarValue,
+    db::DbBuilder,
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
+};
 
 #[derive(Record)]
 struct LogEntry {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: i64,
     level: String,
     message: String,
@@ -15,7 +19,7 @@ struct LogEntry {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DbBuilder::from_schema_key_name(LogEntry::schema(), "id")?
+    let db = DbBuilder::from_schema(LogEntry::schema())?
         .on_disk("/tmp/tonbo_streaming")?
         .open()
         .await?;

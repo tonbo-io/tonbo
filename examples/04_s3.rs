@@ -29,11 +29,12 @@ use std::env;
 use tonbo::{
     ColumnRef, Predicate, ScalarValue,
     db::{AwsCreds, DbBuilder, ObjectSpec, S3Spec},
+    typed_arrow::{Record, prelude::*, schema::SchemaMeta},
 };
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 
 #[derive(Record)]
 struct Event {
+    #[metadata(k = "tonbo.key", v = "true")]
     id: String,
     event_type: String,
     payload: Option<String>,
@@ -63,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Open database on S3
-    let db = DbBuilder::from_schema_key_name(Event::schema(), "id")?
+    let db = DbBuilder::from_schema(Event::schema())?
         .object_store(ObjectSpec::s3(s3_spec))?
         .open()
         .await?;
