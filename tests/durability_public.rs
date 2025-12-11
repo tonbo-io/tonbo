@@ -204,6 +204,7 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
             .wal_config(wal_cfg.clone())
+            .disable_minor_compaction()
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
