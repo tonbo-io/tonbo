@@ -653,6 +653,10 @@ Tonbo runs as a **manifest-orchestrated** system over **object storage**. The **
 - **Read path:** Resolve manifest snapshot -> parallel, columnar scans with pushdown -> optional local caching.
 - **Compaction path (background):** Select L/L+1 SSTs -> merge -> upload new SSTs -> **CAS manifest update** -> GC old objects.
 
+**Compaction defaults**
+- **Minor compaction:** enabled by default; flushes once ~4 sealed immutables accumulate, emitting L0 SSTs. Opt-out via `DbBuilder::disable_minor_compaction` is intended for tests/bulk-load tooling only.
+- **Major compaction:** not scheduled automatically yet; invoke the admin trigger or an opt-in loop when available. The planner/executor path is wired, but background scheduling is still landing.
+
 ### Why this fits Edge Compute & Shared Storage
 
 - **Immutable by design:** write-new-only + **conditional commits** match object storage semantics—no in-place mutation.
