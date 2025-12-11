@@ -87,9 +87,9 @@ jobs:
         run: |
           aws --endpoint-url="$TONBO_S3_ENDPOINT" s3api create-bucket --bucket "$TONBO_S3_BUCKET" --region "$TONBO_S3_REGION" || true
 
-      - name: Run integration public API (s3 + fs)
+      - name: Run public API integration (s3 + fs)
         run: |
-          cargo test --package tonbo --lib integration::public_api:: -- --nocapture
+          cargo test --package tonbo --lib public_api:: -- --nocapture
 
   e2e-s3-real:
     name: e2e (real S3)
@@ -134,7 +134,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.toml') }}-e2e-s3-real
           cache-on-failure: false
 
-      - name: Run integration public API (real S3)
+      - name: Run public API integration (real S3)
         if: ${{ env.AWS_ROLE_ARN != '' }}
         env:
           TONBO_S3_BUCKET: ${{ vars.TONBO_S3_BUCKET }}
@@ -144,7 +144,7 @@ jobs:
           TONBO_S3_SECRET_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
           TONBO_S3_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         run: |
-          cargo test --package tonbo --lib integration::public_api:: -- --nocapture
+          cargo test --package tonbo --lib public_api:: -- --nocapture
 
   wasm:
     name: wasm edge worker
