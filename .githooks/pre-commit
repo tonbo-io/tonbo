@@ -49,15 +49,15 @@ run_step "$CLIPPY_CMD"
 run_step "$BUILD_CMD"
 run_step "$TEST_CMD"
 
-log "bootstrap LocalStack (if available) for S3-backed public_api_e2e"
+log "bootstrap LocalStack (if available) for integration::public_api (S3-backed)"
 if source "${S3_ENV_SCRIPT}"; then
-  run_step "cargo test public_api_e2e:: -- --nocapture"
+  run_step "cargo test integration::public_api:: -- --nocapture"
   if [ "${TONBO_LOCALSTACK_STARTED_BY_SCRIPT:-0}" = "1" ] && command -v docker >/dev/null 2>&1; then
     docker rm -f "${TONBO_LOCALSTACK_CONTAINER}" >/dev/null 2>&1 || true
   fi
 else
-  log "LocalStack not available; running public_api_e2e (local only)"
-  run_step "cargo test public_api_e2e:: -- --nocapture"
+  log "LocalStack not available; running integration::public_api (local only)"
+  run_step "cargo test integration::public_api:: -- --nocapture"
 fi
 
 exit 0

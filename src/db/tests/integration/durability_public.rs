@@ -10,7 +10,7 @@ use crate::{
     wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
 };
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

@@ -8,7 +8,7 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 
 use crate::{BatchesThreshold, ColumnRef, Predicate, db::DB};
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

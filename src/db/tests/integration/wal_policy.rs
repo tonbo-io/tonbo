@@ -12,7 +12,7 @@ use crate::{
     test_support::{TestFsWalStateStore, TestWalExt as WalExt},
 };
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

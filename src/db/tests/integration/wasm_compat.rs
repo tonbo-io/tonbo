@@ -8,7 +8,7 @@ use fusio::{executor::NoopExecutor, impls::mem::fs::InMemoryFs};
 
 use crate::{BatchesThreshold, ColumnRef, Predicate, WalSyncPolicy, db::DB};
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

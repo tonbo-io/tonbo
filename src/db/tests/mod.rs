@@ -1,4 +1,5 @@
 mod core;
+mod integration;
 mod wal_gc;
 mod wal_recovery;
 

@@ -8,7 +8,7 @@ use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{ColumnRef, Predicate, db::DB};
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

@@ -13,7 +13,7 @@ use crate::{
     test_support::{execute_scan_plan, plan_scan_snapshot},
 };
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 use common::config_with_pk;
 

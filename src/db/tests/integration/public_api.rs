@@ -8,9 +8,11 @@ use fusio::executor::tokio::TokioExecutor;
 
 use crate::{
     ColumnRef, DB, NeverSeal, Predicate, ScalarValue,
-    db::DbBuilder,
+    db::{
+        DbBuilder,
+        tests::integration::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
+    },
     inmem::policy::BatchesThreshold,
-    tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
     wal::{WalExt, WalSyncPolicy},
 };
 
