@@ -110,7 +110,7 @@ wasm-bindgen-test = "0.3"
 
 [[test]]
 name = "read_smoke"
-path = "tests/e2e/read_smoke.rs"
+path = "tests/read_smoke.rs"
 required-features = ["tokio"]
 
 [[test]]
