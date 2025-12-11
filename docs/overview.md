@@ -228,6 +228,7 @@ Major compaction runs in the background once a level’s SST count exceeds confi
 - **Stateless and async:** any process can perform compaction safely.
 - **Object-storage optimized:** no object mutation—new SSTs are appended and atomically switched.
 - **Crash-safe lineage:** every compaction produces a new manifest version, ensuring consistent recovery.
+- **Heuristic-first triggers:** flattening/compaction is automatic by default; there’s no manual “flatten” button needed to keep SST sizes healthy (admin triggers remain optional tooling).
 
 #### Garbage Collection
 
@@ -411,7 +412,7 @@ async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Recovery & GC
 
-- **Recovery**: load the latest good manifest; **replay** ordered WAL fragments; ignore objects not referenced by any committed manifest.
+- **Recovery**: load the latest good manifest; replay ordered WAL fragments into the mutable memtable so WAL-backed rows participate in the read path immediately; ignore objects not referenced by any committed manifest.
 - **GC**: manifest drives retirement of obsolete WAL/SST generations with retention windows and safety checks.
 
 ### Invariants
