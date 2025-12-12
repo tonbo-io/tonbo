@@ -1,11 +1,12 @@
-#![cfg(all(feature = "tokio", feature = "test-helpers"))]
+#![cfg(feature = "tokio")]
 
 use std::{sync::Arc, time::Duration};
 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs, path::Path};
 use tokio::{task::LocalSet, time::sleep};
-use tonbo::{
+
+use crate::{
     compaction::planner::CompactionStrategy, db::DB, ondisk::sstable::SsTableConfig,
     schema::SchemaBuilder,
 };

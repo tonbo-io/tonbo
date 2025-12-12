@@ -314,7 +314,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Access the configured WAL settings, if any.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn wal_config(&self) -> Option<&RuntimeWalConfig> {
         self.wal_config.as_ref()
     }
