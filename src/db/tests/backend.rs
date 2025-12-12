@@ -112,7 +112,13 @@ pub fn maybe_s3_harness(
         None => AwsCreds::new(access, secret),
     };
 
-    let mut s3 = S3Spec::new(bucket.clone(), unique_label(label), credentials);
+    let base_label = unique_label(label);
+    let prefix = match env::var("TONBO_S3_PREFIX") {
+        Ok(base) => format!("{base}/{base_label}"),
+        Err(_) => base_label,
+    };
+
+    let mut s3 = S3Spec::new(bucket.clone(), prefix, credentials);
     s3.endpoint = Some(endpoint);
     s3.region = Some(region);
     s3.sign_payload = Some(true);
