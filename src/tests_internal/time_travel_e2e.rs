@@ -1,9 +1,16 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+#![cfg(feature = "tokio")]
+
+use std::{fs, path::PathBuf, sync::Arc};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
-use tonbo::db::{ColumnRef, DB, DbBuilder, Predicate, WalSyncPolicy};
+
+use crate::db::{BatchesThreshold, ColumnRef, DB, Predicate};
+
+#[path = "common/mod.rs"]
+mod common;
+use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -14,7 +21,7 @@ fn workspace_temp_dir(prefix: &str) -> PathBuf {
             .expect("time")
             .as_nanos()
     ));
-    std::fs::create_dir_all(&dir).expect("create workspace temp dir");
+    fs::create_dir_all(&dir).expect("create workspace temp dir");
     dir
 }
 
@@ -41,53 +48,61 @@ fn extract_rows(batches: Vec<RecordBatch>) -> Vec<(String, i32)> {
     rows
 }
 
+/// Verify snapshot_at can time-travel between manifest versions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_at_reads_prior_version() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_root = workspace_temp_dir("e2e-time-travel");
-    let schema = Arc::new(arrow_schema::Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("v", DataType::Int32, false),
-    ]));
-    let exec = Arc::new(TokioExecutor::default());
+async fn snapshot_at_reads_older_manifest_version() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("time-travel");
+    let root_str = temp_root.to_string_lossy().into_owned();
 
-    let db: DB<LocalFs, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
-        .on_disk(temp_root.to_string_lossy().into_owned())?
-        .wal_sync_policy(WalSyncPolicy::Always)
-        .wal_segment_bytes(512)
-        .wal_flush_interval(Duration::from_millis(2))
-        .open_with_executor(Arc::clone(&exec))
-        .await?;
+    let config = config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let schema = config.schema();
 
-    let first = RecordBatch::try_new(
+    let executor = Arc::new(TokioExecutor::default());
+    let mut inner = DB::<LocalFs, TokioExecutor>::builder(config)
+        .on_disk(root_str.clone())?
+        .with_minor_compaction(1, 0, 1)
+        .open_with_executor(Arc::clone(&executor))
+        .await?
+        .into_inner();
+    inner.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+    let db = DB::from_inner(Arc::new(inner));
+
+    let batch_v1 = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(StringArray::from(vec!["v1-a", "v1-b"])) as _,
             Arc::new(Int32Array::from(vec![1, 2])) as _,
         ],
     )?;
-    db.ingest(first).await?;
+    db.ingest(batch_v1).await?;
 
-    let second = RecordBatch::try_new(
+    let batch_v2 = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(StringArray::from(vec!["v2-a"])) as _,
             Arc::new(Int32Array::from(vec![99])) as _,
         ],
     )?;
-    db.ingest(second).await?;
+    db.ingest(batch_v2).await?;
 
-    let versions = db.list_versions(8).await?;
+    let versions = db.list_versions(10).await?;
     if versions.len() < 2 {
         eprintln!("insufficient manifest versions recorded; skipping time-travel assertion");
         return Ok(());
     }
-    let earliest = versions.last().expect("earliest version");
 
-    let snapshot = db.snapshot_at(earliest.timestamp).await?;
+    let earliest = versions.last().expect("earliest version");
+    let snapshot_old = db.snapshot_at(earliest.timestamp).await?;
     let predicate = Predicate::is_not_null(ColumnRef::new("id"));
 
     let old_rows = extract_rows(
-        snapshot
+        snapshot_old
             .scan(&db)
             .filter(predicate.clone())
             .collect()
@@ -96,7 +111,7 @@ async fn snapshot_at_reads_prior_version() -> Result<(), Box<dyn std::error::Err
     assert_eq!(
         old_rows,
         vec![("v1-a".into(), 1), ("v1-b".into(), 2)],
-        "older snapshot should exclude later writes"
+        "older snapshot should not see later writes"
     );
 
     let latest_rows = extract_rows(db.scan().filter(predicate).collect().await?);
@@ -105,8 +120,8 @@ async fn snapshot_at_reads_prior_version() -> Result<(), Box<dyn std::error::Err
         "latest view should include second batch"
     );
 
-    if let Err(err) = std::fs::remove_dir_all(&temp_root) {
-        eprintln!("cleanup failed for {:?}: {err}", temp_root);
+    if let Err(err) = fs::remove_dir_all(&temp_root) {
+        eprintln!("failed to clean temp dir {:?}: {err}", &temp_root);
     }
     Ok(())
 }

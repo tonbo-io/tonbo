@@ -873,7 +873,8 @@ impl DbBuilder<Unconfigured> {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use tonbo::{db::DbBuilder, typed_arrow::{Record, schema::SchemaMeta}};
+    /// use tonbo::db::DbBuilder;
+    /// use tonbo::prelude::{Record, SchemaMeta};
     ///
     /// #[derive(Record)]
     /// struct User {

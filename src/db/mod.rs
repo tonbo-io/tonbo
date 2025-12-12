@@ -36,7 +36,7 @@ pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
-    inmem::{mutable::DynMem, policy::SealPolicy},
+    inmem::mutable::DynMem,
     key::KeyOwned,
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TableMeta, TonboManifest, VersionEdit,
@@ -44,19 +44,18 @@ use crate::{
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
-    transaction::{
-        CommitAckMode, Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability,
-        TransactionError,
-    },
+    transaction::{Snapshot as TxSnapshot, SnapshotError, TransactionDurability, TransactionError},
     wal::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
         replay::Replayer, state::WalStateHandle,
     },
 };
 pub use crate::{
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     mode::DynModeConfig,
     query::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue},
     schema::SchemaBuilder,
+    transaction::{CommitAckMode, Transaction},
     wal::WalSyncPolicy,
 };
 

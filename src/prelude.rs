@@ -19,7 +19,6 @@
 #[cfg(feature = "typed-arrow")]
 pub use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
 
-pub use crate::{
-    CommitAckMode,
-    db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue},
+pub use crate::db::{
+    BatchesThreshold, ColumnRef, CommitAckMode, DB, DbBuilder, Predicate, ScalarValue,
 };

@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
-use tonbo::{ColumnRef, DB, Predicate, WalSyncPolicy, db::DbBuilder};
+use tonbo::db::{ColumnRef, DB, DbBuilder, Predicate, WalSyncPolicy};
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");

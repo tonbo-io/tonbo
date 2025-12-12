@@ -3,8 +3,9 @@ use std::sync::Arc;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use tonbo::db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
+
+use crate::db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue};
 const PACKAGE_ROWS: usize = 1024;
 
 /// Helper to extract (id, value) pairs from scan result batches.

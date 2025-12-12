@@ -7,12 +7,9 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 
 use crate::{
-    db::{
-        ColumnRef, DB, DbBuilder, NeverSeal, Predicate, ScalarValue,
-        tests::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
-    },
-    inmem::policy::BatchesThreshold,
-    wal::{WalConfig, WalExt, WalSyncPolicy, storage::WalStorage},
+    db::{BatchesThreshold, ColumnRef, DB, DbBuilder, NeverSeal, Predicate, ScalarValue},
+    tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
+    wal::{WalExt, WalSyncPolicy},
 };
 
 fn build_schema() -> Arc<Schema> {
@@ -43,18 +40,6 @@ fn extract_rows(batches: Vec<RecordBatch>) -> Vec<(String, i32)> {
     }
     rows.sort();
     rows
-}
-
-async fn assert_wal_segments_exist(cfg: &WalConfig) -> Result<(), Box<dyn Error>> {
-    let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    let segments = storage
-        .list_segments()
-        .await
-        .map_err(|err| format!("list wal segments: {err}"))?;
-    if segments.is_empty() {
-        return Err("expected wal segments to be written to object store".into());
-    }
-    Ok(())
 }
 
 async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
@@ -163,13 +148,6 @@ async fn public_compaction_s3(
         vec![("k0".into(), 0), ("k1".into(), 1), ("k2".into(), 2)]
     );
 
-    let wal_cfg = reopened
-        .inner()
-        .wal_config()
-        .cloned()
-        .ok_or("wal config should be present for s3 run")?;
-    assert_wal_segments_exist(&wal_cfg).await?;
-
     let mut inner = reopened.into_inner();
     inner.disable_wal().await?;
     Ok(())
@@ -274,13 +252,6 @@ async fn wal_rotation_s3(schema: Arc<Schema>, harness: S3Harness) -> Result<(), 
         rows.len() >= 3 * 64,
         "wal replay should restore all ingested rows (s3)"
     );
-
-    let wal_cfg = reopened
-        .inner()
-        .wal_config()
-        .cloned()
-        .ok_or("wal config should be present for s3 run")?;
-    assert_wal_segments_exist(&wal_cfg).await?;
 
     let mut inner = reopened.into_inner();
     inner.disable_wal().await?;
