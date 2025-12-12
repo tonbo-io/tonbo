@@ -90,6 +90,10 @@ jobs:
       - name: Run public API integration (s3 + fs)
         run: |
           cargo test --package tonbo --lib public_api:: -- --nocapture
+      - name: List S3 artifacts (LocalStack)
+        if: always()
+        run: |
+          aws --endpoint-url="$TONBO_S3_ENDPOINT" s3 ls "s3://$TONBO_S3_BUCKET/" --recursive || true
 
   e2e-s3-real:
     name: e2e (real S3)
@@ -145,6 +149,10 @@ jobs:
           export TONBO_S3_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
           export TONBO_S3_SESSION_TOKEN="$AWS_SESSION_TOKEN"
           cargo test --package tonbo --lib public_api:: -- --nocapture
+      - name: List S3 artifacts (real)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        run: |
+          aws s3 ls "s3://${{ vars.TONBO_S3_BUCKET }}/" --recursive --region "${{ vars.TONBO_S3_REGION }}" || true
 
   wasm:
     name: wasm edge worker

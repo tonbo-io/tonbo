@@ -1,4 +1,6 @@
+mod backend;
 mod core;
+mod public_api;
 mod wal_gc;
 mod wal_recovery;
 
