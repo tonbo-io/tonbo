@@ -140,10 +140,10 @@ jobs:
           TONBO_S3_BUCKET: ${{ vars.TONBO_S3_BUCKET }}
           TONBO_S3_REGION: ${{ vars.TONBO_S3_REGION }}
           TONBO_S3_ENDPOINT: https://s3.${{ vars.TONBO_S3_REGION }}.amazonaws.com
-          TONBO_S3_ACCESS_KEY: ${{ env.AWS_ACCESS_KEY_ID }}
-          TONBO_S3_SECRET_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
-          TONBO_S3_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         run: |
+          export TONBO_S3_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
+          export TONBO_S3_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+          export TONBO_S3_SESSION_TOKEN="$AWS_SESSION_TOKEN"
           cargo test --package tonbo --lib public_api:: -- --nocapture
 
   wasm:
