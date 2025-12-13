@@ -2,7 +2,8 @@
 //!
 //! Run: cargo run --example 08_nested_types
 
-use tonbo::{prelude::*, typed_arrow::bridge::List};
+use tonbo::prelude::*;
+use typed_arrow::bridge::List;
 
 // Level 1: Geo coordinates (innermost)
 #[derive(Record, Clone)]

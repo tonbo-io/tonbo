@@ -260,7 +260,7 @@ where
     }
 
     /// Begin building a scan query with fluent API.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
         ScanBuilder::new(self)
     }
@@ -286,7 +286,7 @@ pub(crate) struct StagedOverlay<'a> {
 
 /// Fluent builder for constructing scan queries.
 ///
-/// Use [`crate::DB::scan`] to create a new builder, then chain methods to
+/// Use [`crate::db::DB::scan`] to create a new builder, then chain methods to
 /// configure the scan before executing with [`stream`](ScanBuilder::stream) or
 /// [`collect`](ScanBuilder::collect). Transaction and snapshot scan variants
 /// wrap the same builder internally.
@@ -307,8 +307,7 @@ pub(crate) struct StagedOverlay<'a> {
 /// use arrow_schema::{DataType, Field, Schema};
 /// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 /// use tonbo::{
-///     ColumnRef, Predicate, ScalarValue,
-///     db::{DB, DbBuilder},
+///     db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue},
 ///     schema::SchemaBuilder,
 /// };
 ///

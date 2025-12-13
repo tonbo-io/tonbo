@@ -35,8 +35,6 @@ web = [
 web-opfs = ["fusio/opfs", "web"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
-# Internal helpers for tests only; keep recognized for check-cfg.
-test-helpers = []
 
 [dependencies]
 anyhow = "1"
@@ -113,12 +111,7 @@ wasm-bindgen-test = "0.3"
 [[test]]
 name = "read_smoke"
 path = "tests/read_smoke.rs"
-required-features = ["test-helpers", "tokio"]
-
-[[test]]
-name = "durability_public"
-path = "tests/durability_public.rs"
-required-features = ["test-helpers", "tokio"]
+required-features = ["tokio"]
 
 [[test]]
 name = "s3_smoke"

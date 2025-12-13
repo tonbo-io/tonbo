@@ -36,7 +36,7 @@ pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
-    inmem::{mutable::DynMem, policy::SealPolicy},
+    inmem::mutable::DynMem,
     key::KeyOwned,
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TableMeta, TonboManifest, VersionEdit,
@@ -44,19 +44,18 @@ use crate::{
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
-    transaction::{
-        CommitAckMode, Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability,
-        TransactionError,
-    },
+    transaction::{Snapshot as TxSnapshot, SnapshotError, TransactionDurability, TransactionError},
     wal::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
         replay::Replayer, state::WalStateHandle,
     },
 };
 pub use crate::{
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     mode::DynModeConfig,
     query::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue},
     schema::SchemaBuilder,
+    transaction::{CommitAckMode, Transaction},
     wal::WalSyncPolicy,
 };
 
@@ -172,19 +171,19 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a DB from an inner handle.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
-    #[cfg(not(any(test, feature = "test-helpers")))]
+    #[cfg(not(test))]
     pub(crate) fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
     /// Access the inner handle (for internal/testing use).
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn inner(&self) -> &Arc<DbInner<FS, E>> {
         &self.inner
@@ -193,7 +192,7 @@ where
     /// Consume the DB and return the inner handle (for testing).
     ///
     /// Panics if there are other references to the inner handle.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn into_inner(self) -> DbInner<FS, E> {
         Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
@@ -262,7 +261,7 @@ where
     }
 
     /// Whether a background compaction worker was spawned for this DB.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn has_compaction_worker(&self) -> bool {
         self.inner.has_compaction_worker()
     }
@@ -316,7 +315,7 @@ where
     /// Create a new in-memory DB with the given configuration.
     ///
     /// This is primarily for testing and prototyping.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn new(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -326,7 +325,7 @@ where
     }
 
     /// Create a new in-memory DB with a custom seal policy.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn new_with_policy(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -340,7 +339,7 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -349,7 +348,7 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
 /// This type is exposed for testing purposes via the `test-helpers` feature.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[doc(hidden)]
 pub struct DbInner<FS, E>
 where
@@ -397,7 +396,7 @@ where
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-#[cfg(not(any(test, feature = "test-helpers")))]
+#[cfg(not(test))]
 pub(crate) struct DbInner<FS, E>
 where
     FS: ManifestFs<E>,
@@ -917,7 +916,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
@@ -929,7 +928,7 @@ where
 }
 
 // In-memory convenience constructors.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl<E> DbInner<InMemoryFs, E>
 where
     E: Executor + Timer + Clone + 'static,
