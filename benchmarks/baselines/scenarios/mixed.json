@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "mixed",
+  "benchmark_type": "scenario",
+  "backend": "disk",
+  "backend_details": {
+    "type": "disk",
+    "path": "baseline/bench-tmp"
+  },
+  "workload_type": "mixed",
+  "parameters": {
+    "concurrency": 1,
+    "num_records": 1200,
+    "read_ops": 840,
+    "read_ratio": 0.7,
+    "value_size_bytes": 128,
+    "write_ops": 360,
+    "write_ratio": 0.3
+  },
+  "metrics": {
+    "bytes_per_sec": 65151.705649045914,
+    "ops_per_sec": 508.9977003831712,
+    "wall_time_ms": 2357
+  }
+}

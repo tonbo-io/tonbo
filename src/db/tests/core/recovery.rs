@@ -120,6 +120,8 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         manifest,
         manifest_table,
         table_meta.clone(),
+        #[cfg(feature = "bench-diagnostics")]
+        None,
     )
     .await
     .expect("recover");
@@ -236,6 +238,8 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         manifest,
         manifest_table,
         table_meta,
+        #[cfg(feature = "bench-diagnostics")]
+        None,
     )
     .await
     .expect("recover");

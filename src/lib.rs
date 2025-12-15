@@ -278,3 +278,11 @@ pub(crate) mod ondisk;
 
 /// Simple compaction orchestrators.
 pub(crate) mod compaction;
+
+/// Bench-only diagnostics surfaces for scenario benchmarks.
+#[cfg(feature = "bench-diagnostics")]
+pub mod bench_diagnostics;
+#[cfg(feature = "bench-diagnostics")]
+pub use bench_diagnostics::{
+    BenchDiagnosticsSnapshot, FlushDiagnosticsSnapshot, LatencySnapshot, WalDiagnosticsSnapshot,
+};

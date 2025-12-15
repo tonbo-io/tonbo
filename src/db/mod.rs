@@ -17,6 +17,11 @@ use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
+#[cfg(feature = "bench-diagnostics")]
+use crate::bench_diagnostics::{
+    BenchDiagnosticsRecorder, BenchDiagnosticsSnapshot, FlushDiagnosticsSnapshot, LatencySnapshot,
+    WalDiagnosticsSnapshot,
+};
 use crate::compaction::{CompactionHandle, MinorCompactor};
 mod builder;
 mod compaction;
@@ -391,6 +396,9 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Bench-only diagnostics recorder for flush/compaction timing.
+    #[cfg(feature = "bench-diagnostics")]
+    bench_diagnostics: Option<BenchDiagnosticsRecorder>,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
@@ -438,6 +446,9 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Bench-only diagnostics recorder for flush/compaction timing.
+    #[cfg(feature = "bench-diagnostics")]
+    bench_diagnostics: Option<BenchDiagnosticsRecorder>,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -521,6 +532,7 @@ where
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
+        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
     ) -> Self {
         Self {
             schema,
@@ -542,6 +554,8 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics,
         }
     }
 
@@ -554,6 +568,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -563,6 +578,8 @@ where
             manifest,
             manifest_table,
             table_meta,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics,
         )
         .await
     }
@@ -576,6 +593,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -597,6 +615,8 @@ where
             table_meta,
             Some(wal_cfg.clone()),
             executor,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -779,6 +799,37 @@ where
             .collect())
     }
 
+    /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
+    #[cfg(feature = "bench-diagnostics")]
+    pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
+        let wal = if let Some(handle) = self.inner.wal_handle() {
+            let metrics = handle.metrics();
+            let guard = metrics.read().await;
+            let append_latency = if guard.append_events > 0 {
+                Some(LatencySnapshot {
+                    count: guard.append_events,
+                    total_us: guard.append_latency_total_us,
+                    max_us: guard.append_latency_max_us,
+                    min_us: guard.append_latency_min_us,
+                })
+            } else {
+                None
+            };
+            Some(WalDiagnosticsSnapshot {
+                bytes_written: guard.bytes_written,
+                sync_operations: guard.sync_operations,
+                queue_depth: guard.queue_depth,
+                max_queue_depth: guard.max_queue_depth,
+                append_latency,
+            })
+        } else {
+            None
+        };
+
+        let flush = self.inner.bench_diagnostics_snapshot();
+        BenchDiagnosticsSnapshot { wal, flush }
+    }
+
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&self) -> Timestamp {
         self.commit_clock.alloc()
@@ -804,6 +855,8 @@ where
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
+        #[cfg(feature = "bench-diagnostics")]
+        let flush_started = self.executor.now();
         let _guard = self.flush_lock.lock().await;
         let (immutables_snapshot, flush_count) = {
             let seal_read = self.seal_state_lock();
@@ -901,6 +954,12 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
+                #[cfg(feature = "bench-diagnostics")]
+                if let Some(diag) = &self.bench_diagnostics {
+                    let duration = flush_started.elapsed();
+                    let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
+                    diag.record_flush(bytes, duration);
+                }
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -924,6 +983,13 @@ where
     /// Access the per-key transactional lock map.
     pub(crate) fn key_locks(&self) -> &LockMap<KeyOwned> {
         &self._key_locks
+    }
+
+    #[cfg(feature = "bench-diagnostics")]
+    pub(crate) fn bench_diagnostics_snapshot(&self) -> Option<FlushDiagnosticsSnapshot> {
+        self.bench_diagnostics
+            .as_ref()
+            .map(BenchDiagnosticsRecorder::snapshot)
     }
 }
 
@@ -965,6 +1031,8 @@ where
             table_meta,
             None,
             executor,
+            #[cfg(feature = "bench-diagnostics")]
+            None,
         ))
     }
 }

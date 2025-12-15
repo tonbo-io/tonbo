@@ -14,6 +14,8 @@ use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, Segment
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
+#[cfg(feature = "bench-diagnostics")]
+use crate::bench_diagnostics::BenchDiagnosticsRecorder;
 use crate::{
     compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
     extractor::{KeyExtractError, projection_for_columns},
@@ -437,6 +439,8 @@ pub struct DbBuilder<S = Unconfigured> {
     compaction_interval: Option<Duration>,
     compaction_loop_cfg: Option<CompactionLoopConfig>,
     minor_compaction: Option<MinorCompactionOptions>,
+    #[cfg(feature = "bench-diagnostics")]
+    bench_diagnostics: bool,
 }
 
 /// Error returned when building a [`DB`] through [`DbBuilder`].
@@ -774,6 +778,8 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: None,
             compaction_loop_cfg: None,
             minor_compaction: None,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics: false,
         }
     }
 
@@ -796,6 +802,8 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -821,6 +829,8 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -840,6 +850,8 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -1044,6 +1056,13 @@ where
             None
         };
 
+        #[cfg(feature = "bench-diagnostics")]
+        let bench_diagnostics = if self.bench_diagnostics {
+            Some(BenchDiagnosticsRecorder::default())
+        } else {
+            None
+        };
+
         let mut inner = DbInner::from_components(
             schema,
             delete_schema,
@@ -1055,6 +1074,8 @@ where
             table_meta,
             wal_cfg.clone(),
             executor,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_diagnostics,
         );
 
         inner.minor_compaction = minor_compaction;
@@ -1091,6 +1112,14 @@ impl<S> DbBuilder<S> {
     #[must_use]
     pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
         self.mode_config.commit_ack_mode = mode;
+        self
+    }
+
+    /// Enable bench-only diagnostics hooks used by scenario benchmarks.
+    #[cfg(feature = "bench-diagnostics")]
+    #[must_use]
+    pub fn enable_bench_diagnostics(mut self) -> Self {
+        self.bench_diagnostics = true;
         self
     }
 }
@@ -1230,6 +1259,12 @@ where
             let manifest_table = table_meta.table_id;
             let fs_dyn = layout.dyn_fs();
             let minor_compaction = self.build_minor_compaction_state(&layout)?;
+            #[cfg(feature = "bench-diagnostics")]
+            let bench_diagnostics = if self.bench_diagnostics {
+                Some(BenchDiagnosticsRecorder::default())
+            } else {
+                None
+            };
             let mut inner = DbInner::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
@@ -1238,6 +1273,8 @@ where
                 manifest,
                 manifest_table,
                 table_meta,
+                #[cfg(feature = "bench-diagnostics")]
+                bench_diagnostics,
             )
             .await
             .map_err(DbBuildError::Mode)?;

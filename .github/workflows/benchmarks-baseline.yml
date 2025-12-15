@@ -1,0 +1,41 @@
+name: benchmarks-baseline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    name: refresh baseline artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('**/Cargo.toml') }}
+          cache-on-failure: false
+
+      - name: Run disk benchmark
+        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+
+      - name: Run mixed benchmark (disk)
+        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
+
+      - name: Stage refreshed baselines
+        run: |
+          mkdir -p benchmarks/baselines/scenarios
+          latest_seq=$(ls -t target/bench-results/*sequential_write.json | head -n1)
+          latest_mixed=$(ls -t target/bench-results/*mixed.json | head -n1)
+          cp "$latest_seq" benchmarks/baselines/scenarios/sequential_write.json
+          cp "$latest_mixed" benchmarks/baselines/scenarios/mixed.json
+
+      - name: Upload baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tonbo-benchmark-baseline
+          path: benchmarks/baselines/scenarios/*.json
+          if-no-files-found: error
