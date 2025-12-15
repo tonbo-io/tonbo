@@ -1,0 +1,34 @@
+presets:
+  ycsb_a:
+    workload:
+      type: mixed
+      read_ratio: 0.5
+      write_ratio: 0.5
+      num_records: 20000
+      value_size_bytes: 256
+    runtime:
+      concurrency: 1
+  ycsb_b:
+    workload:
+      type: mixed
+      read_ratio: 0.95
+      write_ratio: 0.05
+      num_records: 20000
+      value_size_bytes: 256
+    runtime:
+      concurrency: 1
+  ycsb_c:
+    workload:
+      type: read_only
+      num_records: 20000
+      value_size_bytes: 256
+      warmup_records: 1000
+    runtime:
+      concurrency: 1
+  write_heavy:
+    workload:
+      type: sequential_write
+      num_records: 30000
+      value_size_bytes: 256
+    runtime:
+      concurrency: 1

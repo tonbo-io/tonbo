@@ -1,0 +1,54 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  scenarios:
+    name: scenario benchmarks (gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('**/Cargo.toml') }}
+          cache-on-failure: false
+
+      - name: Run disk benchmark
+        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+
+      - name: Run mixed benchmark (disk)
+        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
+
+      - name: Compare against baseline
+        run: |
+          cargo run -p bench-compare -- \
+            --current target/bench-results \
+            --baseline benchmarks/baselines/scenarios \
+            --thresholds benches/harness/configs/regression-thresholds.yaml \
+            --report target/bench-results/regression-report.json
+
+      - name: Generate performance report
+        run: |
+          cargo run -p bench-report -- \
+            --results-dir target/bench-results \
+            --limit 10 \
+            --output-md target/bench-reports/perf-report.md \
+            --output-json target/bench-reports/perf-report.json
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tonbo-benchmarks
+          path: |
+            target/bench-results/*.json
+            target/bench-results/regression-report.json
+            target/bench-reports/perf-report.md
+            target/bench-reports/perf-report.json
+          if-no-files-found: ignore
