@@ -1,10 +1,11 @@
-<p align="center">
+<p align="left">
   <a href="https://tonbo.io">
     <picture>
-      <img src="https://github.com/user-attachments/assets/f7625788-0e7f-4fb6-80cd-7f0d2306130b" />
+      <img width="680" src="https://github.com/user-attachments/assets/f6949c40-012f-425e-8ad8-6b3fe11ce672" />
     </picture>
   </a>
 </p>
+
 
 # Tonbo
 
