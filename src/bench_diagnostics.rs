@@ -2,6 +2,22 @@ use std::{sync::Arc, time::Duration};
 
 use parking_lot::Mutex;
 
+/// Optional callbacks used to capture bench-only diagnostics without modifying the
+/// core database paths.
+pub trait BenchObserver: Send + Sync {
+    /// Record a flush event exposed by the engine.
+    fn record_flush(&self, bytes: u64, duration: Duration);
+
+    /// Return a flush snapshot for reporting.
+    fn flush_snapshot(&self) -> FlushDiagnosticsSnapshot;
+
+    /// Update the stored WAL diagnostics snapshot if available.
+    fn update_wal(&self, snapshot: WalDiagnosticsSnapshot);
+
+    /// Produce a combined snapshot (WAL + flush) for reporting.
+    fn snapshot(&self) -> BenchDiagnosticsSnapshot;
+}
+
 /// Snapshot of engine diagnostics captured for benchmark reporting.
 #[derive(Debug, Default, Clone)]
 pub struct BenchDiagnosticsSnapshot {
@@ -66,13 +82,14 @@ impl LatencySnapshot {
 
 /// Bench-only recorder that accumulates flush/compaction timings inside the engine.
 #[derive(Default, Clone)]
-pub(crate) struct BenchDiagnosticsRecorder {
+pub struct BenchDiagnosticsRecorder {
     inner: Arc<Mutex<BenchDiagnosticsState>>,
 }
 
 #[derive(Default)]
 struct BenchDiagnosticsState {
     flush_events: Vec<FlushEvent>,
+    wal: Option<WalDiagnosticsSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,14 +98,14 @@ struct FlushEvent {
     duration: Duration,
 }
 
-impl BenchDiagnosticsRecorder {
+impl BenchObserver for BenchDiagnosticsRecorder {
     /// Record a flush event into the in-memory accumulator.
-    pub(crate) fn record_flush(&self, bytes: u64, duration: Duration) {
+    fn record_flush(&self, bytes: u64, duration: Duration) {
         let mut guard = self.inner.lock();
         guard.flush_events.push(FlushEvent { bytes, duration });
     }
 
-    pub(crate) fn snapshot(&self) -> FlushDiagnosticsSnapshot {
+    fn flush_snapshot(&self) -> FlushDiagnosticsSnapshot {
         let guard = self.inner.lock();
         if guard.flush_events.is_empty() {
             return FlushDiagnosticsSnapshot::default();
@@ -109,5 +126,17 @@ impl BenchDiagnosticsRecorder {
             }
         }
         snapshot
+    }
+
+    fn update_wal(&self, snapshot: WalDiagnosticsSnapshot) {
+        let mut guard = self.inner.lock();
+        guard.wal = Some(snapshot);
+    }
+
+    fn snapshot(&self) -> BenchDiagnosticsSnapshot {
+        BenchDiagnosticsSnapshot {
+            wal: self.inner.lock().wal.clone(),
+            flush: Some(self.flush_snapshot()),
+        }
     }
 }

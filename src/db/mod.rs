@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
+#[cfg(any(test, bench))]
+use fusio::executor::RwLock;
 use fusio::{
     DynFs,
     executor::{Executor, Timer},
@@ -17,9 +19,9 @@ use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
-#[cfg(feature = "bench-diagnostics")]
+#[cfg(any(test, bench))]
 use crate::bench_diagnostics::{
-    BenchDiagnosticsRecorder, BenchDiagnosticsSnapshot, FlushDiagnosticsSnapshot, LatencySnapshot,
+    BenchDiagnosticsSnapshot, BenchObserver, FlushDiagnosticsSnapshot, LatencySnapshot,
     WalDiagnosticsSnapshot,
 };
 use crate::compaction::{CompactionHandle, MinorCompactor};
@@ -397,8 +399,8 @@ where
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
     /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(feature = "bench-diagnostics")]
-    bench_diagnostics: Option<BenchDiagnosticsRecorder>,
+    #[cfg(any(test, bench))]
+    bench_diagnostics: Option<Arc<dyn BenchObserver>>,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
@@ -447,8 +449,8 @@ where
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
     /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(feature = "bench-diagnostics")]
-    bench_diagnostics: Option<BenchDiagnosticsRecorder>,
+    #[cfg(any(test, bench))]
+    bench_diagnostics: Option<Arc<dyn BenchObserver>>,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -532,7 +534,7 @@ where
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
-        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
+        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Self {
         Self {
             schema,
@@ -554,7 +556,7 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
-            #[cfg(feature = "bench-diagnostics")]
+            #[cfg(any(test, bench))]
             bench_diagnostics,
         }
     }
@@ -568,7 +570,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
+        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -578,7 +580,7 @@ where
             manifest,
             manifest_table,
             table_meta,
-            #[cfg(feature = "bench-diagnostics")]
+            #[cfg(any(test, bench))]
             bench_diagnostics,
         )
         .await
@@ -593,7 +595,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(feature = "bench-diagnostics")] bench_diagnostics: Option<BenchDiagnosticsRecorder>,
+        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -615,7 +617,7 @@ where
             table_meta,
             Some(wal_cfg.clone()),
             executor,
-            #[cfg(feature = "bench-diagnostics")]
+            #[cfg(any(test, bench))]
             bench_diagnostics,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
@@ -800,9 +802,9 @@ where
     }
 
     /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, bench))]
     pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
-        let wal = if let Some(handle) = self.inner.wal_handle() {
+        let wal_snapshot = if let Some(handle) = self.wal_handle() {
             let metrics = handle.metrics();
             let guard = metrics.read().await;
             let append_latency = if guard.append_events > 0 {
@@ -826,8 +828,26 @@ where
             None
         };
 
-        let flush = self.inner.bench_diagnostics_snapshot();
-        BenchDiagnosticsSnapshot { wal, flush }
+        #[cfg(any(test, bench))]
+        if let Some(observer) = &self.bench_diagnostics {
+            if let Some(wal) = wal_snapshot.clone() {
+                observer.update_wal(wal);
+            }
+            let mut snapshot = observer.snapshot();
+            if snapshot.flush.is_none() {
+                snapshot.flush = self.bench_flush_snapshot();
+            }
+            if snapshot.wal.is_none() {
+                snapshot.wal = wal_snapshot;
+            }
+            return snapshot;
+        }
+
+        let flush = self.bench_flush_snapshot();
+        BenchDiagnosticsSnapshot {
+            wal: wal_snapshot,
+            flush,
+        }
     }
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
@@ -855,7 +875,7 @@ where
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
-        #[cfg(feature = "bench-diagnostics")]
+        #[cfg(any(test, bench))]
         let flush_started = self.executor.now();
         let _guard = self.flush_lock.lock().await;
         let (immutables_snapshot, flush_count) = {
@@ -954,7 +974,7 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
-                #[cfg(feature = "bench-diagnostics")]
+                #[cfg(any(test, bench))]
                 if let Some(diag) = &self.bench_diagnostics {
                     let duration = flush_started.elapsed();
                     let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
@@ -985,11 +1005,11 @@ where
         &self._key_locks
     }
 
-    #[cfg(feature = "bench-diagnostics")]
-    pub(crate) fn bench_diagnostics_snapshot(&self) -> Option<FlushDiagnosticsSnapshot> {
+    #[cfg(any(test, bench))]
+    pub(crate) fn bench_flush_snapshot(&self) -> Option<FlushDiagnosticsSnapshot> {
         self.bench_diagnostics
             .as_ref()
-            .map(BenchDiagnosticsRecorder::snapshot)
+            .map(|observer| observer.flush_snapshot())
     }
 }
 
@@ -1031,7 +1051,7 @@ where
             table_meta,
             None,
             executor,
-            #[cfg(feature = "bench-diagnostics")]
+            #[cfg(any(test, bench))]
             None,
         ))
     }
