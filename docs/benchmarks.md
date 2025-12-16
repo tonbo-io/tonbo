@@ -2,7 +2,7 @@
 
 - Config-driven: YAML passed via `--config`.
 - Scenario support: `sequential_write`/`write_only`, `read_only`, `mixed`.
-- Backends: disk and S3 (LocalStack in CI) through the benchmark harness.
+- Backends: disk; S3/LocalStack harness is available locally but **not** wired into CI yet.
 - Component support: `memtable_insert` remains as in Phase 1.
 - Output schema is backward compatible and includes `backend_details`, `workload_type`, and optional `diagnostics` when enabled.
 - Regression detection (Phase 4): results are compared against baselines in `benchmarks/baselines/` using `bench-compare`.
@@ -15,13 +15,14 @@ cargo bench --bench tonbo_scenarios -- --config bench-config.yaml
 cargo bench --bench tonbo_components -- --config bench-config.yaml
 
 # Enable engine diagnostics (Phase 3) – add the feature flag
-cargo bench --features bench-diagnostics --bench tonbo_scenarios -- --config bench-config.yaml
+cargo bench --bench tonbo_scenarios -- --config bench-config.yaml
 
 # Regression comparison (Phase 4)
 cargo run -p bench-compare -- \
   --current target/bench-results \
   --baseline benchmarks/baselines/scenarios \
-  --thresholds benches/harness/configs/regression-thresholds.yaml
+  --thresholds benches/harness/configs/regression-thresholds.yaml \
+  --missing-baseline fail
 
 # Report generation (Phase 5)
 cargo run -p bench-report -- \
@@ -29,6 +30,8 @@ cargo run -p bench-report -- \
   --limit 10 \
   --output-md target/bench-reports/perf-report.md \
   --output-json target/bench-reports/perf-report.json
+
+**Note:** `runtime.concurrency` is currently limited to `1` in the harness; higher values will abort.
 ```
 
 ## Output
@@ -37,6 +40,10 @@ cargo run -p bench-report -- \
 - Temp data: `target/bench-tmp/tonbo-bench-*/` for disk runs; S3 prefixes are cleaned after runs.
 - Regression reports: optional `target/bench-results/regression-report.json` emitted by the comparator.
 - History/reporting artifacts: `target/bench-reports/perf-report.md` (and `.json` when requested).
+
+# Engine diagnostics
+
+- Bench-only diagnostics are compiled only for benches/tests; they do not ship in normal builds.
 
 ## Sample Configs
 
@@ -97,12 +104,14 @@ diagnostics:
 
 - Provide dummy credentials via `TONBO_S3_ACCESS_KEY`/`TONBO_S3_SECRET_KEY` (or standard AWS envs) and set `backend.s3.endpoint` to the LocalStack endpoint.
 - The harness creates the bucket if missing and scopes all objects under a per-run prefix; cleanup is best-effort via prefix deletion.
-- CI uses LocalStack only; no real AWS calls are issued in CI.
+- CI currently runs disk-only; S3/LocalStack is supported for local runs only. No real AWS calls are issued in CI.
 
 ## CI behavior (Phase 4)
 
 - `.github/workflows/benchmarks.yml` runs small disk-only scenario benches using configs in `benches/harness/configs/ci-*.yaml`.
+- `.github/workflows/benchmarks-nightly.yml` runs disk-only `ycsb_b` via `benches/harness/configs/nightly-ycsb-b.yaml`.
 - `bench-compare` checks results against repo-tracked baselines in `benchmarks/baselines/scenarios/` using thresholds from `benches/harness/configs/regression-thresholds.yaml`.
+- Missing baselines now fail the run; keep `benchmarks/baselines/*` in sync when adding new benches.
 - Exit codes: `0` pass, `1` regression beyond threshold, `2` invalid inputs/missing baseline/parsing failure. CI fails on `1` or `2`.
 - Artifacts: `target/bench-results/*.json` plus `regression-report.json` for debugging.
 

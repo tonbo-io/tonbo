@@ -32,6 +32,7 @@ jobs:
             --current target/bench-results \
             --baseline benchmarks/baselines/scenarios \
             --thresholds benches/harness/configs/regression-thresholds.yaml \
+            --missing-baseline fail \
             --report target/bench-results/regression-report.json
 
       - name: Generate performance report

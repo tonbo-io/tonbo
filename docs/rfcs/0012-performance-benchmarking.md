@@ -145,15 +145,16 @@ tonbo/
 │   ├── scenarios/
 │   │   ├── write_only.rs
 │   │   ├── read_only.rs
-│   │   ├── mixed.rs
-│   │   └── compaction.rs
+│   │   └── mixed.rs
 │   ├── components/
 │   │   ├── memtable.rs
-│   │   ├── bloom.rs
-│   │   ├── cache.rs
-│   │   └── iter.rs
+│   │   ├── bloom.rs           # deferred
+│   │   ├── cache.rs           # deferred
+│   │   └── iter.rs            # deferred
 │   └── harness/
 │       ├── config.rs
 │       ├── backend.rs
 │       ├── workload.rs
 │       └── metrics.rs
+
+> **Status (dev branch)**: `write_only`, `read_only`, and `mixed` scenarios exist; compaction scenario is not yet implemented. Component coverage is limited to `memtable` via ingest; bloom/cache/iterator benches are deferred. Bench diagnostics require a feature flag and are intentionally off-by-default.

@@ -280,10 +280,10 @@ pub(crate) mod ondisk;
 pub(crate) mod compaction;
 
 /// Bench-only diagnostics surfaces for scenario benchmarks.
-#[cfg(any(test, bench))]
+#[cfg(any(test, tonbo_bench))]
 #[doc(hidden)]
 pub mod bench_diagnostics;
-#[cfg(any(test, bench))]
+#[cfg(any(test, tonbo_bench))]
 pub use bench_diagnostics::{
     BenchDiagnosticsSnapshot, BenchObserver, FlushDiagnosticsSnapshot, LatencySnapshot,
     WalDiagnosticsSnapshot,

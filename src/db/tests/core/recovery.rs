@@ -92,7 +92,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         table_meta.clone(),
         Some(wal_cfg.clone()),
         Arc::clone(&executor),
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         None,
     );
     db.enable_wal(wal_cfg.clone()).await.expect("enable wal");
@@ -122,7 +122,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         manifest,
         manifest_table,
         table_meta.clone(),
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         None,
     )
     .await
@@ -240,7 +240,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         manifest,
         manifest_table,
         table_meta,
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         None,
     )
     .await

@@ -84,7 +84,7 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         "wall_time_ms": wall_time_ms,
     });
 
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     if diag.enabled() {
         let snapshot = db.bench_diagnostics().await;
         diag.record_engine_snapshot(snapshot);

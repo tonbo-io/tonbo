@@ -14,7 +14,7 @@ use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, Segment
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
-#[cfg(any(test, bench))]
+#[cfg(any(test, tonbo_bench))]
 use crate::bench_diagnostics::{BenchDiagnosticsRecorder, BenchObserver};
 use crate::{
     compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
@@ -439,7 +439,7 @@ pub struct DbBuilder<S = Unconfigured> {
     compaction_interval: Option<Duration>,
     compaction_loop_cfg: Option<CompactionLoopConfig>,
     minor_compaction: Option<MinorCompactionOptions>,
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
     bench_diagnostics: bool,
 }
 
@@ -778,7 +778,7 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: None,
             compaction_loop_cfg: None,
             minor_compaction: None,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics: false,
         }
     }
@@ -802,7 +802,7 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics: self.bench_diagnostics,
         })
     }
@@ -829,7 +829,7 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics: self.bench_diagnostics,
         })
     }
@@ -850,7 +850,7 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics: self.bench_diagnostics,
         })
     }
@@ -1056,7 +1056,7 @@ where
             None
         };
 
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         let bench_diagnostics = self
             .bench_diagnostics
             .then(|| Arc::new(BenchDiagnosticsRecorder::default()) as Arc<dyn BenchObserver>);
@@ -1072,7 +1072,7 @@ where
             table_meta,
             wal_cfg.clone(),
             executor,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics,
         );
 
@@ -1114,7 +1114,7 @@ impl<S> DbBuilder<S> {
     }
 
     /// Enable bench-only diagnostics hooks used by scenario benchmarks.
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
     #[must_use]
     pub fn enable_bench_diagnostics(mut self) -> Self {
         self.bench_diagnostics = true;
@@ -1257,7 +1257,7 @@ where
             let manifest_table = table_meta.table_id;
             let fs_dyn = layout.dyn_fs();
             let minor_compaction = self.build_minor_compaction_state(&layout)?;
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             let bench_diagnostics = self
                 .bench_diagnostics
                 .then(|| Arc::new(BenchDiagnosticsRecorder::default()) as Arc<dyn BenchObserver>);
@@ -1269,7 +1269,7 @@ where
                 manifest,
                 manifest_table,
                 table_meta,
-                #[cfg(any(test, bench))]
+                #[cfg(any(test, tonbo_bench))]
                 bench_diagnostics,
             )
             .await

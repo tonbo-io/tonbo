@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
-#[cfg(any(test, bench))]
+#[cfg(any(test, tonbo_bench))]
 use fusio::executor::RwLock;
 use fusio::{
     DynFs,
@@ -19,7 +19,7 @@ use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
-#[cfg(any(test, bench))]
+#[cfg(any(test, tonbo_bench))]
 use crate::bench_diagnostics::{
     BenchDiagnosticsSnapshot, BenchObserver, FlushDiagnosticsSnapshot, LatencySnapshot,
     WalDiagnosticsSnapshot,
@@ -313,6 +313,13 @@ where
     pub async fn list_versions(&self, limit: usize) -> Result<Vec<Version>, ManifestError> {
         self.inner.list_versions(limit).await
     }
+
+    /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
+    #[cfg(any(test, tonbo_bench))]
+    #[allow(dead_code)]
+    pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
+        self.inner.bench_diagnostics().await
+    }
 }
 
 impl<E> DB<InMemoryFs, E>
@@ -399,7 +406,7 @@ where
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
     /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
     bench_diagnostics: Option<Arc<dyn BenchObserver>>,
 }
 
@@ -449,7 +456,7 @@ where
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
     /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
     bench_diagnostics: Option<Arc<dyn BenchObserver>>,
 }
 
@@ -534,7 +541,7 @@ where
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
-        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
+        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Self {
         Self {
             schema,
@@ -556,7 +563,7 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics,
         }
     }
@@ -570,7 +577,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
+        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -580,7 +587,7 @@ where
             manifest,
             manifest_table,
             table_meta,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics,
         )
         .await
@@ -595,7 +602,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(any(test, bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
+        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -617,7 +624,7 @@ where
             table_meta,
             Some(wal_cfg.clone()),
             executor,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             bench_diagnostics,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
@@ -802,7 +809,8 @@ where
     }
 
     /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
+    #[allow(dead_code)]
     pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
         let wal_snapshot = if let Some(handle) = self.wal_handle() {
             let metrics = handle.metrics();
@@ -828,7 +836,7 @@ where
             None
         };
 
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         if let Some(observer) = &self.bench_diagnostics {
             if let Some(wal) = wal_snapshot.clone() {
                 observer.update_wal(wal);
@@ -875,7 +883,7 @@ where
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
-        #[cfg(any(test, bench))]
+        #[cfg(any(test, tonbo_bench))]
         let flush_started = self.executor.now();
         let _guard = self.flush_lock.lock().await;
         let (immutables_snapshot, flush_count) = {
@@ -974,7 +982,7 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
-                #[cfg(any(test, bench))]
+                #[cfg(any(test, tonbo_bench))]
                 if let Some(diag) = &self.bench_diagnostics {
                     let duration = flush_started.elapsed();
                     let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
@@ -1005,7 +1013,8 @@ where
         &self._key_locks
     }
 
-    #[cfg(any(test, bench))]
+    #[cfg(any(test, tonbo_bench))]
+    #[allow(dead_code)]
     pub(crate) fn bench_flush_snapshot(&self) -> Option<FlushDiagnosticsSnapshot> {
         self.bench_diagnostics
             .as_ref()
@@ -1051,7 +1060,7 @@ where
             table_meta,
             None,
             executor,
-            #[cfg(any(test, bench))]
+            #[cfg(any(test, tonbo_bench))]
             None,
         ))
     }

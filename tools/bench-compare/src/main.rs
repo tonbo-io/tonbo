@@ -24,7 +24,7 @@ struct Args {
     #[arg(long)]
     report: Option<PathBuf>,
     /// Behavior when a benchmark is missing in the baseline.
-    #[arg(long, default_value = "warn", value_parser = ["warn", "fail"])]
+    #[arg(long, default_value = "fail", value_parser = ["warn", "fail"])]
     missing_baseline: String,
 }
 

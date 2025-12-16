@@ -12,7 +12,7 @@ readme = "README.md"
 members = [".", "predicate", "tools/bench-compare", "tools/bench-report"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bench)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tonbo_bench)'] }
 
 [features]
 default = ["tokio", "typed-arrow"]
@@ -96,8 +96,8 @@ tempfile = "3"
 typed-arrow = { version = "0.5.1", features = ["ext-hooks"] }
 serde_yaml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 aws-credential-types = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

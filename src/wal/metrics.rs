@@ -6,7 +6,7 @@ pub struct WalMetrics {
     /// Current depth of the writer queue.
     pub queue_depth: usize,
     /// Largest queue depth observed.
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub max_queue_depth: usize,
     /// Bytes written since process start.
     pub bytes_written: u64,
@@ -21,16 +21,16 @@ pub struct WalMetrics {
     /// Number of failed prune attempts.
     pub wal_prune_failures: u64,
     /// Total number of WAL append events recorded.
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub append_events: u64,
     /// Accumulated latency (microseconds) from enqueue -> durability.
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub append_latency_total_us: u128,
     /// Shortest observed append latency (microseconds).
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub append_latency_min_us: u64,
     /// Longest observed append latency (microseconds).
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub append_latency_max_us: u64,
 }
 
@@ -38,7 +38,7 @@ impl WalMetrics {
     /// Record a queue depth update.
     pub fn record_queue_depth(&mut self, depth: usize) {
         self.queue_depth = depth;
-        #[cfg(feature = "bench-diagnostics")]
+        #[cfg(any(test, tonbo_bench))]
         {
             if depth > self.max_queue_depth {
                 self.max_queue_depth = depth;
@@ -77,7 +77,7 @@ impl WalMetrics {
     }
 
     /// Record append latency for diagnostics (bench-only).
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub fn record_append_latency(&mut self, latency: std::time::Duration) {
         let micros = latency.as_micros();
         self.append_events = self.append_events.saturating_add(1);

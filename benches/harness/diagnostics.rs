@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "bench-diagnostics")]
+#[cfg(any(test, tonbo_bench))]
 use tonbo::bench_diagnostics::{BenchDiagnosticsSnapshot, LatencySnapshot};
 
 use crate::harness::{BackendRun, BenchConfig};
@@ -154,11 +154,10 @@ impl DiagnosticsCollector {
         }
     }
 
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     pub fn record_engine_snapshot(&self, snapshot: BenchDiagnosticsSnapshot) {
         if let Some(inner) = &self.inner {
-            // Engine snapshot originates from the bench-diagnostics feature that exposes
-            // WAL metrics and flush timings without touching production code paths.
+            // Engine snapshot comes from bench-only diagnostics compiled for bench/test builds.
             let mut guard = inner.lock().expect("diagnostics mutex poisoned");
             let flush = snapshot.flush.as_ref().and_then(|f| {
                 if f.flush_count == 0 {
@@ -174,7 +173,7 @@ impl DiagnosticsCollector {
         }
     }
 
-    #[cfg(not(feature = "bench-diagnostics"))]
+    #[cfg(not(any(test, tonbo_bench)))]
     pub fn record_engine_snapshot(&self, _snapshot: ()) {}
 
     pub async fn finalize(
@@ -220,7 +219,7 @@ impl DiagnosticsCollector {
     }
 }
 
-#[cfg(feature = "bench-diagnostics")]
+#[cfg(any(test, tonbo_bench))]
 fn convert_wal(snapshot: &tonbo::bench_diagnostics::WalDiagnosticsSnapshot) -> WalDiagnostics {
     let append_latency = snapshot.append_latency.as_ref().map(|lat| to_latency(lat));
     WalDiagnostics {
@@ -234,7 +233,7 @@ fn convert_wal(snapshot: &tonbo::bench_diagnostics::WalDiagnosticsSnapshot) -> W
     }
 }
 
-#[cfg(feature = "bench-diagnostics")]
+#[cfg(any(test, tonbo_bench))]
 fn to_latency(lat: &LatencySnapshot) -> LatencySummary {
     let mean = lat.mean_us().unwrap_or(0.0);
     LatencySummary {
@@ -245,7 +244,7 @@ fn to_latency(lat: &LatencySnapshot) -> LatencySummary {
     }
 }
 
-#[cfg(feature = "bench-diagnostics")]
+#[cfg(any(test, tonbo_bench))]
 fn convert_flush(
     snapshot: &tonbo::bench_diagnostics::FlushDiagnosticsSnapshot,
 ) -> FlushDiagnostics {

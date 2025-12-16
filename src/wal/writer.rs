@@ -639,7 +639,7 @@ where
             bytes_flushed: bytes_written,
             elapsed: enqueued_at.elapsed(),
         };
-        #[cfg(feature = "bench-diagnostics")]
+        #[cfg(any(test, tonbo_bench))]
         self.record_append_latency(ack.elapsed).await;
         let sync_performed = rotation.sync_performed || sync_outcome.performed;
         let timer_directive = if rotation.performed {
@@ -882,7 +882,7 @@ where
         guard.record_sync();
     }
 
-    #[cfg(feature = "bench-diagnostics")]
+    #[cfg(any(test, tonbo_bench))]
     async fn record_append_latency(&self, latency: Duration) {
         let mut guard = self.metrics.write().await;
         guard.record_append_latency(latency);

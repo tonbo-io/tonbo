@@ -68,6 +68,14 @@ impl BenchDb {
             DbInner::S3(db) => Ok(db.scan().filter(predicate).collect().await?),
         }
     }
+
+    #[cfg(any(test, tonbo_bench))]
+    pub async fn bench_diagnostics(&self) -> tonbo::bench_diagnostics::BenchDiagnosticsSnapshot {
+        match &self.inner {
+            DbInner::Disk(db) => db.bench_diagnostics().await,
+            DbInner::S3(db) => db.bench_diagnostics().await,
+        }
+    }
 }
 
 /// Disk-backed benchmark storage.
@@ -166,7 +174,7 @@ impl S3Backend {
         enable_diagnostics: bool,
     ) -> anyhow::Result<BenchDb> {
         let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
-        #[cfg(feature = "bench-diagnostics")]
+        #[cfg(any(test, tonbo_bench))]
         if enable_diagnostics {
             builder = builder.enable_bench_diagnostics();
         }
@@ -282,7 +290,7 @@ impl BackendRun {
             Backend::Disk(disk) => {
                 let db_path = disk.data_root().join("db");
                 let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
-                #[cfg(feature = "bench-diagnostics")]
+                #[cfg(any(test, tonbo_bench))]
                 if self.diagnostics_enabled {
                     builder = builder.enable_bench_diagnostics();
                 }
@@ -374,7 +382,11 @@ async fn ensure_bucket_exists(config: &S3BackendConfig, creds: &AwsCreds) -> any
         .load()
         .await;
 
-    let client = AwsS3::new(&shared);
+    // Use path-style addressing for LocalStack compatibility
+    let s3_config = aws_sdk_s3::config::Builder::from(&shared)
+        .force_path_style(true)
+        .build();
+    let client = AwsS3::from_conf(s3_config);
     let head = client.head_bucket().bucket(&config.bucket).send().await;
     if head.is_ok() {
         return Ok(());
