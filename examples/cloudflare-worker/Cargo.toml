@@ -34,21 +34,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # For async streams
 futures = "0.3"
 
-# Patch fusio crates to use version with WASM fixes
-# See: https://github.com/tonbo-io/fusio/pull/257
-#
-# For local development (if you have fusio checked out):
-[patch.crates-io]
-fusio = { path = "../../../fusio/fusio" }
-fusio-manifest = { path = "../../../fusio/fusio-manifest" }
-fusio-parquet = { path = "../../../fusio/fusio-parquet" }
-#
-# After PR #257 is merged, use git references instead:
-# [patch.crates-io]
-# fusio = { git = "https://github.com/tonbo-io/fusio.git" }
-# fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git" }
-# fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git" }
-
 # Size optimizations - Cloudflare Workers have a 10MB limit
 [profile.release]
 opt-level = "z"       # Optimize for size
