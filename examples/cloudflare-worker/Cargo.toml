@@ -1,0 +1,58 @@
+[package]
+name = "tonbo-cloudflare-worker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone workspace (not part of parent tonbo workspace)
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Tonbo with web (WASM) features
+tonbo = { path = "../..", default-features = false, features = ["web"] }
+
+# Fusio for WebExecutor and AmazonS3 types
+fusio = { version = "0.5.0-a0", default-features = false, features = [
+    "aws",
+    "executor-web",
+] }
+
+# Arrow for RecordBatch creation
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
+
+# Cloudflare Workers runtime
+worker = "0.7"
+console_error_panic_hook = "0.1"
+
+# getrandom needs wasm_js feature for WASM
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# For async streams
+futures = "0.3"
+
+# Patch fusio crates to use version with WASM fixes
+# See: https://github.com/tonbo-io/fusio/pull/257
+#
+# For local development (if you have fusio checked out):
+[patch.crates-io]
+fusio = { path = "../../../fusio/fusio" }
+fusio-manifest = { path = "../../../fusio/fusio-manifest" }
+fusio-parquet = { path = "../../../fusio/fusio-parquet" }
+#
+# After PR #257 is merged, use git references instead:
+# [patch.crates-io]
+# fusio = { git = "https://github.com/tonbo-io/fusio.git" }
+# fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git" }
+# fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git" }
+
+# Size optimizations - Cloudflare Workers have a 10MB limit
+[profile.release]
+opt-level = "z"       # Optimize for size
+lto = "fat"           # Full link-time optimization
+strip = "symbols"     # Strip debug symbols
+codegen-units = 1     # Better optimization (slower compile)
+panic = "abort"       # Smaller panic handling

@@ -1,0 +1,28 @@
+name = "tonbo-example-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-01-01"
+
+# Required: Tell wrangler this is a Rust Workers project
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+# For local development with LocalStack:
+[vars]
+TONBO_S3_ENDPOINT = "http://localhost:4566"
+TONBO_S3_BUCKET = "tonbo-test"
+TONBO_S3_REGION = "us-east-1"
+
+# For production with Cloudflare R2, change to:
+# TONBO_S3_ENDPOINT = "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com"
+# TONBO_S3_BUCKET = "your-bucket-name"
+# TONBO_S3_REGION = "auto"
+
+# Secrets (set via `npx wrangler secret put`):
+# - TONBO_S3_ACCESS_KEY
+# - TONBO_S3_SECRET_KEY
+
+# For local development with LocalStack, create .dev.vars:
+# TONBO_S3_ACCESS_KEY=test
+# TONBO_S3_SECRET_KEY=test
+# And override vars in wrangler.toml or use --var flag:
+# npx wrangler dev --var TONBO_S3_ENDPOINT:http://localhost:4566 --var TONBO_S3_BUCKET:tonbo-test --var TONBO_S3_REGION:us-east-1
