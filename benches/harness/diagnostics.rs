@@ -25,6 +25,9 @@ pub struct DiagnosticsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub level: DiagnosticsLevel,
+    /// Skip expensive filesystem walks for write amplification accounting.
+    #[serde(default)]
+    pub skip_physical_bytes: bool,
 }
 
 impl Default for DiagnosticsConfig {
@@ -32,6 +35,7 @@ impl Default for DiagnosticsConfig {
         Self {
             enabled: false,
             level: DiagnosticsLevel::Basic,
+            skip_physical_bytes: false,
         }
     }
 }
@@ -187,21 +191,28 @@ impl DiagnosticsCollector {
         let guard = inner.lock().expect("diagnostics mutex poisoned");
         let logical_bytes = guard.logical_bytes;
         let engine = guard.engine.clone();
+        let cfg = guard.config.clone();
         drop(guard);
 
-        let physical_bytes = backend.physical_bytes().await?;
-        let amplification_ratio = if logical_bytes == 0 {
-            0.0
+        let physical_bytes = if cfg.skip_physical_bytes {
+            None
         } else {
-            physical_bytes as f64 / logical_bytes as f64
+            Some(backend.physical_bytes().await?)
         };
 
         let mut output = DiagnosticsOutput::default();
-        output.write_amplification = Some(WriteAmplification {
-            logical_bytes_written: logical_bytes,
-            physical_bytes_written: physical_bytes,
-            amplification_ratio,
-        });
+        if let Some(physical) = physical_bytes {
+            let amplification_ratio = if logical_bytes == 0 {
+                0.0
+            } else {
+                physical as f64 / logical_bytes as f64
+            };
+            output.write_amplification = Some(WriteAmplification {
+                logical_bytes_written: logical_bytes,
+                physical_bytes_written: physical,
+                amplification_ratio,
+            });
+        }
         if let Some(wal) = engine.wal.clone() {
             output.wal = Some(wal);
         }

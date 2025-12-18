@@ -81,6 +81,7 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         let snapshot = db.bench_diagnostics().await;
         diag.record_engine_snapshot(snapshot);
     }
+    println!("write_only finalizing diagnostics");
     let diagnostics = diag.finalize(ctx.backend).await?;
 
     let report = ScenarioReport {
