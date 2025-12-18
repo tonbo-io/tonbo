@@ -21,10 +21,10 @@ jobs:
           cache-on-failure: false
 
       - name: Run disk benchmark
-        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
 
       - name: Run mixed benchmark (disk)
-        run: cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
+        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
 
       - name: Compare against baseline
         run: |
