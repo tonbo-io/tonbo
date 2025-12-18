@@ -11,7 +11,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::web::WebExecutor, impls::remotes::aws::fs::AmazonS3};
 use futures::StreamExt;
-use tonbo::db::{AwsCreds, ObjectSpec, S3Spec, DB};
+use tonbo::db::{AwsCreds, DbBuilder, ObjectSpec, S3Spec, DB};
 use worker::*;
 
 #[event(start)]
@@ -102,13 +102,6 @@ async fn open_db(ctx: &RouteContext<()>) -> Result<DB<AmazonS3, WebExecutor>> {
 
     console_log!("open_db: S3 endpoint={}", endpoint);
 
-    console_log!("open_db: creating schema...");
-    let schema = get_schema();
-    let schema_cfg = tonbo::schema::SchemaBuilder::from_schema(schema)
-        .primary_key("id")
-        .build()
-        .map_err(|e| Error::RustError(format!("schema error: {e}")))?;
-
     console_log!("open_db: configuring S3...");
     let credentials = AwsCreds::new(access_key, secret_key);
     let mut s3_spec = S3Spec::new(bucket, "tonbo-worker-demo", credentials);
@@ -118,7 +111,8 @@ async fn open_db(ctx: &RouteContext<()>) -> Result<DB<AmazonS3, WebExecutor>> {
 
     console_log!("open_db: building DB...");
     let executor = Arc::new(WebExecutor::new());
-    let db = DB::<AmazonS3, WebExecutor>::builder(schema_cfg)
+    let db = DbBuilder::from_schema_key_name(get_schema(), "id")
+        .map_err(|e| Error::RustError(format!("schema error: {e}")))?
         .object_store(ObjectSpec::s3(s3_spec))
         .map_err(|e| Error::RustError(format!("object_store error: {e}")))?
         .open_with_executor(executor)
