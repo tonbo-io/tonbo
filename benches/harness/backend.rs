@@ -317,9 +317,21 @@ impl BackendRun {
                     inner: DbInner::Disk(db),
                 })
             }
-            Backend::S3(_) => Err(anyhow::anyhow!(
-                "open_db_with_builder not supported for s3 backend; use open_db"
-            )),
+            Backend::S3(s3) => {
+                #[cfg(any(test, tonbo_bench))]
+                if self.diagnostics_enabled {
+                    builder = builder.enable_bench_diagnostics();
+                }
+                let db = builder
+                    .object_store(ObjectSpec::s3(s3.spec.clone()))
+                    .map_err(anyhow::Error::from)?
+                    .open()
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                Ok(BenchDb {
+                    inner: DbInner::S3(db),
+                })
+            }
         }
     }
 
