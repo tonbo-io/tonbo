@@ -13,10 +13,10 @@ use serde_json::Value;
 
 const DEFAULT_SCHEMA_VERSION: &str = "1";
 
-/// Report generator for Phase 5 performance history.
+/// Report generator for benchmark performance history.
 #[derive(Debug, Parser)]
 struct Args {
-    /// Directory containing benchmark result JSON files (Phase 4 schema).
+    /// Directory containing benchmark result JSON files.
     #[arg(long)]
     results_dir: PathBuf,
     /// Run ID to use as the "current" run (defaults to latest timestamp).

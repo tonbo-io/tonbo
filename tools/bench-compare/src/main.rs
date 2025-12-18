@@ -134,21 +134,27 @@ fn load_thresholds(path: &Path) -> anyhow::Result<ThresholdsFile> {
     Ok(cfg)
 }
 
+fn collect_json_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("list directory {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_json_files_recursive(&path, files)?;
+        } else if file_type.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn load_run(path: &Path) -> anyhow::Result<Run> {
     let mut files = Vec::new();
     let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     if meta.is_file() {
         files.push(path.to_path_buf());
     } else if meta.is_dir() {
-        for entry in
-            fs::read_dir(path).with_context(|| format!("list directory {}", path.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                files.push(path);
-            }
-        }
+        collect_json_files_recursive(path, &mut files)?;
         files.sort();
     } else {
         return Err(anyhow!("unsupported path type: {}", path.display()));
