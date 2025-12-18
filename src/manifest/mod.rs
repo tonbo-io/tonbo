@@ -37,7 +37,7 @@ where
 pub(crate) use bootstrap::init_fs_manifest_in_memory;
 #[cfg(test)]
 pub(crate) use bootstrap::init_in_memory_manifest;
-pub(crate) use bootstrap::{TableSnapshot, TonboManifest, init_fs_manifest};
+pub(crate) use bootstrap::{TableSnapshot, TonboManifest};
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) use domain::TableHead;
 pub use domain::VersionState;

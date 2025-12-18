@@ -8,6 +8,8 @@ use clap::Parser;
 
 mod harness;
 use harness::diagnostics::diagnostics_config;
+#[path = "scenarios/compaction.rs"]
+mod compaction;
 #[path = "scenarios/mixed.rs"]
 mod mixed;
 #[path = "scenarios/read_only.rs"]
@@ -79,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         WorkloadKind::SequentialWrite => write_only::run(ctx).await,
         WorkloadKind::ReadOnly => read_only::run(ctx).await,
         WorkloadKind::Mixed => mixed::run(ctx).await,
+        WorkloadKind::Compaction => compaction::run(ctx).await,
     };
 
     let cleanup_result = backend_run.cleanup().await;

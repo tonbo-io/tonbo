@@ -1,0 +1,15 @@
+backend:
+  type: s3
+  s3:
+    endpoint: "http://localhost:4566"
+    bucket: "tonbo-bench"
+    region: "us-east-1"
+    prefix: "tonbo-bench"
+    sign_payload: true
+    checksum: false
+workload:
+  type: compaction
+  num_records: 20000
+  value_size_bytes: 256
+runtime:
+  concurrency: 1

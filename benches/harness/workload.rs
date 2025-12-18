@@ -5,6 +5,7 @@ pub enum WorkloadKind {
     SequentialWrite,
     ReadOnly,
     Mixed,
+    Compaction,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +29,7 @@ impl Workload {
             "sequential_write" | "write_only" => WorkloadKind::SequentialWrite,
             "read_only" => WorkloadKind::ReadOnly,
             "mixed" => WorkloadKind::Mixed,
+            "compaction" => WorkloadKind::Compaction,
             _ => return None,
         };
 
@@ -49,6 +51,7 @@ impl Workload {
                 }
                 (read_ratio, write_ratio)
             }
+            WorkloadKind::Compaction => (0.0, 1.0),
         };
 
         Some(Self {

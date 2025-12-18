@@ -32,3 +32,10 @@ presets:
       value_size_bytes: 256
     runtime:
       concurrency: 1
+  compaction:
+    workload:
+      type: compaction
+      num_records: 80000
+      value_size_bytes: 256
+    runtime:
+      concurrency: 1

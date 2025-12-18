@@ -33,6 +33,7 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
         .unwrap_or("wal-gc-smoke");
     let mut db: DbInner<InMemoryFs, TokioExecutor> =
         DB::<InMemoryFs, TokioExecutor>::builder(mode_config)
+            .disable_minor_compaction()
             .in_memory(namespace.to_string())?
             .open_with_executor(Arc::clone(&executor))
             .await?
@@ -170,6 +171,7 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
         .unwrap_or("wal-gc-dry-run");
     let mut db: DbInner<InMemoryFs, TokioExecutor> =
         DB::<InMemoryFs, TokioExecutor>::builder(mode_config)
+            .disable_minor_compaction()
             .in_memory(namespace.to_string())?
             .open_with_executor(Arc::clone(&executor))
             .await?

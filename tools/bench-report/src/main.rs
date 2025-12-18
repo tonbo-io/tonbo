@@ -154,42 +154,71 @@ fn try_main() -> anyhow::Result<i32> {
 
 fn load_runs(results_dir: &Path) -> anyhow::Result<BTreeMap<String, Run>> {
     let mut entries = Vec::new();
-    for entry in fs::read_dir(results_dir)
-        .with_context(|| format!("list results dir {}", results_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
+    let mut stack = vec![results_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let listing = match fs::read_dir(&dir) {
+            Ok(ls) => ls,
+            Err(err) => {
+                eprintln!("skipping {}: list error: {err}", dir.display());
+                continue;
+            }
+        };
+        for entry in listing.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            entries.push(path);
         }
-        entries.push(path);
     }
     entries.sort();
 
     let mut runs: BTreeMap<String, Run> = BTreeMap::new();
     for path in entries {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow!("invalid filename {}", path.display()))?;
-        let mut parts = stem.splitn(2, '-');
-        let run_id = parts
-            .next()
-            .ok_or_else(|| anyhow!("missing run id in filename {}", path.display()))?;
-        let benchmark_name = parts
-            .next()
-            .ok_or_else(|| anyhow!("missing benchmark name in filename {}", path.display()))?;
+        let rel = match path.strip_prefix(results_dir) {
+            Ok(rel) => rel,
+            Err(_) => {
+                eprintln!("skipping {}: not under results dir", path.display());
+                continue;
+            }
+        };
+        if let Some(name) = rel.file_name().and_then(|s| s.to_str())
+            && name == "regression-report.json"
+        {
+            continue;
+        }
+        let mut rel_components = rel.components();
+        let Some(run_component) = rel_components.next() else {
+            eprintln!("skipping {}: missing run component", path.display());
+            continue;
+        };
+        let run_id = run_component.as_os_str().to_string_lossy().to_string();
 
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let doc: RawBenchResult =
-            serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
+        let content = match fs::read_to_string(&path) {
+            Ok(buf) => buf,
+            Err(err) => {
+                eprintln!("skipping {}: read error: {err}", path.display());
+                continue;
+            }
+        };
+        let doc: RawBenchResult = match serde_json::from_str(&content) {
+            Ok(doc) => doc,
+            Err(err) => {
+                eprintln!("skipping {}: parse error: {err}", path.display());
+                continue;
+            }
+        };
+        let benchmark_name = doc.benchmark_name.clone();
         let metrics = extract_numeric_metrics(&doc.metrics);
         if metrics.is_empty() {
             eprintln!("skipping {}; no numeric metrics", path.display());
             continue;
         }
-        let timestamp = parse_timestamp(run_id);
+        let timestamp = parse_timestamp(&run_id);
         let bench_entry = BenchMetrics {
             metrics,
             workload_type: doc.workload_type.clone(),

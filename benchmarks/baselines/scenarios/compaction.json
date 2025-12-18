@@ -1,0 +1,28 @@
+{
+  "run_id": "20251218193953-206",
+  "bench_target": "compaction-disk",
+  "storage_substrate": "disk",
+  "benchmark_name": "compaction",
+  "benchmark_type": "scenario",
+  "backend": "disk",
+  "backend_details": {
+    "path": "target/bench-tmp",
+    "type": "disk"
+  },
+  "workload_type": "compaction",
+  "parameters": {
+    "concurrency": 1,
+    "minor_compaction": {
+      "segment_threshold": 3,
+      "start_id": 1,
+      "target_level": 0
+    },
+    "num_records": 200000,
+    "value_size_bytes": 256
+  },
+  "metrics": {
+    "bytes_per_sec": 42490946.06738742,
+    "ops_per_sec": 165980.2580757321,
+    "wall_time_ms": 1204
+  }
+}
