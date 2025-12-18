@@ -24,10 +24,18 @@ struct Args {
     config: PathBuf,
 }
 
+fn bench_target_from_path(path: &PathBuf) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bench".to_string())
+}
+
 pub struct ScenarioContext<'a> {
     pub config: &'a BenchConfig,
     pub workload: &'a Workload,
     pub backend: &'a BackendRun,
+    pub bench_target: &'a str,
     pub schema: arrow_schema::SchemaRef,
     pub diagnostics: harness::DiagnosticsCollector,
 }
@@ -43,6 +51,7 @@ pub struct ScenarioReport {
 async fn main() -> anyhow::Result<()> {
     let args = parse_args();
     let config = BenchConfig::from_yaml_file(&args.config)?;
+    let bench_target = bench_target_from_path(&args.config);
     let workload = Workload::from_config(&config)
         .ok_or_else(|| anyhow::anyhow!("unsupported workload: {}", config.workload.name))?;
 
@@ -61,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         config: &config,
         workload: &workload,
         backend: &backend_run,
+        bench_target: &bench_target,
         schema,
         diagnostics,
     };
@@ -87,10 +97,15 @@ fn parse_args() -> Args {
 pub fn emit_result(
     backend_run: &BackendRun,
     config: &BenchConfig,
+    bench_target: &str,
     report: ScenarioReport,
 ) -> anyhow::Result<()> {
     let git_commit = std::env::var("GIT_COMMIT").ok();
+    let storage_substrate = backend_run.storage_substrate();
     let result = BenchResult {
+        run_id: backend_run.run_id().to_string(),
+        bench_target: bench_target.to_string(),
+        storage_substrate: storage_substrate.clone(),
         benchmark_name: config.workload.name.clone(),
         benchmark_type: "scenario".into(),
         backend: backend_run.backend_kind().into(),
@@ -102,9 +117,13 @@ pub fn emit_result(
         diagnostics: report.diagnostics,
     };
 
-    let writer = BenchResultWriter::new(&backend_run.result_base)?;
-    let file_stem = format!("{}-{}", backend_run.timestamp, config.workload.name);
-    let path = writer.write(&file_stem, &result)?;
+    let writer = BenchResultWriter::new(
+        &backend_run.result_root,
+        backend_run.run_id(),
+        bench_target,
+        &storage_substrate,
+    )?;
+    let path = writer.write(&config.workload.name, &result)?;
     println!("wrote results to {}", path.display());
     Ok(())
 }

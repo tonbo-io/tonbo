@@ -8,6 +8,45 @@
 - Regression detection (Phase 4): results are compared against baselines in `benchmarks/baselines/` using `bench-compare`.
 - History + reporting (Phase 5): `bench-report` consumes existing JSON outputs to produce Markdown/JSON history summaries.
 
+## One-command runner (Gap #1)
+
+Use the runner to avoid manual `RUSTFLAGS` setup and run scenario/component benches from repo root:
+
+```bash
+# Run both scenario + component benches with a config (recommended)
+cargo run -p tonbo-bench-runner -- --mode all --config benches/harness/configs/ci-write-only.yaml
+
+# Scenario only
+cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-write-only.yaml
+
+# Dry-run to see the exact commands/env (no execution)
+cargo run -p tonbo-bench-runner -- --mode all --config benches/harness/configs/ci-write-only.yaml --dry-run
+
+# CI preset without specifying a config (uses ci-write-only.yaml)
+cargo run -p tonbo-bench-runner -- --mode scenario --profile ci
+```
+
+Behavior:
+- Sets `RUSTFLAGS="--cfg tonbo_bench"` for benchmark subprocesses only.
+- Prints the exact command + env before running; exits non-zero on failure.
+- `--mode {scenario|component|all}` (default: `all`), `--profile {local|ci}` (default: `local`), `--dry-run` to print without executing.
+- Scenario/component benches still honor your YAML config contents; runner does not change output paths or metrics.
+
+Common failure modes:
+- Missing `--config` (or absent default for profile/local) → fix path or use `--profile ci`.
+- Config path typo → runner errors before invoking cargo.
+- Network issues for S3/LocalStack configs → resolve endpoint/creds; runner will surface cargo’s exit status.
+- Deep runs: use `--profile deep` (future) or point at `benches/harness/configs/deep-disk.yaml` for longer, diagnostics-enabled runs.
+
+Runner usage summary (help-style)
+- Command: `cargo run -p tonbo-bench-runner -- [--mode {scenario|component|memtable|wal|sst|iterator|all}] [--config <path>] [--profile {local|ci|deep}] [--dry-run]`
+- Defaults: `--mode all`, `--profile local`, `--config` required unless `--profile ci` (uses `benches/harness/configs/ci-write-only.yaml` for both suites), `--profile deep` uses `benches/harness/configs/deep-disk.yaml`.
+- Suite-specific configs: `--scenario-config` and `--component-config` override `--config` so you can run different YAMLs for scenario vs component when using `--mode all`.
+- Modes: `scenario` (scenarios only), `component` (all components), `memtable` / `wal` / `sst` / `iterator` (only that component), `all` (both suites; components default to memtable/wal/sst/iterator).
+- Behavior: sets `RUSTFLAGS="--cfg tonbo_bench"` for subprocesses; prints the exact command + env; exits non-zero on failure.
+- Outputs: JSON results under `target/bench-results/<run-id>/<bench-target>/<storage-substrate>/…` (run-id and substrate already handled by the bench harness).
+- Post-run summary: runner lists new run directories and JSON files with a concise metric snippet (e.g., ops/sec, bytes/sec, wall_time_ms) to point you to artifacts.
+
 ## Run
 
 ```bash
@@ -36,7 +75,7 @@ cargo run -p bench-report -- \
 
 ## Output
 
-- Results: `target/bench-results/<timestamp>-<benchmark>.json`
+- Results: `target/bench-results/<run-id>/<bench-target>/<storage-substrate>/<benchmark>.json`
 - Temp data: `target/bench-tmp/tonbo-bench-*/` for disk runs; S3 prefixes are cleaned after runs.
 - Regression reports: optional `target/bench-results/regression-report.json` emitted by the comparator.
 - History/reporting artifacts: `target/bench-reports/perf-report.md` (and `.json` when requested).

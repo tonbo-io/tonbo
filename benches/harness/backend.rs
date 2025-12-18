@@ -21,7 +21,7 @@ use tonbo::{
     prelude::Predicate,
 };
 
-use crate::harness::{BenchConfig, S3BackendConfig};
+use crate::harness::{BenchConfig, S3BackendConfig, default_results_root, new_run_id};
 
 // Recon: Phase 1 harness only supported disk via DbBuilder::on_disk().
 // Tonbo exposes object-store through DbBuilder::object_store(S3Spec) using Fusio AmazonS3,
@@ -76,20 +76,30 @@ impl BenchDb {
             DbInner::S3(db) => db.bench_diagnostics().await,
         }
     }
+
+    #[cfg(not(any(test, tonbo_bench)))]
+    pub async fn bench_diagnostics(&self) -> tonbo::bench_diagnostics::BenchDiagnosticsSnapshot {
+        unreachable!("bench diagnostics not available without tonbo_bench")
+    }
 }
 
 /// Disk-backed benchmark storage.
 struct DiskBackend {
+    base: PathBuf,
     root: TempDir,
 }
 
 impl DiskBackend {
-    fn new(root: TempDir) -> Self {
-        Self { root }
+    fn new(base: PathBuf, root: TempDir) -> Self {
+        Self { base, root }
     }
 
     fn data_root(&self) -> &Path {
         self.root.path()
+    }
+
+    fn label(&self) -> &Path {
+        &self.base
     }
 
     fn cleanup(self) -> anyhow::Result<()> {
@@ -108,7 +118,7 @@ struct S3Backend {
 }
 
 impl S3Backend {
-    async fn new(config: &S3BackendConfig, timestamp: &str) -> anyhow::Result<Self> {
+    async fn new(config: &S3BackendConfig, run_id: &str) -> anyhow::Result<Self> {
         if config.endpoint.trim().is_empty() {
             return Err(anyhow!(
                 "s3 backend requires a non-empty endpoint (LocalStack)"
@@ -131,9 +141,9 @@ impl S3Backend {
         let prefix_base = config.prefix.clone().unwrap_or_else(|| "bench".to_string());
         let trimmed_prefix = prefix_base.trim_matches('/').to_string();
         let resolved_prefix = if trimmed_prefix.is_empty() {
-            timestamp.to_string()
+            run_id.to_string()
         } else {
-            format!("{}/{}", trimmed_prefix, timestamp)
+            format!("{}/{}", trimmed_prefix, run_id)
         };
 
         ensure_bucket_exists(config, &credentials).await?;
@@ -211,8 +221,8 @@ impl S3Backend {
 #[allow(dead_code)]
 pub struct BackendRun {
     backend: Backend,
-    pub result_base: PathBuf,
-    pub timestamp: String,
+    pub result_root: PathBuf,
+    run_id: String,
     diagnostics_enabled: bool,
 }
 
@@ -224,8 +234,8 @@ enum Backend {
 #[allow(dead_code)]
 impl BackendRun {
     pub async fn new(config: &BenchConfig) -> anyhow::Result<Self> {
-        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
-        let result_base = PathBuf::from("target/bench-results");
+        let run_id = new_run_id();
+        let result_root = default_results_root();
         let diagnostics_enabled = config.diagnostics.as_ref().map_or(false, |cfg| cfg.enabled);
 
         let backend = match config.backend.r#type.as_str() {
@@ -233,11 +243,12 @@ impl BackendRun {
                 let base = config.backend.path.as_deref().unwrap_or("target/bench-tmp");
                 std::fs::create_dir_all(base)
                     .with_context(|| format!("create bench temp base at {base}"))?;
+                let base_path = PathBuf::from(base);
                 let tmp_root = tempfile::Builder::new()
                     .prefix("tonbo-bench-")
-                    .tempdir_in(base)
+                    .tempdir_in(&base_path)
                     .with_context(|| format!("create tempdir under {base}"))?;
-                Backend::Disk(DiskBackend::new(tmp_root))
+                Backend::Disk(DiskBackend::new(base_path, tmp_root))
             }
             "s3" => {
                 let cfg = config
@@ -245,17 +256,21 @@ impl BackendRun {
                     .s3
                     .as_ref()
                     .ok_or_else(|| anyhow!("backend.s3 must be configured for s3 backend"))?;
-                Backend::S3(S3Backend::new(cfg, &timestamp).await?)
+                Backend::S3(S3Backend::new(cfg, &run_id).await?)
             }
             other => return Err(anyhow!("unsupported backend kind: {other}")),
         };
 
         Ok(Self {
             backend,
-            result_base,
-            timestamp,
+            result_root,
+            run_id,
             diagnostics_enabled,
         })
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     pub fn backend_kind(&self) -> &'static str {
@@ -265,11 +280,28 @@ impl BackendRun {
         }
     }
 
+    pub fn storage_substrate(&self) -> String {
+        match &self.backend {
+            Backend::Disk(_) => "disk".to_string(),
+            Backend::S3(s3) => {
+                let lower = s3.endpoint.to_ascii_lowercase();
+                if lower.contains("localstack")
+                    || lower.contains("localhost")
+                    || lower.contains("127.0.0.1")
+                {
+                    "s3-localstack".to_string()
+                } else {
+                    "s3".to_string()
+                }
+            }
+        }
+    }
+
     pub fn backend_details(&self) -> serde_json::Value {
         match &self.backend {
             Backend::Disk(disk) => serde_json::json!({
                 "type": "disk",
-                "path": disk.data_root(),
+                "path": disk.label(),
             }),
             Backend::S3(s3) => serde_json::json!({
                 "type": "s3",
@@ -286,10 +318,14 @@ impl BackendRun {
         schema: arrow_schema::SchemaRef,
         key_name: &str,
     ) -> anyhow::Result<BenchDb> {
+        self.open_db_with_builder(DbBuilder::from_schema_key_name(schema, key_name)?)
+            .await
+    }
+
+    pub async fn open_db_with_builder(&self, mut builder: DbBuilder) -> anyhow::Result<BenchDb> {
         match &self.backend {
             Backend::Disk(disk) => {
                 let db_path = disk.data_root().join("db");
-                let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
                 #[cfg(any(test, tonbo_bench))]
                 if self.diagnostics_enabled {
                     builder = builder.enable_bench_diagnostics();
@@ -303,7 +339,53 @@ impl BackendRun {
                     inner: DbInner::Disk(db),
                 })
             }
-            Backend::S3(s3) => s3.open_db(schema, key_name, self.diagnostics_enabled).await,
+            Backend::S3(_) => Err(anyhow::anyhow!(
+                "open_db_with_builder not supported for s3 backend; use open_db"
+            )),
+        }
+    }
+
+    pub async fn open_db_with_wal_policy(
+        &self,
+        schema: arrow_schema::SchemaRef,
+        key_name: &str,
+        policy: tonbo::db::WalSyncPolicy,
+    ) -> anyhow::Result<BenchDb> {
+        match &self.backend {
+            Backend::Disk(disk) => {
+                let db_path = disk.data_root().join("db");
+                let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
+                #[cfg(any(test, tonbo_bench))]
+                if self.diagnostics_enabled {
+                    builder = builder.enable_bench_diagnostics();
+                }
+                let db = builder
+                    .on_disk(&db_path)?
+                    .wal_sync_policy(policy)
+                    .open()
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                Ok(BenchDb {
+                    inner: DbInner::Disk(db),
+                })
+            }
+            Backend::S3(s3) => {
+                let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
+                #[cfg(any(test, tonbo_bench))]
+                if self.diagnostics_enabled {
+                    builder = builder.enable_bench_diagnostics();
+                }
+                let db = builder
+                    .object_store(ObjectSpec::s3(s3.spec.clone()))
+                    .map_err(anyhow::Error::from)?
+                    .wal_sync_policy(policy)
+                    .open()
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                Ok(BenchDb {
+                    inner: DbInner::S3(db),
+                })
+            }
         }
     }
 

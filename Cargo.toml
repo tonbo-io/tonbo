@@ -9,7 +9,13 @@ repository = "https://github.com/tonbo-io/tonbo"
 readme = "README.md"
 
 [workspace]
-members = [".", "predicate", "tools/bench-compare", "tools/bench-report"]
+members = [
+    ".",
+    "predicate",
+    "tools/bench-compare",
+    "tools/bench-report",
+    "tools/tonbo-bench-runner",
+]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tonbo_bench)'] }

@@ -81,5 +81,5 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         metrics,
         diagnostics,
     };
-    emit_result(ctx.backend, ctx.config, report)
+    emit_result(ctx.backend, ctx.config, ctx.bench_target, report)
 }

@@ -1,5 +1,4 @@
-//! Component benchmark: approximate memtable insert throughput via the public ingest path.
-//! Direct memtable APIs are crate-private; this uses the normal DB builder + ingest.
+//! Component benchmark: iterator/read-path merge throughput over staged batches.
 
 use std::{sync::Arc, time::Instant};
 
@@ -15,14 +14,14 @@ use crate::harness::{
     diagnostics::diagnostics_config,
 };
 
-pub async fn run_memtable_bench(
+pub async fn run_iterator_bench(
     backend: &BackendRun,
     _config: &BenchConfig,
     workload: &Workload,
     bench_target: &str,
 ) -> anyhow::Result<()> {
     if workload.kind != WorkloadKind::SequentialWrite {
-        anyhow::bail!("memtable bench only supports sequential_write workload");
+        anyhow::bail!("iterator bench only supports sequential_write workload");
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -32,19 +31,20 @@ pub async fn run_memtable_bench(
 
     let diag_cfg = diagnostics_config(_config);
     let diagnostics = DiagnosticsCollector::from_config(diag_cfg.clone());
+
     let db = backend.open_db(schema.clone(), "id").await?;
 
-    let target_bytes_per_batch: usize = 4 * 1024 * 1024;
+    let target_bytes_per_batch: usize = 2 * 1024 * 1024;
     let chunk_size: u64 = std::cmp::max(
         1,
         target_bytes_per_batch
             .saturating_div(workload.value_size_bytes)
             .max(1),
     ) as u64;
-    let payload = vec![b'x'; workload.value_size_bytes];
+    let payload = vec![b'i'; workload.value_size_bytes];
     let mut inserted: u64 = 0;
 
-    let start = Instant::now();
+    // Write data first.
     while inserted < workload.num_records {
         let remaining = workload.num_records - inserted;
         let this_chunk = remaining.min(chunk_size) as usize;
@@ -68,6 +68,11 @@ pub async fn run_memtable_bench(
         db.ingest(batch).await?;
         inserted += this_chunk as u64;
     }
+
+    // Measure scan/iterator throughput.
+    let start = Instant::now();
+    let scanned = db.scan_all().await?;
+    let _rows_scanned: usize = scanned.iter().map(|b| b.num_rows()).sum();
     let elapsed = start.elapsed();
 
     let wall_time_ms = elapsed.as_millis() as u64;
@@ -80,7 +85,7 @@ pub async fn run_memtable_bench(
         "num_records": workload.num_records,
         "value_size_bytes": workload.value_size_bytes,
         "concurrency": workload.concurrency,
-        "note": "uses public ingest; direct memtable API is crate-private (TODO tighten scope)",
+        "note": "ingest then scan_all to exercise merge iterator/read-path",
     });
     let metrics = serde_json::json!({
         "ops_per_sec": ops_per_sec,
@@ -94,7 +99,7 @@ pub async fn run_memtable_bench(
         run_id: run_id.clone(),
         bench_target: bench_target.to_string(),
         storage_substrate: storage_substrate.clone(),
-        benchmark_name: "memtable_insert".into(),
+        benchmark_name: "iterator_scan".into(),
         benchmark_type: "component".into(),
         backend: backend.backend_kind().into(),
         backend_details: Some(backend.backend_details()),
@@ -111,8 +116,11 @@ pub async fn run_memtable_bench(
         bench_target,
         &storage_substrate,
     )?;
-    let path = writer.write("memtable_insert", &result)?;
-    println!("component bench wrote results to {}", path.display());
+    let path = writer.write("iterator_scan", &result)?;
+    println!(
+        "component iterator bench wrote results to {}",
+        path.display()
+    );
 
     Ok(())
 }

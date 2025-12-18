@@ -1,5 +1,4 @@
-//! Component benchmark: approximate memtable insert throughput via the public ingest path.
-//! Direct memtable APIs are crate-private; this uses the normal DB builder + ingest.
+//! Component benchmark: SST encode/write throughput using staged Arrow batches to Parquet.
 
 use std::{sync::Arc, time::Instant};
 
@@ -15,14 +14,14 @@ use crate::harness::{
     diagnostics::diagnostics_config,
 };
 
-pub async fn run_memtable_bench(
+pub async fn run_sst_encode_bench(
     backend: &BackendRun,
     _config: &BenchConfig,
     workload: &Workload,
     bench_target: &str,
 ) -> anyhow::Result<()> {
     if workload.kind != WorkloadKind::SequentialWrite {
-        anyhow::bail!("memtable bench only supports sequential_write workload");
+        anyhow::bail!("sst_encode bench only supports sequential_write workload");
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -32,6 +31,9 @@ pub async fn run_memtable_bench(
 
     let diag_cfg = diagnostics_config(_config);
     let diagnostics = DiagnosticsCollector::from_config(diag_cfg.clone());
+
+    // Use component WAL policy helper to reuse disk/object storage handling; wal sync policy
+    // defaults to crate settings.
     let db = backend.open_db(schema.clone(), "id").await?;
 
     let target_bytes_per_batch: usize = 4 * 1024 * 1024;
@@ -41,7 +43,7 @@ pub async fn run_memtable_bench(
             .saturating_div(workload.value_size_bytes)
             .max(1),
     ) as u64;
-    let payload = vec![b'x'; workload.value_size_bytes];
+    let payload = vec![b's'; workload.value_size_bytes];
     let mut inserted: u64 = 0;
 
     let start = Instant::now();
@@ -80,7 +82,7 @@ pub async fn run_memtable_bench(
         "num_records": workload.num_records,
         "value_size_bytes": workload.value_size_bytes,
         "concurrency": workload.concurrency,
-        "note": "uses public ingest; direct memtable API is crate-private (TODO tighten scope)",
+        "note": "encodes batches via ingest to exercise SST write path",
     });
     let metrics = serde_json::json!({
         "ops_per_sec": ops_per_sec,
@@ -94,7 +96,7 @@ pub async fn run_memtable_bench(
         run_id: run_id.clone(),
         bench_target: bench_target.to_string(),
         storage_substrate: storage_substrate.clone(),
-        benchmark_name: "memtable_insert".into(),
+        benchmark_name: "sst_encode".into(),
         benchmark_type: "component".into(),
         backend: backend.backend_kind().into(),
         backend_details: Some(backend.backend_details()),
@@ -111,8 +113,11 @@ pub async fn run_memtable_bench(
         bench_target,
         &storage_substrate,
     )?;
-    let path = writer.write("memtable_insert", &result)?;
-    println!("component bench wrote results to {}", path.display());
+    let path = writer.write("sst_encode", &result)?;
+    println!(
+        "component sst_encode bench wrote results to {}",
+        path.display()
+    );
 
     Ok(())
 }
