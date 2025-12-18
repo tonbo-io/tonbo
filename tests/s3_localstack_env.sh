@@ -27,32 +27,32 @@ ensure_localstack() {
   if command -v docker >/dev/null 2>&1; then
     if docker ps --format '{{.Names}}' | grep -q "^${LOCALSTACK_CONTAINER}\$"; then
       tonbo_localstack_available=1
-      return
+    else
+      if docker ps -a --format '{{.Names}}' | grep -q "^${LOCALSTACK_CONTAINER}\$"; then
+        docker rm -f "${LOCALSTACK_CONTAINER}" >/dev/null 2>&1 || true
+      fi
+
+      echo "Starting LocalStack (${LOCALSTACK_CONTAINER}) on port ${LOCALSTACK_PORT}..."
+      docker run -d --name "${LOCALSTACK_CONTAINER}" \
+        -e SERVICES="s3" \
+        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+        -e AWS_DEFAULT_REGION="${AWS_REGION}" \
+        -p "${LOCALSTACK_PORT}:4566" \
+        localstack/localstack:latest >/dev/null
+      tonbo_localstack_started_by_script=1
+      tonbo_localstack_available=1
+
+      echo -n "Waiting for LocalStack to become ready"
+      until docker exec "${LOCALSTACK_CONTAINER}" awslocal s3api list-buckets >/dev/null 2>&1; do
+        sleep 1
+        printf '.'
+      done
+      echo
     fi
 
-    if docker ps -a --format '{{.Names}}' | grep -q "^${LOCALSTACK_CONTAINER}\$"; then
-      docker rm -f "${LOCALSTACK_CONTAINER}" >/dev/null 2>&1 || true
-    fi
-
-    echo "Starting LocalStack (${LOCALSTACK_CONTAINER}) on port ${LOCALSTACK_PORT}..."
-    docker run -d --name "${LOCALSTACK_CONTAINER}" \
-      -e SERVICES="s3" \
-      -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-      -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-      -e AWS_DEFAULT_REGION="${AWS_REGION}" \
-      -p "${LOCALSTACK_PORT}:4566" \
-      localstack/localstack:latest >/dev/null
-    tonbo_localstack_started_by_script=1
-    tonbo_localstack_available=1
-
-    echo -n "Waiting for LocalStack to become ready"
-    until docker exec "${LOCALSTACK_CONTAINER}" awslocal s3api list-buckets >/dev/null 2>&1; do
-      sleep 1
-      printf '.'
-    done
-    echo
-
-    echo "Provisioning S3 bucket ${BUCKET_NAME}..."
+    # Always ensure bucket exists (idempotent)
+    echo "Ensuring S3 bucket ${BUCKET_NAME} exists..."
     docker exec "${LOCALSTACK_CONTAINER}" awslocal s3api create-bucket --bucket "${BUCKET_NAME}" >/dev/null 2>&1 || true
   else
     echo "docker is required to start LocalStack; skipping LocalStack startup" >&2

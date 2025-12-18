@@ -535,13 +535,15 @@ mod tests {
     fn groups_runs_by_prefix() {
         let dir = TempDir::new().unwrap();
         let run_id = "20240101010101";
+        let run_dir = dir.path().join(run_id);
+        fs::create_dir_all(&run_dir).unwrap();
         fs::write(
-            dir.path().join(format!("{run_id}-mixed.json")),
+            run_dir.join("mixed.json"),
             sample_result("mixed", 100.0, None),
         )
         .unwrap();
         fs::write(
-            dir.path().join(format!("{run_id}-write_only.json")),
+            run_dir.join("write_only.json"),
             sample_result("write_only", 200.0, None),
         )
         .unwrap();
@@ -556,13 +558,17 @@ mod tests {
     #[test]
     fn builds_summary_against_baseline() {
         let dir = TempDir::new().unwrap();
+        let run1_dir = dir.path().join("20240101010101");
+        let run2_dir = dir.path().join("20240101020101");
+        fs::create_dir_all(&run1_dir).unwrap();
+        fs::create_dir_all(&run2_dir).unwrap();
         fs::write(
-            dir.path().join("20240101010101-mixed.json"),
+            run1_dir.join("mixed.json"),
             sample_result("mixed", 100.0, None),
         )
         .unwrap();
         fs::write(
-            dir.path().join("20240101020101-mixed.json"),
+            run2_dir.join("mixed.json"),
             sample_result("mixed", 120.0, None),
         )
         .unwrap();
@@ -581,10 +587,12 @@ mod tests {
     fn trends_respect_limit_and_include_current() {
         let dir = TempDir::new().unwrap();
         for i in 0..12 {
-            let ts = format!("20240101010{:02}", i);
+            let ts = format!("202401010101{:02}", i);
             let value = 100.0 + (i as f64);
+            let run_dir = dir.path().join(&ts);
+            fs::create_dir_all(&run_dir).unwrap();
             fs::write(
-                dir.path().join(format!("{ts}-mixed.json")),
+                run_dir.join("mixed.json"),
                 sample_result("mixed", value, None),
             )
             .unwrap();
@@ -592,7 +600,7 @@ mod tests {
         let runs = load_runs(dir.path()).unwrap();
         let ids: BTreeSet<String> = runs.keys().cloned().collect();
         let current = select_current_run(&ids, None).unwrap();
-        assert_eq!(current, "2024010101011");
+        assert_eq!(current, "20240101010111");
         let trend_ids = select_trend_ids(&ids, &current, 5);
         assert_eq!(trend_ids.len(), 5);
         assert_eq!(trend_ids.last().unwrap(), &current);
