@@ -38,6 +38,7 @@ pub async fn run_wal_bench(
         .await?;
 
     let target_bytes_per_batch: usize = 1 * 1024 * 1024;
+    let row_bytes = workload.value_size_bytes as u64 + std::mem::size_of::<u64>() as u64;
     let chunk_size: u64 = std::cmp::max(
         1,
         target_bytes_per_batch
@@ -70,6 +71,7 @@ pub async fn run_wal_bench(
 
         db.ingest(batch).await?;
         inserted += this_chunk as u64;
+        diagnostics.record_logical_bytes(row_bytes.saturating_mul(this_chunk as u64));
     }
     let elapsed = start.elapsed();
 

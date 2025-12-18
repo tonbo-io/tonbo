@@ -11,6 +11,6 @@ workload:
 runtime:
   concurrency: 1
 diagnostics:
-  enabled: false
+  enabled: true
   level: basic
   skip_physical_bytes: true

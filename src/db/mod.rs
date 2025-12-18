@@ -812,7 +812,9 @@ where
     #[cfg(any(test, tonbo_bench))]
     #[allow(dead_code)]
     pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
+        println!("bench_diagnostics: start");
         let wal_snapshot = if let Some(handle) = self.wal_handle() {
+            println!("bench_diagnostics: wal handle present, reading metrics");
             let metrics = handle.metrics();
             let guard = metrics.read().await;
             let append_latency = if guard.append_events > 0 {
@@ -825,6 +827,10 @@ where
             } else {
                 None
             };
+            println!(
+                "bench_diagnostics: wal metrics bytes_written={} sync_ops={}",
+                guard.bytes_written, guard.sync_operations
+            );
             Some(WalDiagnosticsSnapshot {
                 bytes_written: guard.bytes_written,
                 sync_operations: guard.sync_operations,
@@ -838,6 +844,7 @@ where
 
         #[cfg(any(test, tonbo_bench))]
         if let Some(observer) = &self.bench_diagnostics {
+            println!("bench_diagnostics: observer present");
             if let Some(wal) = wal_snapshot.clone() {
                 observer.update_wal(wal);
             }
@@ -848,10 +855,12 @@ where
             if snapshot.wal.is_none() {
                 snapshot.wal = wal_snapshot;
             }
+            println!("bench_diagnostics: returning observer snapshot");
             return snapshot;
         }
 
         let flush = self.bench_flush_snapshot();
+        println!("bench_diagnostics: returning direct snapshot (no observer)");
         BenchDiagnosticsSnapshot {
             wal: wal_snapshot,
             flush,

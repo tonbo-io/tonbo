@@ -134,9 +134,30 @@ impl BenchObserver for BenchDiagnosticsRecorder {
     }
 
     fn snapshot(&self) -> BenchDiagnosticsSnapshot {
+        let guard = self.inner.lock();
+        let flush = if guard.flush_events.is_empty() {
+            FlushDiagnosticsSnapshot::default()
+        } else {
+            let mut snapshot = FlushDiagnosticsSnapshot::default();
+            for event in &guard.flush_events {
+                snapshot.flush_count = snapshot.flush_count.saturating_add(1);
+                snapshot.total_bytes = snapshot.total_bytes.saturating_add(event.bytes);
+                let micros = event.duration.as_micros();
+                snapshot.total_us = snapshot.total_us.saturating_add(micros);
+                let us = event.duration.as_micros() as u64;
+                if snapshot.min_us == 0 || us < snapshot.min_us {
+                    snapshot.min_us = us;
+                }
+                if us > snapshot.max_us {
+                    snapshot.max_us = us;
+                }
+            }
+            snapshot
+        };
+
         BenchDiagnosticsSnapshot {
-            wal: self.inner.lock().wal.clone(),
-            flush: Some(self.flush_snapshot()),
+            wal: guard.wal.clone(),
+            flush: Some(flush),
         }
     }
 }

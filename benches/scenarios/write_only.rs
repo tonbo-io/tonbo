@@ -78,8 +78,17 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
 
     #[cfg(any(test, tonbo_bench))]
     if diag.enabled() {
-        let snapshot = db.bench_diagnostics().await;
-        diag.record_engine_snapshot(snapshot);
+        println!("write_only capturing bench diagnostics...");
+        match tokio::time::timeout(std::time::Duration::from_secs(10), db.bench_diagnostics()).await
+        {
+            Ok(snapshot) => {
+                diag.record_engine_snapshot(snapshot);
+                println!("write_only captured bench diagnostics");
+            }
+            Err(_) => {
+                eprintln!("write_only bench diagnostics timed out; skipping snapshot");
+            }
+        }
     }
     println!("write_only finalizing diagnostics");
     let diagnostics = diag.finalize(ctx.backend).await?;

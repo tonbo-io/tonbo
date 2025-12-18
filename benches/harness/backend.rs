@@ -177,28 +177,6 @@ impl S3Backend {
         })
     }
 
-    async fn open_db(
-        &self,
-        schema: arrow_schema::SchemaRef,
-        key_name: &str,
-        enable_diagnostics: bool,
-    ) -> anyhow::Result<BenchDb> {
-        let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
-        #[cfg(any(test, tonbo_bench))]
-        if enable_diagnostics {
-            builder = builder.enable_bench_diagnostics();
-        }
-        let db = builder
-            .object_store(ObjectSpec::s3(self.spec.clone()))
-            .map_err(anyhow::Error::from)?
-            .open()
-            .await
-            .map_err(anyhow::Error::from)?;
-        Ok(BenchDb {
-            inner: DbInner::S3(db),
-        })
-    }
-
     async fn cleanup(self) -> anyhow::Result<()> {
         let prefix_path = FusioPath::parse(&self.prefix).context("parse prefix for cleanup")?;
         let stream = self

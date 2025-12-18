@@ -111,8 +111,13 @@ fn main() -> Result<()> {
     let run_summaries = collect_run_summaries(&before_runs, &after_runs);
     print_run_summaries(&run_summaries);
     if let Some(path) = args.report_md.as_ref() {
-        write_markdown_report(&run_summaries, path)?;
-        println!("Wrote report to {}", path.display());
+        let markdown = render_markdown_report(&run_summaries);
+        if path.as_os_str() == "-" {
+            println!("{markdown}");
+        } else {
+            write_markdown_report(&markdown, path)?;
+            println!("Wrote report to {}", path.display());
+        }
     }
 
     Ok(())
@@ -360,13 +365,18 @@ fn print_run_summaries(runs: &[RunSummary]) {
                 .display();
             println!(
                 "    * {name} [{kind}] target={target} backend={backend} substr={substr} \
-                 {metrics} ({path})",
+                 {metrics}{diag} ({path})",
                 name = summary.benchmark_name,
                 kind = summary.benchmark_type,
                 target = summary.bench_target.as_deref().unwrap_or("unknown"),
                 backend = summary.backend.as_deref().unwrap_or("unknown"),
                 substr = summary.storage_substrate.as_deref().unwrap_or("unknown"),
                 metrics = summary.metrics_summary,
+                diag = if summary.diagnostics_summary.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" diag={}", summary.diagnostics_summary)
+                },
                 path = rel
             );
         }
@@ -509,7 +519,7 @@ fn summarize_diagnostics(diag: &Option<serde_json::Value>) -> String {
     parts.join(" ")
 }
 
-fn write_markdown_report(runs: &[RunSummary], path: &Path) -> Result<()> {
+fn render_markdown_report(runs: &[RunSummary]) -> String {
     let mut out = String::new();
     if runs.is_empty() {
         out.push_str("# Bench Report\n\nNo benchmark outputs found.\n");
@@ -566,7 +576,11 @@ fn write_markdown_report(runs: &[RunSummary], path: &Path) -> Result<()> {
             }
         }
     }
-    fs::write(path, out)?;
+    out
+}
+
+fn write_markdown_report(content: &str, path: &Path) -> Result<()> {
+    fs::write(path, content)?;
     Ok(())
 }
 
