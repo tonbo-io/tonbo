@@ -202,7 +202,7 @@ struct ResolvedConfigs {
 }
 
 fn resolve_configs(args: &Args) -> Result<ResolvedConfigs> {
-    let default_ci = PathBuf::from("benches/harness/configs/ci-write-only.yaml");
+    let default_ci = repo_root().join("benches/harness/configs/ci-write-only.yaml");
     let base = args.config.clone();
     let scenario = args.scenario_config.clone().or_else(|| base.clone());
     let component = args.component_config.clone().or(base);
@@ -213,8 +213,8 @@ fn resolve_configs(args: &Args) -> Result<ResolvedConfigs> {
             component.or(Some(default_ci)),
         ),
         Profile::Deep => (
-            scenario.or_else(|| Some(PathBuf::from("benches/harness/configs/deep-disk.yaml"))),
-            component.or_else(|| Some(PathBuf::from("benches/harness/configs/deep-disk.yaml"))),
+            scenario.or_else(|| Some(repo_root().join("benches/harness/configs/deep-disk.yaml"))),
+            component.or_else(|| Some(repo_root().join("benches/harness/configs/deep-disk.yaml"))),
         ),
         Profile::Local => (scenario, component),
     };
@@ -226,6 +226,17 @@ fn resolve_configs(args: &Args) -> Result<ResolvedConfigs> {
         scenario,
         component,
     })
+}
+
+fn repo_root() -> PathBuf {
+    // Walk ancestors from the crate dir to locate the repo root that carries bench configs.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        if ancestor.join("benches/harness/configs").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+    manifest_dir.to_path_buf()
 }
 
 fn validate_config(kind: &str, config: &Option<PathBuf>, mode: &Mode) -> Result<()> {
@@ -561,15 +572,19 @@ fn write_markdown_report(runs: &[RunSummary], path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use tempfile::NamedTempFile;
 
     use super::*;
 
     fn temp_config() -> PathBuf {
-        NamedTempFile::new()
-            .expect("temp file")
-            .into_temp_path()
-            .to_path_buf()
+        let mut file = NamedTempFile::new().expect("temp file");
+        // Touch the file so validation succeeds; contents are irrelevant for these tests.
+        writeln!(file, "dummy: true").expect("write temp config");
+        let path = file.path().to_path_buf();
+        file.keep().expect("persist temp config");
+        path
     }
 
     #[test]
@@ -624,8 +639,8 @@ mod tests {
 
     #[test]
     fn profile_ci_provides_default_config() {
-        // Ensure the default path is validated; touch a temp file at that location.
-        let default = PathBuf::from("benches/harness/configs/ci-write-only.yaml");
+        // Ensure the default path is validated; resolve relative to the repo root.
+        let default = repo_root().join("benches/harness/configs/ci-write-only.yaml");
         assert!(
             default.exists(),
             "expected default CI config to exist at {}",

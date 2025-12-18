@@ -25,6 +25,7 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
     let row_bytes = ctx.workload.value_size_bytes as u64 + std::mem::size_of::<u64>() as u64;
 
     let start = Instant::now();
+    let mut batch_idx: u64 = 0;
     while inserted < ctx.workload.num_records {
         let remaining = ctx.workload.num_records - inserted;
         let this_chunk = remaining.min(chunk_size) as usize;
@@ -48,6 +49,13 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         db.ingest(batch).await?;
         inserted += this_chunk as u64;
         diag.record_logical_bytes(row_bytes.saturating_mul(this_chunk as u64));
+        batch_idx = batch_idx.saturating_add(1);
+        if batch_idx % 5 == 0 {
+            println!(
+                "write_only progress: batch={} inserted={} of {}",
+                batch_idx, inserted, ctx.workload.num_records
+            );
+        }
     }
     let elapsed = start.elapsed();
 
@@ -81,5 +89,6 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         metrics,
         diagnostics,
     };
+    println!("write_only emitting result");
     emit_result(ctx.backend, ctx.config, ctx.bench_target, report)
 }
