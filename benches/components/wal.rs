@@ -33,8 +33,9 @@ pub async fn run_wal_bench(
     let diag_cfg = diagnostics_config(_config);
     let diagnostics = DiagnosticsCollector::from_config(diag_cfg.clone());
 
+    let sync_policy = wal_policy_from_env();
     let db = backend
-        .open_db_with_wal_policy(schema.clone(), "id", WalSyncPolicy::Always)
+        .open_db_with_wal_policy(schema.clone(), "id", sync_policy.clone())
         .await?;
 
     let target_bytes_per_batch: usize = 1 * 1024 * 1024;
@@ -85,8 +86,8 @@ pub async fn run_wal_bench(
         "num_records": workload.num_records,
         "value_size_bytes": workload.value_size_bytes,
         "concurrency": workload.concurrency,
-        "wal_sync_policy": "always",
-        "note": "uses public ingest with wal_sync_policy=Always to focus on WAL cost",
+        "wal_sync_policy": format!("{sync_policy:?}"),
+        "note": "set TONBO_BENCH_WAL_SYNC to override (always|disabled|interval_bytes:<n>|interval_ms:<n>)",
     });
     let metrics = serde_json::json!({
         "ops_per_sec": ops_per_sec,
@@ -121,6 +122,29 @@ pub async fn run_wal_bench(
     println!("component wal bench wrote results to {}", path.display());
 
     Ok(())
+}
+
+fn wal_policy_from_env() -> WalSyncPolicy {
+    if let Ok(v) = std::env::var("TONBO_BENCH_WAL_SYNC") {
+        let v = v.to_ascii_lowercase();
+        if v == "always" {
+            return WalSyncPolicy::Always;
+        }
+        if v == "disabled" {
+            return WalSyncPolicy::Disabled;
+        }
+        if let Some(rest) = v.strip_prefix("interval_bytes:") {
+            if let Ok(n) = rest.parse::<usize>() {
+                return WalSyncPolicy::IntervalBytes(n);
+            }
+        }
+        if let Some(rest) = v.strip_prefix("interval_ms:") {
+            if let Ok(ms) = rest.parse::<u64>() {
+                return WalSyncPolicy::IntervalTime(std::time::Duration::from_millis(ms));
+            }
+        }
+    }
+    WalSyncPolicy::Always
 }
 
 async fn finalize_component_diagnostics(
