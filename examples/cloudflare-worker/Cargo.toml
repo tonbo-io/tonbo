@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 tonbo = { path = "../..", default-features = false, features = ["web"] }
 
 # Fusio for WebExecutor and AmazonS3 types
-fusio = { version = "0.5.0-a0", default-features = false, features = [
+fusio = { version = "0.5.0", default-features = false, features = [
     "aws",
     "executor-web",
 ] }
