@@ -52,6 +52,8 @@ jobs:
     name: coverage (llvm-cov)
     runs-on: ubuntu-latest
     needs: build
+    env:
+      COVERAGE_LINES_MIN: "80"
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +76,7 @@ jobs:
           cache-on-failure: false
 
       - name: Run coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --summary
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines "$COVERAGE_LINES_MIN"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
