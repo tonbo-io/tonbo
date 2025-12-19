@@ -1,0 +1,12 @@
+# Build artifacts
+/target/
+/build/
+
+# Wrangler
+.wrangler/
+
+# Local development secrets (never commit real credentials!)
+.dev.vars
+
+# Rust lock file (optional, can be committed for reproducibility)
+# Cargo.lock
