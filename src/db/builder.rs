@@ -1,5 +1,6 @@
 use std::{env, io, sync::Arc, time::Duration};
 
+use arrow_schema::SchemaRef;
 use fusio::{
     DynFs, Fs,
     dynamic::{MaybeSend, MaybeSync},
@@ -16,10 +17,11 @@ use thiserror::Error;
 use super::{DB, DbInner, MinorCompactionState};
 use crate::{
     compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
-    extractor::{KeyExtractError, projection_for_columns},
+    extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
-        ManifestError, ManifestFs, TonboManifest, bootstrap::ensure_manifest_dirs, init_fs_manifest,
+        ManifestError, ManifestFs, TableMeta, TonboManifest,
+        bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
     },
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
@@ -773,7 +775,7 @@ impl DbBuilder<Unconfigured> {
             compaction_strategy: CompactionStrategy::default(),
             compaction_interval: None,
             compaction_loop_cfg: None,
-            minor_compaction: None,
+            minor_compaction: Some(MinorCompactionOptions::default()),
         }
     }
 
@@ -923,31 +925,37 @@ where
         self.minor_compaction = Some(MinorCompactionOptions {
             segment_threshold,
             target_level,
-            start_id,
+            start_id: Some(start_id),
         });
+        self
+    }
+
+    /// Disable automatic minor compaction entirely.
+    #[must_use]
+    pub fn disable_minor_compaction(mut self) -> Self {
+        self.minor_compaction = None;
         self
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
     fn build_minor_compaction_state(
-        &self,
         layout: &StorageLayout<FS>,
-    ) -> Result<Option<MinorCompactionState>, DbBuildError>
+        cfg: &MinorCompactionOptions,
+        start_id: u64,
+        schema: SchemaRef,
+        extractor: Arc<dyn KeyProjection>,
+    ) -> Result<MinorCompactionState, DbBuildError>
     where
         FS: DynFs + FusioCas + 'static,
     {
-        let Some(cfg) = &self.minor_compaction else {
-            return Ok(None);
-        };
         let route = layout.sst_route()?;
-        let extractor = Arc::clone(&self.mode_config.extractor);
         let config = Arc::new(
-            SsTableConfig::new(self.mode_config.schema(), route.fs, route.path.clone())
+            SsTableConfig::new(schema, route.fs, route.path.clone())
                 .with_key_extractor(extractor)
                 .with_target_level(cfg.target_level),
         );
-        let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, cfg.start_id);
-        Ok(Some(MinorCompactionState::new(compactor, config)))
+        let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, start_id);
+        Ok(MinorCompactionState::new(compactor, config))
     }
 
     /// Attach a stable logical table name enforced at build time.
@@ -1012,18 +1020,26 @@ where
         FS: ManifestFs<E> + fusio_manifest::ObjectHead,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        let minor_compaction = self.build_minor_compaction_state(&layout)?;
+        let DbBuilder {
+            mode_config,
+            state,
+            compaction_strategy,
+            compaction_interval: _,
+            compaction_loop_cfg,
+            minor_compaction,
+        } = self;
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
-        let table_name = self
-            .state
+        let table_name = state
             .table_name()
             .cloned()
             .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
-        let table_definition = table_definition(&self.mode_config, &table_name);
+        let table_definition = table_definition(&mode_config, &table_name);
+        let sstable_schema = mode_config.schema();
+        let sstable_extractor = Arc::clone(&mode_config.extractor);
 
         let (schema, delete_schema, commit_ack_mode, mem) =
-            self.mode_config.build().map_err(DbBuildError::Mode)?;
+            mode_config.build().map_err(DbBuildError::Mode)?;
         let manifest = manifest_init
             .init_manifest(executor.as_ref().clone())
             .await?;
@@ -1032,11 +1048,26 @@ where
             .await
             .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
+        let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
+            Some(
+                Self::minor_compaction_state_for_table(
+                    cfg,
+                    &layout,
+                    &manifest,
+                    &table_meta,
+                    sstable_schema,
+                    sstable_extractor,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
-        let mut wal_cfg = if self.state.durability().is_durable() {
+        let mut wal_cfg = if state.durability().is_durable() {
             let mut cfg = RuntimeWalConfig::default();
             layout.apply_wal_defaults(&mut cfg)?;
-            if let Some(overrides) = self.state.wal_config() {
+            if let Some(overrides) = state.wal_config() {
                 overrides.apply(&mut cfg);
             }
             Some(cfg)
@@ -1057,17 +1088,17 @@ where
             executor,
         );
 
-        inner.minor_compaction = minor_compaction;
+        inner.minor_compaction = minor_compaction_state;
 
         if let Some(cfg) = wal_cfg.take() {
             inner.enable_wal(cfg).await?;
         }
 
-        if let Some(loop_cfg) = self.compaction_loop_cfg {
+        if let Some(loop_cfg) = compaction_loop_cfg {
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real
             // scheduler/lease + executor selection.
-            let planner = self.compaction_strategy.clone().build();
+            let planner = compaction_strategy.clone().build();
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
             let driver = Arc::new(inner.compaction_driver());
@@ -1139,7 +1170,17 @@ struct CompactionLoopConfig {
 struct MinorCompactionOptions {
     segment_threshold: usize,
     target_level: usize,
-    start_id: u64,
+    start_id: Option<u64>,
+}
+
+impl Default for MinorCompactionOptions {
+    fn default() -> Self {
+        Self {
+            segment_threshold: 4,
+            target_level: 0,
+            start_id: None,
+        }
+    }
 }
 
 impl<FS> DbBuilder<StorageConfig<FS>>
@@ -1193,6 +1234,27 @@ where
         self
     }
 
+    async fn minor_compaction_state_for_table<E>(
+        cfg: &MinorCompactionOptions,
+        layout: &StorageLayout<FS>,
+        manifest: &TonboManifest<FS, E>,
+        table_meta: &TableMeta,
+        schema: SchemaRef,
+        extractor: Arc<dyn KeyProjection>,
+    ) -> Result<MinorCompactionState, DbBuildError>
+    where
+        E: Executor + Timer + Clone + 'static,
+        FS: ManifestFs<E>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
+        let snapshot = manifest
+            .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
+            .await
+            .map_err(DbBuildError::Manifest)?;
+        let start_id = cfg.start_id.unwrap_or_else(|| next_sstable_id(&snapshot));
+        Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
+    }
+
     /// Internal: recover from WAL state if present, otherwise build fresh.
     async fn recover_or_init_with_executor<E>(
         self,
@@ -1203,22 +1265,29 @@ where
         FS: ManifestFs<E>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        self.state.prepare().await?;
-        let layout = self.state.layout()?;
+        let DbBuilder {
+            mode_config,
+            state,
+            compaction_strategy,
+            compaction_interval,
+            compaction_loop_cfg,
+            minor_compaction,
+        } = self;
+        state.prepare().await?;
+        let layout = state.layout()?;
         let mut wal_cfg = RuntimeWalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
-        if let Some(overrides) = self.state.wal_config() {
+        if let Some(overrides) = state.wal_config() {
             overrides.apply(&mut wal_cfg);
         }
 
         if wal_segments_exist(&wal_cfg).await? {
             let manifest_init = ManifestBootstrap::new(&layout);
-            let table_name = self
-                .state
+            let table_name = state
                 .table_name()
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
-            let table_definition = table_definition(&self.mode_config, &table_name);
+            let table_definition = table_definition(&mode_config, &table_name);
             let file_ids = FileIdGenerator::default();
             let manifest = manifest_init
                 .init_manifest(executor.as_ref().clone())
@@ -1229,9 +1298,25 @@ where
                 .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
             let fs_dyn = layout.dyn_fs();
-            let minor_compaction = self.build_minor_compaction_state(&layout)?;
+            let sstable_schema = mode_config.schema();
+            let sstable_extractor = Arc::clone(&mode_config.extractor);
+            let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
+                Some(
+                    Self::minor_compaction_state_for_table(
+                        cfg,
+                        &layout,
+                        &manifest,
+                        &table_meta,
+                        sstable_schema,
+                        sstable_extractor,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let mut inner = DbInner::recover_with_wal_with_manifest(
-                self.mode_config,
+                mode_config,
                 Arc::clone(&executor),
                 fs_dyn,
                 wal_cfg.clone(),
@@ -1241,11 +1326,34 @@ where
             )
             .await
             .map_err(DbBuildError::Mode)?;
-            inner.minor_compaction = minor_compaction;
+            inner.minor_compaction = minor_compaction_state;
             inner.enable_wal(wal_cfg).await?;
             Ok(DB::from_inner(Arc::new(inner)))
         } else {
-            self.build_with_layout(executor, layout).await
+            DbBuilder {
+                mode_config,
+                state,
+                compaction_strategy,
+                compaction_interval,
+                compaction_loop_cfg,
+                minor_compaction,
+            }
+            .build_with_layout(executor, layout)
+            .await
         }
     }
+}
+
+fn next_sstable_id(snapshot: &TableSnapshot) -> u64 {
+    snapshot
+        .latest_version
+        .as_ref()
+        .and_then(|version| {
+            version
+                .ssts()
+                .iter()
+                .flat_map(|level| level.iter().map(|entry| entry.sst_id().raw()))
+                .max()
+        })
+        .map_or(1, |max_id| max_id.saturating_add(1))
 }
