@@ -12,8 +12,8 @@ const KEY_FIELD: &str = "id";
 const TARGET_BYTES_PER_BATCH: usize = 4 * 1024 * 1024;
 
 /// Compaction scenario: write enough data to seal multiple immutables and let minor compaction
-/// merge them. Uses a bench-only compaction trigger via `with_minor_compaction` to keep the
-/// surface stable (open harness, closed internals).
+/// merge them. Uses `with_minor_compaction` to keep the harness stable while exercising the
+/// compaction path.
 pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
     if ctx.workload.num_records == 0 {
         anyhow::bail!("num_records must be > 0 for compaction workload");
@@ -60,6 +60,11 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         db.ingest(batch).await?;
         inserted += this_chunk as u64;
         diag.record_logical_bytes(row_bytes.saturating_mul(this_chunk as u64));
+        let elapsed = start.elapsed();
+        if diag.should_sample(elapsed) {
+            let snapshot = db.metrics_snapshot().await;
+            diag.record_engine_sample(elapsed, snapshot);
+        }
     }
     let elapsed = start.elapsed();
 
@@ -69,10 +74,9 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
     let bytes_total = ctx.workload.num_records as f64 * ctx.workload.value_size_bytes as f64;
     let bytes_per_sec = bytes_total / wall_time_secs;
 
-    #[cfg(any(test, tonbo_bench))]
     if diag.enabled() {
         if let Ok(snapshot) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), db.bench_diagnostics()).await
+            tokio::time::timeout(std::time::Duration::from_secs(10), db.metrics_snapshot()).await
         {
             diag.record_engine_snapshot(snapshot);
         }

@@ -1,8 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
-#[cfg(any(test, tonbo_bench))]
-use tonbo::bench_diagnostics::{BenchDiagnosticsSnapshot, LatencySnapshot};
+use tonbo::metrics::{
+    DbMetricsSnapshot, FlushMetricsSnapshot, LatencySnapshot, WalMetricsSnapshot,
+};
 
 use crate::harness::{BackendRun, BenchConfig};
 
@@ -28,6 +32,12 @@ pub struct DiagnosticsConfig {
     /// Skip expensive filesystem walks for write amplification accounting.
     #[serde(default)]
     pub skip_physical_bytes: bool,
+    /// Optional sampling interval (milliseconds) for time-series snapshots.
+    #[serde(default)]
+    pub sample_interval_ms: Option<u64>,
+    /// Maximum number of samples to retain in a run.
+    #[serde(default)]
+    pub max_samples: Option<usize>,
 }
 
 impl Default for DiagnosticsConfig {
@@ -36,6 +46,8 @@ impl Default for DiagnosticsConfig {
             enabled: false,
             level: DiagnosticsLevel::Basic,
             skip_physical_bytes: false,
+            sample_interval_ms: None,
+            max_samples: None,
         }
     }
 }
@@ -49,6 +61,8 @@ pub struct DiagnosticsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sst: Option<FlushDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub memtable: Option<MemtableDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction: Option<Unsupported>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_path: Option<Unsupported>,
@@ -56,6 +70,8 @@ pub struct DiagnosticsOutput {
     pub cache: Option<Unsupported>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_amplification: Option<WriteAmplification>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<DiagnosticsSample>>,
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
@@ -108,10 +124,30 @@ pub struct LatencySummary {
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
+pub struct MemtableDiagnostics {
+    pub entries: usize,
+    pub inserts: u64,
+    pub replaces: u64,
+    pub approx_key_bytes: usize,
+    pub entry_overhead: usize,
+}
+
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct WriteAmplification {
     pub logical_bytes_written: u64,
     pub physical_bytes_written: u64,
     pub amplification_ratio: f64,
+}
+
+#[derive(Debug, Default, Serialize, Clone)]
+pub struct DiagnosticsSample {
+    pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal: Option<WalDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush: Option<FlushDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memtable: Option<MemtableDiagnostics>,
 }
 
 #[derive(Clone)]
@@ -124,12 +160,15 @@ struct DiagnosticsState {
     config: DiagnosticsConfig,
     logical_bytes: u64,
     engine: EngineDiagnostics,
+    samples: Vec<DiagnosticsSample>,
+    last_sample_elapsed_ms: Option<u64>,
 }
 
 #[derive(Default, Clone)]
 struct EngineDiagnostics {
     wal: Option<WalDiagnostics>,
     flush: Option<FlushDiagnostics>,
+    memtable: Option<MemtableDiagnostics>,
 }
 
 impl DiagnosticsCollector {
@@ -143,6 +182,8 @@ impl DiagnosticsCollector {
                 config: config.unwrap_or_default(),
                 logical_bytes: 0,
                 engine: EngineDiagnostics::default(),
+                samples: Vec::new(),
+                last_sample_elapsed_ms: None,
             }))),
         }
     }
@@ -158,10 +199,9 @@ impl DiagnosticsCollector {
         }
     }
 
-    #[cfg(any(test, tonbo_bench))]
-    pub fn record_engine_snapshot(&self, snapshot: BenchDiagnosticsSnapshot) {
+    pub fn record_engine_snapshot(&self, snapshot: DbMetricsSnapshot) {
         if let Some(inner) = &self.inner {
-            // Engine snapshot comes from bench-only diagnostics compiled for bench/test builds.
+            // Engine snapshot comes from the public metrics API.
             let mut guard = inner.lock().expect("diagnostics mutex poisoned");
             let flush = snapshot.flush.as_ref().and_then(|f| {
                 if f.flush_count == 0 {
@@ -173,12 +213,64 @@ impl DiagnosticsCollector {
             guard.engine = EngineDiagnostics {
                 wal: snapshot.wal.as_ref().map(convert_wal),
                 flush,
+                memtable: snapshot.memtable.as_ref().map(convert_memtable),
             };
         }
     }
 
-    #[cfg(not(any(test, tonbo_bench)))]
-    pub fn record_engine_snapshot(&self, _snapshot: ()) {}
+    pub fn should_sample(&self, elapsed: std::time::Duration) -> bool {
+        let Some(inner) = &self.inner else {
+            return false;
+        };
+        let guard = inner.lock().expect("diagnostics mutex poisoned");
+        let Some(interval_ms) = guard.config.sample_interval_ms else {
+            return false;
+        };
+        if interval_ms == 0 {
+            return false;
+        }
+        if let Some(max_samples) = guard.config.max_samples
+            && guard.samples.len() >= max_samples
+        {
+            return false;
+        }
+        let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        match guard.last_sample_elapsed_ms {
+            Some(last_ms) => elapsed_ms.saturating_sub(last_ms) >= interval_ms,
+            None => true,
+        }
+    }
+
+    pub fn record_engine_sample(&self, elapsed: std::time::Duration, snapshot: DbMetricsSnapshot) {
+        if let Some(inner) = &self.inner {
+            let mut guard = inner.lock().expect("diagnostics mutex poisoned");
+            let Some(interval_ms) = guard.config.sample_interval_ms else {
+                return;
+            };
+            if interval_ms == 0 {
+                return;
+            }
+            if let Some(max_samples) = guard.config.max_samples
+                && guard.samples.len() >= max_samples
+            {
+                return;
+            }
+            let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+            guard.last_sample_elapsed_ms = Some(elapsed_ms);
+            guard.samples.push(DiagnosticsSample {
+                elapsed_ms,
+                wal: snapshot.wal.as_ref().map(convert_wal),
+                flush: snapshot.flush.as_ref().and_then(|f| {
+                    if f.flush_count == 0 {
+                        None
+                    } else {
+                        Some(convert_flush(f))
+                    }
+                }),
+                memtable: snapshot.memtable.as_ref().map(convert_memtable),
+            });
+        }
+    }
 
     pub async fn finalize(
         &self,
@@ -191,6 +283,7 @@ impl DiagnosticsCollector {
         let guard = inner.lock().expect("diagnostics mutex poisoned");
         let logical_bytes = guard.logical_bytes;
         let engine = guard.engine.clone();
+        let samples = guard.samples.clone();
         let cfg = guard.config.clone();
         drop(guard);
 
@@ -220,31 +313,35 @@ impl DiagnosticsCollector {
             output.flush = Some(flush.clone());
             output.sst = Some(flush);
         }
+        if let Some(memtable) = engine.memtable.clone() {
+            output.memtable = Some(memtable);
+        }
 
         // We don't have compaction/read_path/cache metrics yet; surface unsupported placeholders.
         output.compaction = Some(Unsupported::unsupported());
         output.read_path = Some(Unsupported::unsupported());
         output.cache = Some(Unsupported::unsupported());
+        if !samples.is_empty() {
+            output.samples = Some(samples);
+        }
 
         Ok(Some(output))
     }
 }
 
-#[cfg(any(test, tonbo_bench))]
-fn convert_wal(snapshot: &tonbo::bench_diagnostics::WalDiagnosticsSnapshot) -> WalDiagnostics {
-    let append_latency = snapshot.append_latency.as_ref().map(|lat| to_latency(lat));
+fn convert_wal(snapshot: &WalMetricsSnapshot) -> WalDiagnostics {
+    let append_latency = snapshot.append_latency.as_ref().map(to_latency);
     WalDiagnostics {
         bytes_written: snapshot.bytes_written,
         sync_operations: snapshot.sync_operations,
         queue_depth: Some(QueueDepth {
             last: snapshot.queue_depth,
-            max: Some(snapshot.max_queue_depth),
+            max: snapshot.max_queue_depth,
         }),
         append_latency,
     }
 }
 
-#[cfg(any(test, tonbo_bench))]
 fn to_latency(lat: &LatencySnapshot) -> LatencySummary {
     let mean = lat.mean_us().unwrap_or(0.0);
     LatencySummary {
@@ -255,10 +352,7 @@ fn to_latency(lat: &LatencySnapshot) -> LatencySummary {
     }
 }
 
-#[cfg(any(test, tonbo_bench))]
-fn convert_flush(
-    snapshot: &tonbo::bench_diagnostics::FlushDiagnosticsSnapshot,
-) -> FlushDiagnostics {
+fn convert_flush(snapshot: &FlushMetricsSnapshot) -> FlushDiagnostics {
     if snapshot.flush_count == 0 {
         return FlushDiagnostics::default();
     }
@@ -279,6 +373,34 @@ fn convert_flush(
     }
 }
 
+fn convert_memtable(snapshot: &tonbo::metrics::MemtableMetricsSnapshot) -> MemtableDiagnostics {
+    MemtableDiagnostics {
+        entries: snapshot.entries,
+        inserts: snapshot.inserts,
+        replaces: snapshot.replaces,
+        approx_key_bytes: snapshot.approx_key_bytes,
+        entry_overhead: snapshot.entry_overhead,
+    }
+}
+
 pub fn diagnostics_config(config: &BenchConfig) -> Option<DiagnosticsConfig> {
-    config.diagnostics.clone().filter(|cfg| cfg.enabled)
+    let mut cfg = config.diagnostics.clone().unwrap_or_default();
+    let mut enabled = cfg.enabled;
+
+    if let Ok(value) = env::var("TONBO_BENCH_DIAG_SAMPLE_MS") {
+        if let Ok(ms) = value.parse::<u64>() {
+            cfg.sample_interval_ms = Some(ms);
+            enabled = true;
+        }
+    }
+
+    if let Ok(value) = env::var("TONBO_BENCH_DIAG_MAX_SAMPLES") {
+        if let Ok(max) = value.parse::<usize>() {
+            cfg.max_samples = Some(max);
+            enabled = true;
+        }
+    }
+
+    cfg.enabled = enabled;
+    if cfg.enabled { Some(cfg) } else { None }
 }

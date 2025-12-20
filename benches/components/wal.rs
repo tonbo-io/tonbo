@@ -152,12 +152,9 @@ async fn finalize_component_diagnostics(
     backend: &BackendRun,
     db: &crate::harness::BenchDb,
 ) -> anyhow::Result<Option<DiagnosticsOutput>> {
-    #[cfg(any(test, tonbo_bench))]
-    {
-        if diag.enabled() {
-            let snapshot = db.bench_diagnostics().await;
-            diag.record_engine_snapshot(snapshot);
-        }
+    if diag.enabled() {
+        let snapshot = db.metrics_snapshot().await;
+        diag.record_engine_snapshot(snapshot);
     }
     Ok(diag.finalize(backend).await?)
 }

@@ -157,4 +157,4 @@ tonbo/
 │       ├── workload.rs
 │       └── metrics.rs
 
-> **Status (dev branch)**: `write_only`, `read_only`, and `mixed` scenarios exist; compaction scenario is not yet implemented. Component coverage is limited to `memtable` via ingest; bloom/cache/iterator benches are deferred. Bench diagnostics require a feature flag and are intentionally off-by-default.
+> **Status (dev branch)**: `write_only`, `read_only`, `mixed`, and `compaction` scenarios exist. Component coverage includes `memtable`, `wal`, `sst_encode`, and `iterator` via public APIs; bloom/cache benches remain deferred. Metrics snapshots are collected through the public metrics API when diagnostics are enabled in the harness config.

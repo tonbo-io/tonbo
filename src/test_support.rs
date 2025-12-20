@@ -1,7 +1,7 @@
-//! Test-only utilities (compiled under `cfg(test)` only).
+//! Test-only utilities (compiled under `cfg(test)` or the `test` feature).
 //!
-//! These helpers are not part of the public API surface for consumers. They exist solely
-//! to support integration/e2e tests without requiring a "test-helpers" feature.
+//! These helpers are not part of the public API surface for consumers. They exist to support
+//! integration/e2e tests when `--features test` is enabled.
 
 #![allow(dead_code)]
 
@@ -213,6 +213,7 @@ where
 }
 
 // Re-export test-only types to make internal tests more concise.
+#[allow(unused_imports)]
 pub(crate) use crate::{
     ondisk::sstable::{
         SsTableConfig as TestSsTableConfig, SsTableDescriptor as TestSsTableDescriptor,

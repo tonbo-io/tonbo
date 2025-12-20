@@ -118,7 +118,7 @@ where
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.manifest_wal_floor().await.map(|ref_| ref_.seq())
     }
@@ -140,7 +140,7 @@ where
     }
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) async fn run_compaction<CE, P>(
         &self,
         planner: &P,

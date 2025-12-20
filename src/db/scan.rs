@@ -80,7 +80,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Execute the scan plan with MVCC visibility
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) async fn execute_scan<'a>(
         &'a self,
         plan: ScanPlan,

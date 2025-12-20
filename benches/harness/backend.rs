@@ -69,17 +69,11 @@ impl BenchDb {
         }
     }
 
-    #[cfg(any(test, tonbo_bench))]
-    pub async fn bench_diagnostics(&self) -> tonbo::bench_diagnostics::BenchDiagnosticsSnapshot {
+    pub async fn metrics_snapshot(&self) -> tonbo::metrics::DbMetricsSnapshot {
         match &self.inner {
-            DbInner::Disk(db) => db.bench_diagnostics().await,
-            DbInner::S3(db) => db.bench_diagnostics().await,
+            DbInner::Disk(db) => db.metrics_snapshot().await,
+            DbInner::S3(db) => db.metrics_snapshot().await,
         }
-    }
-
-    #[cfg(not(any(test, tonbo_bench)))]
-    pub async fn bench_diagnostics(&self) -> tonbo::bench_diagnostics::BenchDiagnosticsSnapshot {
-        unreachable!("bench diagnostics not available without tonbo_bench")
     }
 }
 
@@ -201,7 +195,6 @@ pub struct BackendRun {
     backend: Backend,
     pub result_root: PathBuf,
     run_id: String,
-    diagnostics_enabled: bool,
 }
 
 enum Backend {
@@ -214,7 +207,6 @@ impl BackendRun {
     pub async fn new(config: &BenchConfig) -> anyhow::Result<Self> {
         let run_id = new_run_id();
         let result_root = default_results_root();
-        let diagnostics_enabled = config.diagnostics.as_ref().map_or(false, |cfg| cfg.enabled);
 
         let backend = match config.backend.r#type.as_str() {
             "disk" => {
@@ -243,7 +235,6 @@ impl BackendRun {
             backend,
             result_root,
             run_id,
-            diagnostics_enabled,
         })
     }
 
@@ -300,14 +291,10 @@ impl BackendRun {
             .await
     }
 
-    pub async fn open_db_with_builder(&self, mut builder: DbBuilder) -> anyhow::Result<BenchDb> {
+    pub async fn open_db_with_builder(&self, builder: DbBuilder) -> anyhow::Result<BenchDb> {
         match &self.backend {
             Backend::Disk(disk) => {
                 let db_path = disk.data_root().join("db");
-                #[cfg(any(test, tonbo_bench))]
-                if self.diagnostics_enabled {
-                    builder = builder.enable_bench_diagnostics();
-                }
                 let db = builder
                     .on_disk(&db_path)?
                     .open()
@@ -318,10 +305,6 @@ impl BackendRun {
                 })
             }
             Backend::S3(s3) => {
-                #[cfg(any(test, tonbo_bench))]
-                if self.diagnostics_enabled {
-                    builder = builder.enable_bench_diagnostics();
-                }
                 let db = builder
                     .object_store(ObjectSpec::s3(s3.spec.clone()))
                     .map_err(anyhow::Error::from)?
@@ -344,11 +327,7 @@ impl BackendRun {
         match &self.backend {
             Backend::Disk(disk) => {
                 let db_path = disk.data_root().join("db");
-                let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
-                #[cfg(any(test, tonbo_bench))]
-                if self.diagnostics_enabled {
-                    builder = builder.enable_bench_diagnostics();
-                }
+                let builder = DbBuilder::from_schema_key_name(schema, key_name)?;
                 let db = builder
                     .on_disk(&db_path)?
                     .wal_sync_policy(policy)
@@ -360,11 +339,7 @@ impl BackendRun {
                 })
             }
             Backend::S3(s3) => {
-                let mut builder = DbBuilder::from_schema_key_name(schema, key_name)?;
-                #[cfg(any(test, tonbo_bench))]
-                if self.diagnostics_enabled {
-                    builder = builder.enable_bench_diagnostics();
-                }
+                let builder = DbBuilder::from_schema_key_name(schema, key_name)?;
                 let db = builder
                     .object_store(ObjectSpec::s3(s3.spec.clone()))
                     .map_err(anyhow::Error::from)?

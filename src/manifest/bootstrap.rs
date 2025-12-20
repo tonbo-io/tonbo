@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 use fusio::mem::fs::InMemoryFs;
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
@@ -35,11 +35,11 @@ pub(super) type ManifestInstance<C, FS, E> = Manifest<
 >;
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
-#[cfg(all(test, feature = "tokio"))]
+#[cfg(all(any(test, feature = "test"), feature = "tokio"))]
 pub(super) type InMemoryManifest<E> = ManifestInstance<VersionCodec, InMemoryFs, E>;
 
 /// In-memory catalog manifest type used for catalog-specific tests.
-#[cfg(all(test, feature = "tokio"))]
+#[cfg(all(any(test, feature = "test"), feature = "tokio"))]
 pub(super) type InMemoryCatalogManifest<E> = ManifestInstance<CatalogCodec, InMemoryFs, E>;
 
 /// Snapshot combining catalog metadata with the latest version state.
@@ -271,7 +271,7 @@ where
 }
 
 /// Construct an in-memory manifest.
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub(crate) async fn init_in_memory_manifest<E>(
     executor: E,
 ) -> ManifestResult<TonboManifest<InMemoryFs, E>>

@@ -14,3 +14,5 @@ diagnostics:
   enabled: true
   level: basic
   skip_physical_bytes: true
+  sample_interval_ms: 1000
+  max_samples: 120

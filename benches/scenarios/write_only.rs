@@ -56,6 +56,11 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
                 batch_idx, inserted, ctx.workload.num_records
             );
         }
+        let elapsed = start.elapsed();
+        if diag.should_sample(elapsed) {
+            let snapshot = db.metrics_snapshot().await;
+            diag.record_engine_sample(elapsed, snapshot);
+        }
     }
     let elapsed = start.elapsed();
 
@@ -76,17 +81,16 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         "wall_time_ms": wall_time_ms,
     });
 
-    #[cfg(any(test, tonbo_bench))]
     if diag.enabled() {
-        println!("write_only capturing bench diagnostics...");
-        match tokio::time::timeout(std::time::Duration::from_secs(10), db.bench_diagnostics()).await
+        println!("write_only capturing metrics snapshot...");
+        match tokio::time::timeout(std::time::Duration::from_secs(10), db.metrics_snapshot()).await
         {
             Ok(snapshot) => {
                 diag.record_engine_snapshot(snapshot);
-                println!("write_only captured bench diagnostics");
+                println!("write_only captured metrics snapshot");
             }
             Err(_) => {
-                eprintln!("write_only bench diagnostics timed out; skipping snapshot");
+                eprintln!("write_only metrics snapshot timed out; skipping snapshot");
             }
         }
     }

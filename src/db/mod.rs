@@ -8,22 +8,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
-#[cfg(any(test, tonbo_bench))]
-use fusio::executor::RwLock;
 use fusio::{
     DynFs,
-    executor::{Executor, Timer},
+    executor::{Executor, RwLock, Timer},
     mem::fs::InMemoryFs,
 };
 use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
-#[cfg(any(test, tonbo_bench))]
-use crate::bench_diagnostics::{
-    BenchDiagnosticsSnapshot, BenchObserver, FlushDiagnosticsSnapshot, LatencySnapshot,
-    WalDiagnosticsSnapshot,
-};
 use crate::compaction::{CompactionHandle, MinorCompactor};
 mod builder;
 mod compaction;
@@ -48,6 +41,10 @@ use crate::{
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TableMeta, TonboManifest, VersionEdit,
         WalSegmentRef,
+    },
+    metrics::{
+        DbMetricsSnapshot, FlushMetrics, LatencySnapshot, MemtableMetricsSnapshot,
+        WalMetricsSnapshot,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
@@ -178,19 +175,19 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a DB from an inner handle.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     #[doc(hidden)]
     pub fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test")))]
     pub(crate) fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
     /// Access the inner handle (for internal/testing use).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     #[doc(hidden)]
     pub fn inner(&self) -> &Arc<DbInner<FS, E>> {
         &self.inner
@@ -199,7 +196,7 @@ where
     /// Consume the DB and return the inner handle (for testing).
     ///
     /// Panics if there are other references to the inner handle.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     #[doc(hidden)]
     pub fn into_inner(self) -> DbInner<FS, E> {
         Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
@@ -268,7 +265,7 @@ where
     }
 
     /// Whether a background compaction worker was spawned for this DB.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub fn has_compaction_worker(&self) -> bool {
         self.inner.has_compaction_worker()
     }
@@ -314,11 +311,9 @@ where
         self.inner.list_versions(limit).await
     }
 
-    /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
-    #[cfg(any(test, tonbo_bench))]
-    #[allow(dead_code)]
-    pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
-        self.inner.bench_diagnostics().await
+    /// Snapshot metrics for observability and benchmark reporting.
+    pub async fn metrics_snapshot(&self) -> DbMetricsSnapshot {
+        self.inner.metrics_snapshot().await
     }
 }
 
@@ -329,7 +324,7 @@ where
     /// Create a new in-memory DB with the given configuration.
     ///
     /// This is primarily for testing and prototyping.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) async fn new(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -339,7 +334,7 @@ where
     }
 
     /// Create a new in-memory DB with a custom seal policy.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) async fn new_with_policy(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -353,7 +348,7 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -361,8 +356,8 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-/// This type is exposed for testing purposes via the `test-helpers` feature.
-#[cfg(test)]
+/// This type is exposed for testing purposes via the `test` feature.
+#[cfg(any(test, feature = "test"))]
 #[doc(hidden)]
 pub struct DbInner<FS, E>
 where
@@ -405,15 +400,14 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
-    /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(any(test, tonbo_bench))]
-    bench_diagnostics: Option<Arc<dyn BenchObserver>>,
+    /// Aggregated flush metrics for observability.
+    flush_metrics: FlushMetrics,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test")))]
 pub(crate) struct DbInner<FS, E>
 where
     FS: ManifestFs<E>,
@@ -455,9 +449,8 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
-    /// Bench-only diagnostics recorder for flush/compaction timing.
-    #[cfg(any(test, tonbo_bench))]
-    bench_diagnostics: Option<Arc<dyn BenchObserver>>,
+    /// Aggregated flush metrics for observability.
+    flush_metrics: FlushMetrics,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -505,13 +498,13 @@ where
     }
 
     /// Acquire a read guard to the mutable memtable (for testing/inspection).
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn mem_read(&self) -> crate::inmem::mutable::memtable::TestMemRef<'_> {
         crate::inmem::mutable::memtable::TestMemRef(&self.mem)
     }
 
     /// Replace the mutable memtable with one that has specified batch capacity (for testing).
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn set_mem_capacity(&mut self, capacity: usize) {
         self.mem = DynMem::with_capacity(
             self.schema.clone(),
@@ -522,7 +515,7 @@ where
     }
 
     /// Seal the mutable memtable and return the sealed segment (for testing).
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn seal_mutable(
         &self,
     ) -> Option<crate::inmem::immutable::memtable::ImmutableMemTable> {
@@ -541,7 +534,6 @@ where
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
-        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Self {
         Self {
             schema,
@@ -563,8 +555,7 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
+            flush_metrics: FlushMetrics::default(),
         }
     }
 
@@ -577,7 +568,6 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -587,8 +577,6 @@ where
             manifest,
             manifest_table,
             table_meta,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
         )
         .await
     }
@@ -602,7 +590,6 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
-        #[cfg(any(test, tonbo_bench))] bench_diagnostics: Option<Arc<dyn BenchObserver>>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -624,8 +611,6 @@ where
             table_meta,
             Some(wal_cfg.clone()),
             executor,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -706,7 +691,7 @@ where
     }
 
     /// Table ID registered in the manifest for this DB.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub fn table_id(&self) -> TableId {
         self.manifest_table
     }
@@ -808,13 +793,9 @@ where
             .collect())
     }
 
-    /// Snapshot bench-only diagnostics (WAL + flush) for benchmark harnesses.
-    #[cfg(any(test, tonbo_bench))]
-    #[allow(dead_code)]
-    pub async fn bench_diagnostics(&self) -> BenchDiagnosticsSnapshot {
-        println!("bench_diagnostics: start");
+    /// Snapshot metrics for observability and benchmark reporting.
+    pub async fn metrics_snapshot(&self) -> DbMetricsSnapshot {
         let wal_snapshot = if let Some(handle) = self.wal_handle() {
-            println!("bench_diagnostics: wal handle present, reading metrics");
             let metrics = handle.metrics();
             let guard = metrics.read().await;
             let append_latency = if guard.append_events > 0 {
@@ -827,43 +808,34 @@ where
             } else {
                 None
             };
-            println!(
-                "bench_diagnostics: wal metrics bytes_written={} sync_ops={}",
-                guard.bytes_written, guard.sync_operations
-            );
-            Some(WalDiagnosticsSnapshot {
+            Some(WalMetricsSnapshot {
+                queue_depth: guard.queue_depth,
+                max_queue_depth: Some(guard.max_queue_depth),
                 bytes_written: guard.bytes_written,
                 sync_operations: guard.sync_operations,
-                queue_depth: guard.queue_depth,
-                max_queue_depth: guard.max_queue_depth,
+                wal_floor_advancements: guard.wal_floor_advancements,
+                wal_segments_pruned: guard.wal_segments_pruned,
+                wal_prune_dry_runs: guard.wal_prune_dry_runs,
+                wal_prune_failures: guard.wal_prune_failures,
                 append_latency,
             })
         } else {
             None
         };
 
-        #[cfg(any(test, tonbo_bench))]
-        if let Some(observer) = &self.bench_diagnostics {
-            println!("bench_diagnostics: observer present");
-            if let Some(wal) = wal_snapshot.clone() {
-                observer.update_wal(wal);
-            }
-            let mut snapshot = observer.snapshot();
-            if snapshot.flush.is_none() {
-                snapshot.flush = self.bench_flush_snapshot();
-            }
-            if snapshot.wal.is_none() {
-                snapshot.wal = wal_snapshot;
-            }
-            println!("bench_diagnostics: returning observer snapshot");
-            return snapshot;
-        }
+        let flush_snapshot = self.flush_metrics.snapshot();
+        let flush = if flush_snapshot.flush_count == 0 {
+            None
+        } else {
+            Some(flush_snapshot)
+        };
+        let memtable = Some(MemtableMetricsSnapshot::from(self.mem.metrics_snapshot()));
 
-        let flush = self.bench_flush_snapshot();
-        println!("bench_diagnostics: returning direct snapshot (no observer)");
-        BenchDiagnosticsSnapshot {
+        DbMetricsSnapshot {
             wal: wal_snapshot,
             flush,
+            memtable,
+            compaction: None,
         }
     }
 
@@ -892,7 +864,6 @@ where
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
-        #[cfg(any(test, tonbo_bench))]
         let flush_started = self.executor.now();
         let _guard = self.flush_lock.lock().await;
         let (immutables_snapshot, flush_count) = {
@@ -991,12 +962,9 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
-                #[cfg(any(test, tonbo_bench))]
-                if let Some(diag) = &self.bench_diagnostics {
-                    let duration = flush_started.elapsed();
-                    let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
-                    diag.record_flush(bytes, duration);
-                }
+                let duration = flush_started.elapsed();
+                let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
+                self.flush_metrics.record(bytes, duration);
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -1012,7 +980,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
@@ -1021,18 +989,10 @@ where
     pub(crate) fn key_locks(&self) -> &LockMap<KeyOwned> {
         &self._key_locks
     }
-
-    #[cfg(any(test, tonbo_bench))]
-    #[allow(dead_code)]
-    pub(crate) fn bench_flush_snapshot(&self) -> Option<FlushDiagnosticsSnapshot> {
-        self.bench_diagnostics
-            .as_ref()
-            .map(|observer| observer.flush_snapshot())
-    }
 }
 
 // In-memory convenience constructors.
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 impl<E> DbInner<InMemoryFs, E>
 where
     E: Executor + Timer + Clone + 'static,
@@ -1069,8 +1029,6 @@ where
             table_meta,
             None,
             executor,
-            #[cfg(any(test, tonbo_bench))]
-            None,
         ))
     }
 }

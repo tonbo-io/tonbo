@@ -16,7 +16,7 @@ use crossbeam_skiplist::SkipMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
-use super::MutableMemTableMetrics;
+use super::{MutableMemTableMetrics, MutableMemTableMetricsSnapshot};
 use crate::{
     extractor::{self, KeyExtractError, KeyProjection, map_view_err},
     inmem::{
@@ -50,7 +50,7 @@ impl BatchAttachment {
         Timestamp::new(self.commit_ts.value(row))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     fn into_storage(self) -> RecordBatch {
         self.storage
     }
@@ -493,7 +493,7 @@ impl DynMemInner {
         }
     }
 
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         let key_owned = key.clone();
         let mut out = Vec::new();
@@ -517,7 +517,7 @@ impl DynMemInner {
         }
     }
 
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn batch_count(&self) -> usize {
         self.batch_cursor.load(Ordering::Relaxed)
     }
@@ -698,11 +698,16 @@ impl DynMem {
         &self.delete_projection
     }
 
+    /// Snapshot mutable memtable metrics.
+    pub(crate) fn metrics_snapshot(&self) -> MutableMemTableMetricsSnapshot {
+        self.inner.read().metrics.snapshot()
+    }
+
     /// Consume the memtable and return any batches that were still pinned.
     ///
     /// This keeps the borrowed key views sound by dropping the pinned owners at
     /// the same time the batches are released.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
         self.inner
             .into_inner()
@@ -714,12 +719,12 @@ impl DynMem {
             .collect()
     }
 
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         self.inner.read().inspect_versions(key)
     }
 
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) fn batch_count(&self) -> usize {
         self.inner.read().batch_count()
     }
@@ -744,10 +749,10 @@ impl<'a> DynMemReadGuard<'a> {
 }
 
 /// A lightweight reference wrapper for testing that delegates to DynMem's test methods.
-#[cfg(all(test, feature = "tokio"))]
+#[cfg(all(any(test, feature = "test"), feature = "tokio"))]
 pub(crate) struct TestMemRef<'a>(pub(crate) &'a DynMem);
 
-#[cfg(all(test, feature = "tokio"))]
+#[cfg(all(any(test, feature = "test"), feature = "tokio"))]
 impl<'a> TestMemRef<'a> {
     /// Inspect all versions of a key in the memtable.
     pub fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
@@ -811,7 +816,7 @@ pub(crate) enum DynRowScanEntry {
 }
 
 impl DynRowScanEntry {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn into_row(self) -> Option<(KeyTsViewRaw, DynRowRaw)> {
         match self {
             DynRowScanEntry::Row(key, row) => Some((key, row)),

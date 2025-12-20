@@ -12,13 +12,8 @@ readme = "README.md"
 members = [
     ".",
     "predicate",
-    "tools/bench-compare",
-    "tools/bench-report",
     "tools/tonbo-bench-runner",
 ]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tonbo_bench)'] }
 
 [features]
 default = ["tokio", "typed-arrow"]
@@ -43,6 +38,8 @@ web = [
 web-opfs = ["fusio/opfs", "web"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
+# Enable test-only helpers for integration and e2e tests outside the crate.
+test = []
 
 [dependencies]
 anyhow = "1"

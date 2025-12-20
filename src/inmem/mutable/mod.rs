@@ -8,4 +8,4 @@ pub(crate) mod memtable;
 mod metrics;
 
 pub(crate) use memtable::DynMem;
-pub(crate) use metrics::MutableMemTableMetrics;
+pub(crate) use metrics::{MutableMemTableMetrics, MutableMemTableMetricsSnapshot};

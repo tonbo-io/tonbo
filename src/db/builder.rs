@@ -14,8 +14,6 @@ use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, Segment
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
-#[cfg(any(test, tonbo_bench))]
-use crate::bench_diagnostics::{BenchDiagnosticsRecorder, BenchObserver};
 use crate::{
     compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
@@ -440,8 +438,6 @@ pub struct DbBuilder<S = Unconfigured> {
     compaction_interval: Option<Duration>,
     compaction_loop_cfg: Option<CompactionLoopConfig>,
     minor_compaction: Option<MinorCompactionOptions>,
-    #[cfg(any(test, tonbo_bench))]
-    bench_diagnostics: bool,
 }
 
 /// Error returned when building a [`DB`] through [`DbBuilder`].
@@ -779,8 +775,6 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: None,
             compaction_loop_cfg: None,
             minor_compaction: Some(MinorCompactionOptions::default()),
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics: false,
         }
     }
 
@@ -826,8 +820,6 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -853,8 +845,6 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -874,8 +864,6 @@ impl DbBuilder<Unconfigured> {
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
             minor_compaction: self.minor_compaction,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics: self.bench_diagnostics,
         })
     }
 
@@ -1062,8 +1050,6 @@ where
             compaction_interval: _compaction_interval,
             compaction_loop_cfg,
             minor_compaction,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
         } = self;
 
         let manifest_init = ManifestBootstrap::new(&layout);
@@ -1113,10 +1099,6 @@ where
             None
         };
 
-        #[cfg(any(test, tonbo_bench))]
-        let bench_diagnostics = bench_diagnostics
-            .then(|| Arc::new(BenchDiagnosticsRecorder::default()) as Arc<dyn BenchObserver>);
-
         let mut inner = DbInner::from_components(
             schema,
             delete_schema,
@@ -1128,8 +1110,6 @@ where
             table_meta,
             wal_cfg.clone(),
             executor,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
         );
 
         inner.minor_compaction = minor_compaction_state;
@@ -1166,14 +1146,6 @@ impl<S> DbBuilder<S> {
     #[must_use]
     pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
         self.mode_config.commit_ack_mode = mode;
-        self
-    }
-
-    /// Enable bench-only diagnostics hooks used by scenario benchmarks.
-    #[cfg(any(test, tonbo_bench))]
-    #[must_use]
-    pub fn enable_bench_diagnostics(mut self) -> Self {
-        self.bench_diagnostics = true;
         self
     }
 }
@@ -1324,8 +1296,6 @@ where
             compaction_interval,
             compaction_loop_cfg,
             minor_compaction,
-            #[cfg(any(test, tonbo_bench))]
-            bench_diagnostics,
         } = self;
 
         state.prepare().await?;
@@ -1370,9 +1340,6 @@ where
             } else {
                 None
             };
-            #[cfg(any(test, tonbo_bench))]
-            let bench_diagnostics = bench_diagnostics
-                .then(|| Arc::new(BenchDiagnosticsRecorder::default()) as Arc<dyn BenchObserver>);
             let mut inner = DbInner::recover_with_wal_with_manifest(
                 mode_config,
                 Arc::clone(&executor),
@@ -1381,8 +1348,6 @@ where
                 manifest,
                 manifest_table,
                 table_meta,
-                #[cfg(any(test, tonbo_bench))]
-                bench_diagnostics,
             )
             .await
             .map_err(DbBuildError::Mode)?;
@@ -1397,8 +1362,6 @@ where
                 compaction_interval,
                 compaction_loop_cfg,
                 minor_compaction,
-                #[cfg(any(test, tonbo_bench))]
-                bench_diagnostics,
             }
             .build_with_layout(executor, layout)
             .await

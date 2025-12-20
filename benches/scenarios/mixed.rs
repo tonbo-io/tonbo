@@ -60,6 +60,11 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
                 diag.record_logical_bytes(row_bytes);
             }
         }
+        let elapsed = start.elapsed();
+        if diag.should_sample(elapsed) {
+            let snapshot = db.metrics_snapshot().await;
+            diag.record_engine_sample(elapsed, snapshot);
+        }
     }
     let elapsed = start.elapsed();
 
@@ -84,9 +89,8 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         "wall_time_ms": wall_time_ms,
     });
 
-    #[cfg(any(test, tonbo_bench))]
     if diag.enabled() {
-        let snapshot = db.bench_diagnostics().await;
+        let snapshot = db.metrics_snapshot().await;
         diag.record_engine_snapshot(snapshot);
     }
     let diagnostics = diag.finalize(ctx.backend).await?;
