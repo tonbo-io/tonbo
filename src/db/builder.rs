@@ -1255,14 +1255,12 @@ where
                 .await
                 .map_err(DbBuildError::Manifest)?;
 
-            let all_versions = manifest
-                .list_versions(table_meta.table_id, 0)
-                .await
-                .map_err(DbBuildError::Manifest)?;
-
             let versions = match snapshot.latest_version.as_ref() {
                 Some(v) if !v.ssts().is_empty() => std::slice::from_ref(v),
-                _ => &all_versions,
+                _ => &manifest
+                    .list_versions(table_meta.table_id, 0)
+                    .await
+                    .map_err(DbBuildError::Manifest)?,
             };
 
             cfg.start_id.unwrap_or_else(|| next_sstable_id(versions))
