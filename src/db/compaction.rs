@@ -4,15 +4,14 @@
 
 use fusio::executor::{Executor, Timer};
 
-use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
 #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
-use crate::{
-    compaction::{
-        executor::{CompactionError, CompactionExecutor, CompactionOutcome},
-        planner::CompactionPlanner,
-    },
-    manifest::ManifestResult,
+use crate::compaction::{
+    executor::{CompactionError, CompactionExecutor, CompactionOutcome},
+    planner::CompactionPlanner,
 };
+#[cfg(all(test, feature = "tokio"))]
+use crate::manifest::ManifestResult;
+use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
 
 impl<FS, E> DbInner<FS, E>
 where
@@ -21,7 +20,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Whether a background compaction worker was spawned for this DB.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub fn has_compaction_worker(&self) -> bool {
         self.compaction_worker.is_some()
     }
@@ -44,7 +43,7 @@ where
     }
 
     /// Build a compaction plan based on the latest manifest snapshot.
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn plan_compaction_task<P>(
         &self,
         planner: &P,
@@ -56,7 +55,7 @@ where
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.compaction_driver().wal_floor_seq().await
     }

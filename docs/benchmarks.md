@@ -56,7 +56,7 @@ cargo bench --features test --bench tonbo_components -- --config benches/harness
 
 ```bash
 cargo run -p tonbo-bench-runner -- compare \
-  --current target/bench-results \
+  --current target/bench-results/<run-id> \
   --baseline benchmarks/baselines/scenarios \
   --thresholds benches/harness/configs/regression-thresholds.yaml \
   --missing-baseline fail

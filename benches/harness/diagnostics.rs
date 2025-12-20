@@ -161,6 +161,7 @@ struct DiagnosticsState {
     logical_bytes: u64,
     engine: EngineDiagnostics,
     samples: Vec<DiagnosticsSample>,
+    #[allow(dead_code)]
     last_sample_elapsed_ms: Option<u64>,
 }
 
@@ -218,6 +219,7 @@ impl DiagnosticsCollector {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_sample(&self, elapsed: std::time::Duration) -> bool {
         let Some(inner) = &self.inner else {
             return false;
@@ -241,6 +243,7 @@ impl DiagnosticsCollector {
         }
     }
 
+    #[allow(dead_code)]
     pub fn record_engine_sample(&self, elapsed: std::time::Duration, snapshot: DbMetricsSnapshot) {
         if let Some(inner) = &self.inner {
             let mut guard = inner.lock().expect("diagnostics mutex poisoned");

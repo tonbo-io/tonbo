@@ -265,7 +265,7 @@ where
     }
 
     /// Whether a background compaction worker was spawned for this DB.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub fn has_compaction_worker(&self) -> bool {
         self.inner.has_compaction_worker()
     }
@@ -324,7 +324,7 @@ where
     /// Create a new in-memory DB with the given configuration.
     ///
     /// This is primarily for testing and prototyping.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) async fn new(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -334,7 +334,7 @@ where
     }
 
     /// Create a new in-memory DB with a custom seal policy.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) async fn new_with_policy(
         config: DynModeConfig,
         executor: Arc<E>,
@@ -348,7 +348,7 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[cfg(any(test, feature = "test"))]
+#[cfg(test)]
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -498,13 +498,13 @@ where
     }
 
     /// Acquire a read guard to the mutable memtable (for testing/inspection).
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn mem_read(&self) -> crate::inmem::mutable::memtable::TestMemRef<'_> {
         crate::inmem::mutable::memtable::TestMemRef(&self.mem)
     }
 
     /// Replace the mutable memtable with one that has specified batch capacity (for testing).
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn set_mem_capacity(&mut self, capacity: usize) {
         self.mem = DynMem::with_capacity(
             self.schema.clone(),
@@ -515,7 +515,7 @@ where
     }
 
     /// Seal the mutable memtable and return the sealed segment (for testing).
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn seal_mutable(
         &self,
     ) -> Option<crate::inmem::immutable::memtable::ImmutableMemTable> {
@@ -980,7 +980,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
@@ -992,7 +992,7 @@ where
 }
 
 // In-memory convenience constructors.
-#[cfg(any(test, feature = "test"))]
+#[cfg(test)]
 impl<E> DbInner<InMemoryFs, E>
 where
     E: Executor + Timer + Clone + 'static,

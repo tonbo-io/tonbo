@@ -118,7 +118,7 @@ where
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
-    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.manifest_wal_floor().await.map(|ref_| ref_.seq())
     }
