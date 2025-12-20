@@ -11,9 +11,7 @@ use fusio::{
 };
 #[cfg(feature = "tokio")]
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
-use fusio_manifest::{
-    CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl, snapshot,
-};
+use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
@@ -23,7 +21,7 @@ use crate::{
     id::FileIdGenerator,
     manifest::{
         ManifestError, ManifestFs, TableMeta, TonboManifest, VersionState,
-        bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
+        bootstrap::{ensure_manifest_dirs, init_fs_manifest},
     },
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
