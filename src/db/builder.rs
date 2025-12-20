@@ -11,7 +11,9 @@ use fusio::{
 };
 #[cfg(feature = "tokio")]
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
-use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
+use fusio_manifest::{
+    CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl, snapshot,
+};
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
@@ -1247,12 +1249,27 @@ where
         FS: ManifestFs<E>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        let versions = manifest
-            .list_versions(table_meta.table_id, 0)
-            .await
-            .map_err(DbBuildError::Manifest)?;
+        let start_id: u64 = {
+            let snapshot = manifest
+                .snapshot_latest(table_meta.table_id)
+                .await
+                .map_err(DbBuildError::Manifest)?;
 
-        let start_id = cfg.start_id.unwrap_or_else(|| next_sstable_id(&versions));
+            let all_versions = manifest
+                .list_versions(table_meta.table_id, 0)
+                .await
+                .map_err(DbBuildError::Manifest)?;
+
+            let versions = snapshot
+                .latest_version
+                .as_ref()
+                .filter(|v| !v.ssts().is_empty())
+                .map(std::slice::from_ref)
+                .unwrap_or(&all_versions);
+
+            cfg.start_id.unwrap_or_else(|| next_sstable_id(versions))
+        };
+
         Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
     }
 
