@@ -943,7 +943,8 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     async fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
-        let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone())
+            .with_metrics(self.object_store_metrics_arc());
         let wal_state_handle = storage.load_state_handle(cfg.state_store.as_ref()).await?;
         let wal_state_hint = wal_state_handle
             .as_ref()

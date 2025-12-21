@@ -465,17 +465,14 @@ impl ObjectStoreMetrics {
         self.write_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn record_list(&self) {
         self.list_ops.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn record_head(&self) {
         self.head_ops.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn record_delete(&self) {
         self.delete_ops.fetch_add(1, Ordering::Relaxed);
     }

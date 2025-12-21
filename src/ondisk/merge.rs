@@ -949,15 +949,34 @@ pub(super) fn concat_batches(
 /// Continues on individual file errors to avoid leaving partial orphans.
 pub(crate) async fn cleanup_descriptors(config: &SsTableConfig, descriptors: &[SsTableDescriptor]) {
     let fs = config.fs();
+    let metrics = config.object_store_metrics();
     for desc in descriptors {
         if let Some(path) = desc.data_path() {
-            let _ = fs.remove(path).await;
+            if fs.remove(path).await.is_ok() {
+                if let Some(metrics) = metrics {
+                    metrics.record_delete();
+                }
+            } else if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
         }
         if let Some(path) = desc.mvcc_path() {
-            let _ = fs.remove(path).await;
+            if fs.remove(path).await.is_ok() {
+                if let Some(metrics) = metrics {
+                    metrics.record_delete();
+                }
+            } else if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
         }
         if let Some(path) = desc.delete_path() {
-            let _ = fs.remove(path).await;
+            if fs.remove(path).await.is_ok() {
+                if let Some(metrics) = metrics {
+                    metrics.record_delete();
+                }
+            } else if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
         }
     }
 }

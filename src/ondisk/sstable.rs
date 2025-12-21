@@ -83,6 +83,7 @@ pub struct SsTableConfig {
     compression: SsTableCompression,
     fs: Arc<dyn DynFs>,
     root: Path,
+    object_store_metrics: Option<Arc<ObjectStoreMetrics>>,
     key_extractor: Option<Arc<dyn KeyProjection>>,
     merge_iteration_budget: usize,
 }
@@ -96,6 +97,7 @@ impl SsTableConfig {
             compression: SsTableCompression::default(),
             fs,
             root,
+            object_store_metrics: None,
             key_extractor: None,
             merge_iteration_budget: DEFAULT_MERGE_ITERATION_BUDGET,
         }
@@ -110,6 +112,12 @@ impl SsTableConfig {
     /// Choose the compression strategy applied to persisted pages.
     pub fn with_compression(mut self, compression: SsTableCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Attach object-store metrics for SST-level operations.
+    pub(crate) fn with_object_store_metrics(mut self, metrics: Arc<ObjectStoreMetrics>) -> Self {
+        self.object_store_metrics = Some(metrics);
         self
     }
 
@@ -131,6 +139,11 @@ impl SsTableConfig {
     /// Access the Parquet-backed store used to create or read tables.
     pub fn fs(&self) -> &Arc<dyn DynFs> {
         &self.fs
+    }
+
+    /// Access the object-store metrics sink, if configured.
+    pub(crate) fn object_store_metrics(&self) -> Option<&ObjectStoreMetrics> {
+        self.object_store_metrics.as_deref()
     }
 
     /// Root directory prefix for all SSTable files.
@@ -1014,6 +1027,7 @@ where
         }
     };
     if let Some(metrics) = metrics {
+        metrics.record_head();
         metrics.record_read(size);
     }
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin

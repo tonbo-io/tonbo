@@ -557,6 +557,7 @@ where
         manifest_table: TableId,
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
         executor: Arc<E>,
     ) -> Self {
         Self {
@@ -582,7 +583,7 @@ where
             flush_metrics: FlushMetrics::default(),
             compaction_metrics: Arc::new(CompactionMetrics::default()),
             read_metrics: Arc::new(ReadPathMetrics::default()),
-            object_store_metrics: Arc::new(ObjectStoreMetrics::default()),
+            object_store_metrics,
         }
     }
 
@@ -595,6 +596,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -604,6 +606,7 @@ where
             manifest,
             manifest_table,
             table_meta,
+            object_store_metrics,
         )
         .await
     }
@@ -617,6 +620,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -637,6 +641,7 @@ where
             manifest_table,
             table_meta,
             Some(wal_cfg.clone()),
+            Arc::clone(&object_store_metrics),
             executor,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
@@ -886,6 +891,11 @@ where
         self.object_store_metrics.as_ref()
     }
 
+    /// Clone the object-store metrics handle for wiring into helpers.
+    pub(crate) fn object_store_metrics_arc(&self) -> Arc<ObjectStoreMetrics> {
+        Arc::clone(&self.object_store_metrics)
+    }
+
     pub(crate) fn compaction_metrics(&self) -> Arc<CompactionMetrics> {
         Arc::clone(&self.compaction_metrics)
     }
@@ -1070,6 +1080,7 @@ where
             .map_err(manifest_error_as_key_extract)?;
         let manifest_table = table_meta.table_id;
         let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
         Ok(Self::from_components(
             schema,
             delete_schema,
@@ -1080,6 +1091,7 @@ where
             manifest_table,
             table_meta,
             None,
+            object_store_metrics,
             executor,
         ))
     }
