@@ -1,6 +1,6 @@
 # RFC: Performance Benchmarking Strategy for Tonbo
 
-**Status:** Draft
+**Status:** Draft (scenario/component benches + runner implemented; metrics API underway)
 **Authors:** Tonbo Team
 **Target:** Next minor release
 **Inspired by:** Luca Palmieri – *Rewrite, Optimize, Repeat*
@@ -157,4 +157,4 @@ tonbo/
 │       ├── workload.rs
 │       └── metrics.rs
 
-> **Status (dev branch)**: `write_only`, `read_only`, `mixed`, and `compaction` scenarios exist. Component coverage includes `memtable`, `wal`, `sst_encode`, and `iterator` via public APIs; bloom/cache benches remain deferred. Metrics snapshots are collected through the public metrics API when diagnostics are enabled in the harness config.
+> **Status (dev branch)**: `write_only`, `read_only`, `mixed`, and `compaction` scenarios exist. Component coverage includes `memtable`, `wal`, `sst_encode`, and `iterator` via public APIs; bloom/cache benches remain deferred. The `tonbo-bench-runner` orchestrates runs and parameter sweeps. Metrics snapshots are collected through `DB::metrics_snapshot()` when diagnostics are enabled; cache metrics remain stubbed until a cache layer ships.

@@ -8,6 +8,8 @@ jobs:
   scenarios:
     name: scenario benchmarks (gated)
     runs-on: ubuntu-latest
+    env:
+      GIT_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +30,9 @@ jobs:
 
       - name: Run compaction benchmark (disk)
         run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-compaction.yaml
+
+      - name: Run component benchmarks (disk)
+        run: cargo run -p tonbo-bench-runner -- --mode component --profile ci
 
       - name: Compare against baseline
         run: |

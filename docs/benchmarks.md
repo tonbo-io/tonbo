@@ -4,6 +4,9 @@ See [RFC 0012](rfcs/0012-performance-benchmarking.md) for design rationale and t
 
 ## Quick Start
 
+The runner invokes `cargo bench` with `--features test` so integration benches can access
+test-only helpers. Diagnostics sampling pulls from the stable `DB::metrics_snapshot()` API.
+
 ```bash
 # Run all benchmarks (scenarios + components)
 cargo run -p tonbo-bench-runner -- --profile ci
@@ -95,6 +98,11 @@ cargo run -p tonbo-bench-runner -- sweep --config benches/harness/sweeps/wal-syn
 ## Output
 
 Results are written to: `target/bench-results/<run-id>/<bench-target>/<storage-substrate>/<benchmark>.json`
+
+## Metrics Snapshot
+
+When diagnostics are enabled, benchmarks sample `DB::metrics_snapshot()` and embed those
+metrics alongside workload results. The same snapshot API is intended for production monitoring.
 
 ## Available Configs
 
