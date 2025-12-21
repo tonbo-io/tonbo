@@ -1,9 +1,0 @@
-backend:
-  type: disk
-  path: target/bench-tmp
-workload:
-  type: compaction
-  num_records: 200000
-  value_size_bytes: 256
-runtime:
-  concurrency: 1

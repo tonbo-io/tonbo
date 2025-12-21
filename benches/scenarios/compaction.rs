@@ -60,11 +60,6 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
         db.ingest(batch).await?;
         inserted += this_chunk as u64;
         diag.record_logical_bytes(row_bytes.saturating_mul(this_chunk as u64));
-        let elapsed = start.elapsed();
-        if diag.should_sample(elapsed) {
-            let snapshot = db.metrics_snapshot().await;
-            diag.record_engine_sample(elapsed, snapshot);
-        }
     }
     let elapsed = start.elapsed();
 

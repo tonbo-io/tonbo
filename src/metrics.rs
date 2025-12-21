@@ -9,11 +9,12 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::inmem::mutable::MutableMemTableMetricsSnapshot;
 
 /// Snapshot of database-level metrics.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct DbMetricsSnapshot {
     /// WAL metrics, when durability is enabled.
@@ -33,7 +34,7 @@ pub struct DbMetricsSnapshot {
 }
 
 /// WAL metrics exposed for observability.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct WalMetricsSnapshot {
     /// Current depth of the writer queue.
@@ -57,7 +58,7 @@ pub struct WalMetricsSnapshot {
 }
 
 /// Aggregated flush metrics captured from immutable->SST flushes.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct FlushMetricsSnapshot {
     /// Number of flush events recorded.
@@ -73,7 +74,7 @@ pub struct FlushMetricsSnapshot {
 }
 
 /// Simple latency summary.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct LatencySnapshot {
     /// Number of events recorded.
@@ -97,7 +98,7 @@ impl LatencySnapshot {
 }
 
 /// Mutable memtable metrics.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize)]
 #[non_exhaustive]
 pub struct MemtableMetricsSnapshot {
     /// Total entries currently held in the memtable.
@@ -125,7 +126,7 @@ impl From<MutableMemTableMetricsSnapshot> for MemtableMetricsSnapshot {
 }
 
 /// Aggregated compaction metrics.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct CompactionMetricsSnapshot {
     /// Whether compaction metrics are supported by the current build.
@@ -157,7 +158,7 @@ pub struct CompactionMetricsSnapshot {
 }
 
 /// Aggregated read-path metrics (scan planning/execution).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct ReadPathMetricsSnapshot {
     /// Number of scan plans built.
@@ -185,7 +186,7 @@ pub struct ReadPathMetricsSnapshot {
 }
 
 /// Cache metrics snapshot (optional).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct CacheMetricsSnapshot {
     /// Whether cache metrics are supported by the current build.
@@ -203,7 +204,7 @@ pub struct CacheMetricsSnapshot {
 }
 
 /// Object-store metrics for Tonbo-managed I/O.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct ObjectStoreMetricsSnapshot {
     /// Number of read operations issued.

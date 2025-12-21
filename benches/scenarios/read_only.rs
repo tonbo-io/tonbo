@@ -32,11 +32,6 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
     let start = Instant::now();
     for key in 0..ctx.workload.num_records {
         let _ = read_one(&db, key).await?;
-        let elapsed = start.elapsed();
-        if diag.should_sample(elapsed) {
-            let snapshot = db.metrics_snapshot().await;
-            diag.record_engine_sample(elapsed, snapshot);
-        }
     }
     let elapsed = start.elapsed();
 

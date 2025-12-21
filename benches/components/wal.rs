@@ -12,7 +12,6 @@ use tonbo::db::WalSyncPolicy;
 use crate::harness::{
     BackendRun, BenchConfig, BenchResult, BenchResultWriter, DiagnosticsCollector,
     DiagnosticsOutput, Workload, WorkloadKind, default_results_root,
-    diagnostics::diagnostics_config,
 };
 
 pub async fn run_wal_bench(
@@ -30,8 +29,7 @@ pub async fn run_wal_bench(
         Field::new("value", DataType::Binary, false),
     ]));
 
-    let diag_cfg = diagnostics_config(_config);
-    let diagnostics = DiagnosticsCollector::from_config(diag_cfg.clone());
+    let diagnostics = DiagnosticsCollector::from_config(_config.diagnostics.clone());
 
     let sync_policy = wal_policy_from_env();
     let db = backend

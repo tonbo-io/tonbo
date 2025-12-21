@@ -56,11 +56,6 @@ pub async fn run(ctx: ScenarioContext<'_>) -> anyhow::Result<()> {
                 batch_idx, inserted, ctx.workload.num_records
             );
         }
-        let elapsed = start.elapsed();
-        if diag.should_sample(elapsed) {
-            let snapshot = db.metrics_snapshot().await;
-            diag.record_engine_sample(elapsed, snapshot);
-        }
     }
     let elapsed = start.elapsed();
 

@@ -6,10 +6,9 @@ use std::{path::PathBuf, sync::Arc};
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 
-mod harness;
-use harness::diagnostics::diagnostics_config;
 #[path = "scenarios/compaction.rs"]
 mod compaction;
+mod harness;
 #[path = "scenarios/mixed.rs"]
 mod mixed;
 #[path = "scenarios/read_only.rs"]
@@ -62,8 +61,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let backend_run = BackendRun::new(&config).await?;
-    let diagnostics_cfg = diagnostics_config(&config);
-    let diagnostics = harness::DiagnosticsCollector::from_config(diagnostics_cfg);
+    let diagnostics = harness::DiagnosticsCollector::from_config(config.diagnostics.clone());
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::UInt64, false),
         Field::new("value", DataType::Binary, false),
