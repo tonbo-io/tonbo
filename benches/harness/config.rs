@@ -64,7 +64,35 @@ pub struct RuntimeConfig {
 impl BenchConfig {
     pub fn from_yaml_file(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
-        let cfg: BenchConfig = serde_yaml::from_str(&content)?;
+        let mut cfg: BenchConfig = serde_yaml::from_str(&content)?;
+        cfg.apply_env_overrides();
         Ok(cfg)
+    }
+
+    /// Apply environment variable overrides for CI flexibility.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("TONBO_BENCH_WORKLOAD") {
+            self.workload.name = v;
+        }
+        if let Ok(v) = std::env::var("TONBO_BENCH_NUM_RECORDS") {
+            if let Ok(n) = v.parse() {
+                self.workload.num_records = n;
+            }
+        }
+        if let Ok(v) = std::env::var("TONBO_BENCH_VALUE_SIZE") {
+            if let Ok(n) = v.parse() {
+                self.workload.value_size_bytes = n;
+            }
+        }
+        if let Ok(v) = std::env::var("TONBO_BENCH_READ_RATIO") {
+            if let Ok(n) = v.parse() {
+                self.workload.read_ratio = Some(n);
+            }
+        }
+        if let Ok(v) = std::env::var("TONBO_BENCH_WRITE_RATIO") {
+            if let Ok(n) = v.parse() {
+                self.workload.write_ratio = Some(n);
+            }
+        }
     }
 }

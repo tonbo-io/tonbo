@@ -15,7 +15,11 @@ cargo run -p tonbo-bench-runner -- --profile ci
 cargo run -p tonbo-bench-runner -- --mode scenario --profile ci
 
 # Run with custom config
-cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-write-only.yaml
+cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+
+# Override workload via env vars
+TONBO_BENCH_WORKLOAD=mixed TONBO_BENCH_NUM_RECORDS=5000 \
+  cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
 
 # Dry-run (print commands without executing)
 cargo run -p tonbo-bench-runner -- --profile ci --dry-run
@@ -49,10 +53,10 @@ sweep --config <sweep-config.yaml> [--output <path>] [--format csv|jsonl]
 
 ```bash
 # Scenarios
-cargo bench --features test --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+cargo bench --features test --bench tonbo_scenarios -- --config benches/harness/configs/ci.yaml
 
 # Components
-cargo bench --features test --bench tonbo_components -- --config benches/harness/configs/ci-write-only.yaml
+cargo bench --features test --bench tonbo_components -- --config benches/harness/configs/ci.yaml
 ```
 
 ## Regression Comparison
@@ -108,10 +112,18 @@ metrics alongside workload results. The same snapshot API is intended for produc
 
 | Config | Description |
 |--------|-------------|
-| `ci-write-only.yaml` | Small sequential write (CI) |
-| `ci-mixed.yaml` | Small mixed read/write (CI) |
+| `ci.yaml` | CI config (override workload via env vars) |
 | `deep-disk.yaml` | Longer run with diagnostics |
-| `baseline-*.yaml` | Baseline generation configs |
+
+## Environment Variable Overrides
+
+| Variable | Description |
+|----------|-------------|
+| `TONBO_BENCH_WORKLOAD` | Workload type: `sequential_write`, `mixed`, `compaction`, `read_only` |
+| `TONBO_BENCH_NUM_RECORDS` | Number of records |
+| `TONBO_BENCH_VALUE_SIZE` | Value size in bytes |
+| `TONBO_BENCH_READ_RATIO` | Read ratio for mixed workload (0.0-1.0) |
+| `TONBO_BENCH_WRITE_RATIO` | Write ratio for mixed workload (0.0-1.0) |
 
 ## Sample Config
 

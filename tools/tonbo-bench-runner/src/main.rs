@@ -476,7 +476,7 @@ struct ResolvedConfigs {
 }
 
 fn resolve_configs(args: &RunArgs) -> Result<ResolvedConfigs> {
-    let default_ci = repo_root().join("benches/harness/configs/ci-write-only.yaml");
+    let default_ci = repo_root().join("benches/harness/configs/ci.yaml");
     let base = args.config.clone();
     let scenario = args.scenario_config.clone().or_else(|| base.clone());
     let component = args.component_config.clone().or(base);
@@ -2059,7 +2059,7 @@ mod tests {
     #[test]
     fn profile_ci_provides_default_config() {
         // Ensure the default path is validated; resolve relative to the repo root.
-        let default = repo_root().join("benches/harness/configs/ci-write-only.yaml");
+        let default = repo_root().join("benches/harness/configs/ci.yaml");
         assert!(
             default.exists(),
             "expected default CI config to exist at {}",
@@ -2080,7 +2080,7 @@ mod tests {
         let configs = resolve_configs(&args).expect("configs");
         let cmds = build_commands(&args, &configs, &[]).expect("commands");
         assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].args.iter().any(|arg| arg.contains("ci-write-only")));
+        assert!(cmds[0].args.iter().any(|arg| arg.contains("ci.yaml")));
     }
 
     #[test]

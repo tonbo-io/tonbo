@@ -1,3 +1,4 @@
+# CI benchmark config - workload can be overridden via TONBO_BENCH_WORKLOAD env var
 backend:
   type: disk
   path: target/bench-tmp
