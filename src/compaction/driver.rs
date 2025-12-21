@@ -3,7 +3,10 @@
 //! The driver owns manifest access and WAL configuration, coordinates planning,
 //! execution, and reconciliation without requiring the full DB type.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
@@ -20,7 +23,8 @@ use crate::{
         scheduler::{CompactionScheduler, ScheduledCompaction},
     },
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
-    ondisk::sstable::SsTableConfig,
+    metrics::{CompactionIoStats, CompactionMetrics},
+    ondisk::sstable::{SsTableConfig, SsTableDescriptor},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
 
@@ -41,6 +45,7 @@ where
     pub(crate) table_id: TableId,
     pub(crate) wal_config: Option<RuntimeWalConfig>,
     pub(crate) wal_handle: Option<WalHandle<E>>,
+    pub(crate) metrics: Arc<CompactionMetrics>,
 }
 
 impl<FS, E> CompactionDriver<FS, E>
@@ -55,12 +60,14 @@ where
         table_id: TableId,
         wal_config: Option<RuntimeWalConfig>,
         wal_handle: Option<WalHandle<E>>,
+        metrics: Arc<CompactionMetrics>,
     ) -> Self {
         Self {
             manifest,
             table_id,
             wal_config,
             wal_handle,
+            metrics,
         }
     }
 
@@ -153,6 +160,7 @@ where
         let mut attempts = 0usize;
         loop {
             attempts += 1;
+            let started = Instant::now();
             let snapshot = self
                 .manifest
                 .snapshot_latest(self.table_id)
@@ -178,7 +186,13 @@ where
                 lease: None,
             };
 
-            let outcome = executor.execute(job).await?;
+            let outcome = match executor.execute(job).await {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    self.metrics.record_failure();
+                    return Err(err);
+                }
+            };
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -190,6 +204,8 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
+                let stats = compaction_io_stats(&outcome.remove_ssts, &outcome.outputs);
+                self.metrics.record_success(stats, started.elapsed());
                 return Ok(Some(outcome));
             }
             match self
@@ -205,17 +221,22 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
+                    let stats = compaction_io_stats(&outcome.remove_ssts, &outcome.outputs);
+                    self.metrics.record_success(stats, started.elapsed());
                     return Ok(Some(outcome));
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    self.metrics.record_cas_conflict();
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        self.metrics.record_failure();
                         return Err(CompactionError::CasConflict);
                     }
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    self.metrics.record_failure();
                     return Err(CompactionError::Manifest(err));
                 }
             }
@@ -234,6 +255,7 @@ where
         let mut attempts = 0usize;
         loop {
             attempts += 1;
+            let started = Instant::now();
             let snapshot = self
                 .manifest
                 .snapshot_latest(self.table_id)
@@ -260,7 +282,13 @@ where
                 lease: Some(scheduled.lease.clone()),
             };
 
-            let outcome = executor.execute(job).await?;
+            let outcome = match executor.execute(job).await {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    self.metrics.record_failure();
+                    return Err(err);
+                }
+            };
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -272,6 +300,8 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
+                let stats = compaction_io_stats(&outcome.remove_ssts, &outcome.outputs);
+                self.metrics.record_success(stats, started.elapsed());
                 return Ok(Some(outcome));
             }
             let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
@@ -288,17 +318,22 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
+                    let stats = compaction_io_stats(&outcome.remove_ssts, &outcome.outputs);
+                    self.metrics.record_success(stats, started.elapsed());
                     return Ok(Some(outcome));
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    self.metrics.record_cas_conflict();
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        self.metrics.record_failure();
                         return Err(CompactionError::CasConflict);
                     }
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    self.metrics.record_failure();
                     return Err(CompactionError::Manifest(err));
                 }
             }
@@ -390,4 +425,28 @@ where
         });
         CompactionHandle::new(abort, Some(handle))
     }
+}
+
+fn compaction_io_stats(
+    inputs: &[SsTableDescriptor],
+    outputs: &[SsTableDescriptor],
+) -> CompactionIoStats {
+    let mut stats = CompactionIoStats {
+        input_ssts: inputs.len() as u64,
+        output_ssts: outputs.len() as u64,
+        ..Default::default()
+    };
+    for desc in inputs {
+        if let Some(table_stats) = desc.stats() {
+            stats.input_bytes = stats.input_bytes.saturating_add(table_stats.bytes as u64);
+            stats.input_rows = stats.input_rows.saturating_add(table_stats.rows as u64);
+        }
+    }
+    for desc in outputs {
+        if let Some(table_stats) = desc.stats() {
+            stats.output_bytes = stats.output_bytes.saturating_add(table_stats.bytes as u64);
+            stats.output_rows = stats.output_rows.saturating_add(table_stats.rows as u64);
+        }
+    }
+    stats
 }

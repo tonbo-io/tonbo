@@ -46,6 +46,7 @@ use crate::{
     },
     key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
+    metrics::ObjectStoreMetrics,
     mvcc::Timestamp,
     ondisk::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
@@ -912,9 +913,9 @@ impl SsTableReader {
             })?;
         // ParquetStream<E> is Unpin, so we can use it directly without Box::pin
         let data_stream =
-            open_parquet_stream(fs.clone(), data_path, None, executor.clone()).await?;
+            open_parquet_stream(fs.clone(), data_path, None, executor.clone(), None).await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(open_parquet_stream(fs, path.clone(), None, executor).await?)
+            Some(open_parquet_stream(fs, path.clone(), None, executor, None).await?)
         } else {
             None
         };
@@ -972,11 +973,13 @@ pub(crate) async fn open_parquet_stream<E>(
     path: Path,
     projection: Option<ProjectionMask>,
     executor: E,
+    metrics: Option<&ObjectStoreMetrics>,
 ) -> Result<ParquetStream<E>, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection, executor).await?;
+    let (stream, _schema) =
+        open_parquet_stream_with_schema(fs, path, projection, executor, metrics).await?;
     Ok(stream)
 }
 
@@ -987,12 +990,32 @@ pub(crate) async fn open_parquet_stream_with_schema<E>(
     path: Path,
     projection: Option<ProjectionMask>,
     executor: E,
+    metrics: Option<&ObjectStoreMetrics>,
 ) -> Result<(ParquetStream<E>, SchemaRef), SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(&path).await?;
-    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let file = match fs.open(&path).await {
+        Ok(file) => file,
+        Err(err) => {
+            if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
+            return Err(err.into());
+        }
+    };
+    let size = match file.size().await {
+        Ok(size) => size,
+        Err(err) => {
+            if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
+            return Err(SsTableError::Fs(err));
+        }
+    };
+    if let Some(metrics) = metrics {
+        metrics.record_read(size);
+    }
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await

@@ -5,6 +5,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use arrow_array::RecordBatch;
@@ -18,7 +19,10 @@ use tonbo_predicate::{
 };
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
-use crate::query::stream::{StreamError, merge::MergeStream};
+use crate::{
+    metrics::ReadPathMetrics,
+    query::stream::{StreamError, merge::MergeStream},
+};
 
 pin_project! {
     /// Stream adapter that batches merged rows into `RecordBatch` chunks.
@@ -40,6 +44,24 @@ pin_project! {
         limit: Option<usize>,
         // Total rows emitted across all batches (for limit tracking).
         total_emitted: usize,
+        metrics: Option<Arc<ReadPathMetrics>>,
+        scan_started_at: Option<Instant>,
+        scan_finished: bool,
+    }
+
+    impl<'t, E: Executor> PinnedDrop for PackageStream<'t, E> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            if *this.scan_finished {
+                return;
+            }
+            if let (Some(metrics), Some(started)) =
+                (this.metrics.as_ref(), this.scan_started_at.as_ref())
+            {
+                metrics.record_scan_duration(started.elapsed());
+            }
+            *this.scan_finished = true;
+        }
     }
 }
 
@@ -62,6 +84,7 @@ where
             result_schema,
             residual_predicate,
             None,
+            None,
         )
     }
 
@@ -72,6 +95,7 @@ where
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
         residual_predicate: Option<Predicate>,
+        metrics: Option<Arc<ReadPathMetrics>>,
         limit: Option<usize>,
     ) -> Result<Self, StreamError> {
         assert!(batch_size > 0, "batch size must be greater than zero");
@@ -86,6 +110,9 @@ where
                 result_schema.as_ref(),
             )?)
         };
+        if let Some(metrics) = metrics.as_ref() {
+            metrics.record_scan_start();
+        }
         Ok(Self {
             row_count: 0,
             batch_size,
@@ -98,6 +125,9 @@ where
             projection,
             limit,
             total_emitted: 0,
+            metrics,
+            scan_started_at: Some(Instant::now()),
+            scan_finished: false,
         })
     }
 }
@@ -115,6 +145,14 @@ where
         if let Some(limit) = *this.limit
             && *this.total_emitted >= limit
         {
+            if !*this.scan_finished {
+                if let (Some(metrics), Some(started)) =
+                    (this.metrics.as_ref(), this.scan_started_at.as_ref())
+                {
+                    metrics.record_scan_duration(started.elapsed());
+                }
+                *this.scan_finished = true;
+            }
             return Poll::Ready(None);
         }
 
@@ -130,13 +168,24 @@ where
         while *this.row_count < effective_batch_size {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(entry))) => {
+                    if let Some(metrics) = this.metrics.as_ref() {
+                        metrics.record_entry_seen();
+                    }
                     if let Some(row) = entry.into_row() {
+                        if let Some(metrics) = this.metrics.as_ref() {
+                            metrics.record_row_examined();
+                        }
                         if let (Some(predicate), Some(evaluator)) =
                             (this.residual_predicate.as_ref(), this.residual.as_ref())
                         {
                             match evaluator.matches_owned(predicate, &row) {
                                 Ok(true) => {}
-                                Ok(false) => continue,
+                                Ok(false) => {
+                                    if let Some(metrics) = this.metrics.as_ref() {
+                                        metrics.record_row_filtered();
+                                    }
+                                    continue;
+                                }
                                 Err(err) => {
                                     return Poll::Ready(Some(Err(err.into())));
                                 }
@@ -158,6 +207,9 @@ where
                             return Poll::Ready(Some(Err(err)));
                         }
                         *this.row_count += 1;
+                        if let Some(metrics) = this.metrics.as_ref() {
+                            metrics.record_row_emitted();
+                        }
                         continue;
                     }
                 }
@@ -172,6 +224,14 @@ where
 
         if *this.row_count == 0 {
             return if upstream_done {
+                if !*this.scan_finished {
+                    if let (Some(metrics), Some(started)) =
+                        (this.metrics.as_ref(), this.scan_started_at.as_ref())
+                    {
+                        metrics.record_scan_duration(started.elapsed());
+                    }
+                    *this.scan_finished = true;
+                }
                 Poll::Ready(None)
             } else {
                 Poll::Pending
@@ -184,6 +244,9 @@ where
         };
         *this.total_emitted += batch.num_rows();
         *this.row_count = 0;
+        if let Some(metrics) = this.metrics.as_ref() {
+            metrics.record_batch_emitted();
+        }
 
         Poll::Ready(Some(Ok(batch)))
     }

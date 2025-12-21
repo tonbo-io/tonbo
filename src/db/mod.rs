@@ -43,8 +43,8 @@ use crate::{
         WalSegmentRef,
     },
     metrics::{
-        DbMetricsSnapshot, FlushMetrics, LatencySnapshot, MemtableMetricsSnapshot,
-        WalMetricsSnapshot,
+        CacheMetricsSnapshot, CompactionMetrics, DbMetricsSnapshot, FlushMetrics, LatencySnapshot,
+        MemtableMetricsSnapshot, ObjectStoreMetrics, ReadPathMetrics, WalMetricsSnapshot,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
@@ -402,6 +402,12 @@ where
     minor_compaction: Option<MinorCompactionState>,
     /// Aggregated flush metrics for observability.
     flush_metrics: FlushMetrics,
+    /// Compaction metrics (major compaction).
+    compaction_metrics: Arc<CompactionMetrics>,
+    /// Read-path metrics aggregated across scans.
+    read_metrics: Arc<ReadPathMetrics>,
+    /// Object-store metrics for Tonbo-managed I/O.
+    object_store_metrics: Arc<ObjectStoreMetrics>,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
@@ -451,6 +457,12 @@ where
     minor_compaction: Option<MinorCompactionState>,
     /// Aggregated flush metrics for observability.
     flush_metrics: FlushMetrics,
+    /// Compaction metrics (major compaction).
+    compaction_metrics: Arc<CompactionMetrics>,
+    /// Read-path metrics aggregated across scans.
+    read_metrics: Arc<ReadPathMetrics>,
+    /// Object-store metrics for Tonbo-managed I/O.
+    object_store_metrics: Arc<ObjectStoreMetrics>,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -556,6 +568,9 @@ where
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
             flush_metrics: FlushMetrics::default(),
+            compaction_metrics: Arc::new(CompactionMetrics::default()),
+            read_metrics: Arc::new(ReadPathMetrics::default()),
+            object_store_metrics: Arc::new(ObjectStoreMetrics::default()),
         }
     }
 
@@ -830,13 +845,32 @@ where
             Some(flush_snapshot)
         };
         let memtable = Some(MemtableMetricsSnapshot::from(self.mem.metrics_snapshot()));
+        let compaction = Some(self.compaction_metrics.snapshot());
+        let read_path = Some(self.read_metrics.snapshot());
+        let object_store = Some(self.object_store_metrics.snapshot());
+        let cache = None::<CacheMetricsSnapshot>;
 
         DbMetricsSnapshot {
             wal: wal_snapshot,
             flush,
             memtable,
-            compaction: None,
+            compaction,
+            read_path,
+            cache,
+            object_store,
         }
+    }
+
+    pub(crate) fn read_metrics(&self) -> Arc<ReadPathMetrics> {
+        Arc::clone(&self.read_metrics)
+    }
+
+    pub(crate) fn object_store_metrics(&self) -> &ObjectStoreMetrics {
+        self.object_store_metrics.as_ref()
+    }
+
+    pub(crate) fn compaction_metrics(&self) -> Arc<CompactionMetrics> {
+        Arc::clone(&self.compaction_metrics)
     }
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
@@ -965,6 +999,7 @@ where
                 let duration = flush_started.elapsed();
                 let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
                 self.flush_metrics.record(bytes, duration);
+                self.object_store_metrics.record_write(bytes);
                 Ok(table)
             }
             Err(err) => Err(err),

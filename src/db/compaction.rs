@@ -34,6 +34,7 @@ where
             self.manifest_table,
             self.wal_config.clone(),
             self.wal_handle().cloned(),
+            self.compaction_metrics(),
         )
     }
 

@@ -874,7 +874,7 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor, None)
             .await
             .expect("open stream");
 
@@ -954,12 +954,13 @@ mod tests {
         .await;
 
         // Open both streams for streaming merge
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor, None)
             .await
             .expect("open stream");
-        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
-            .await
-            .expect("delete stream");
+        let delete_stream =
+            open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor, None)
+                .await
+                .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
@@ -1030,7 +1031,7 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor, None)
             .await
             .expect("open stream");
 
@@ -1110,12 +1111,13 @@ mod tests {
         .await;
 
         // Open both streams for streaming merge
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor, None)
             .await
             .expect("open stream");
-        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
-            .await
-            .expect("delete stream");
+        let delete_stream =
+            open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor, None)
+                .await
+                .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
