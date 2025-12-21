@@ -21,17 +21,17 @@ jobs:
           cache-on-failure: false
 
       - name: Run disk benchmark
-        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-write-only.yaml
 
       - name: Run mixed benchmark (disk)
-        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-mixed.yaml
 
       - name: Run compaction benchmark (disk)
-        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-compaction.yaml
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-compaction.yaml
 
       - name: Compare against baseline
         run: |
-          cargo run -p bench-compare -- \
+          cargo run -p tonbo-bench-runner -- compare \
             --current target/bench-results \
             --baseline benchmarks/baselines/scenarios \
             --thresholds benches/harness/configs/regression-thresholds.yaml \
@@ -40,7 +40,7 @@ jobs:
 
       - name: Generate performance report
         run: |
-          cargo run -p bench-report -- \
+          cargo run -p tonbo-bench-runner -- report \
             --results-dir target/bench-results \
             --limit 10 \
             --output-md target/bench-reports/perf-report.md \
@@ -51,7 +51,7 @@ jobs:
         with:
           name: tonbo-benchmarks
           path: |
-            target/bench-results/*.json
+            target/bench-results/**/*.json
             target/bench-results/regression-report.json
             target/bench-reports/perf-report.md
             target/bench-reports/perf-report.json

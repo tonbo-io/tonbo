@@ -20,18 +20,23 @@ jobs:
           cache-on-failure: false
 
       - name: Run disk benchmark
-        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-write-only.yaml
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-write-only.yaml
 
       - name: Run mixed benchmark (disk)
-        run: RUSTFLAGS="--cfg tonbo_bench" cargo bench --bench tonbo_scenarios -- --config benches/harness/configs/ci-mixed.yaml
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-mixed.yaml
+
+      - name: Run compaction benchmark (disk)
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci-compaction.yaml
 
       - name: Stage refreshed baselines
         run: |
           mkdir -p benchmarks/baselines/scenarios
-          latest_seq=$(ls -t target/bench-results/*sequential_write.json | head -n1)
-          latest_mixed=$(ls -t target/bench-results/*mixed.json | head -n1)
+          latest_seq=$(find target/bench-results -name sequential_write.json -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+          latest_mixed=$(find target/bench-results -name mixed.json -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+          latest_compaction=$(find target/bench-results -name compaction.json -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
           cp "$latest_seq" benchmarks/baselines/scenarios/sequential_write.json
           cp "$latest_mixed" benchmarks/baselines/scenarios/mixed.json
+          cp "$latest_compaction" benchmarks/baselines/scenarios/compaction.json
 
       - name: Upload baseline artifact
         uses: actions/upload-artifact@v4
