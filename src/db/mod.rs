@@ -175,30 +175,42 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a DB from an inner handle.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
-    #[cfg(not(any(test, feature = "test")))]
+    #[cfg(not(feature = "test"))]
     pub(crate) fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
     /// Access the inner handle (for internal/testing use).
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn inner(&self) -> &Arc<DbInner<FS, E>> {
+        &self.inner
+    }
+
+    /// Access the inner handle (for unit tests).
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn inner(&self) -> &Arc<DbInner<FS, E>> {
         &self.inner
     }
 
     /// Consume the DB and return the inner handle (for testing).
     ///
     /// Panics if there are other references to the inner handle.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn into_inner(self) -> DbInner<FS, E> {
+        Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
+    }
+
+    /// Consume the DB and return the inner handle (for unit tests).
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn into_inner(self) -> DbInner<FS, E> {
         Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
     }
 
@@ -357,7 +369,7 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
 /// This type is exposed for testing purposes via the `test` feature.
-#[cfg(any(test, feature = "test"))]
+#[cfg(feature = "test")]
 #[doc(hidden)]
 pub struct DbInner<FS, E>
 where
@@ -413,7 +425,7 @@ where
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-#[cfg(not(any(test, feature = "test")))]
+#[cfg(not(feature = "test"))]
 pub(crate) struct DbInner<FS, E>
 where
     FS: ManifestFs<E>,
@@ -706,8 +718,13 @@ where
     }
 
     /// Table ID registered in the manifest for this DB.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     pub fn table_id(&self) -> TableId {
+        self.manifest_table
+    }
+
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn table_id(&self) -> TableId {
         self.manifest_table
     }
 
