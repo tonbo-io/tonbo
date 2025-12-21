@@ -20,14 +20,14 @@ use crate::{
         },
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot, CompactionTask},
     },
-    db::{DBError, DbInner},
+    db::DbInner,
     manifest::ManifestFs,
     mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
-    query::Predicate,
     schema::SchemaBuilder,
-    transaction::Snapshot as TxSnapshot,
 };
+#[cfg(test)]
+use crate::{db::DBError, query::Predicate, transaction::Snapshot as TxSnapshot};
 
 /// Trait for types that can be converted into a `DynRow`.
 pub(crate) trait IntoDynRow {
@@ -304,6 +304,7 @@ where
 }
 
 /// Plan a scan using a snapshot.
+#[cfg(test)]
 pub(crate) fn plan_scan_snapshot<'a, FS, E>(
     snapshot: &'a TxSnapshot,
     db: &'a DbInner<FS, E>,
@@ -324,6 +325,7 @@ where
 }
 
 /// Execute a prepared scan plan and stream `RecordBatch` results.
+#[cfg(test)]
 pub(crate) fn execute_scan_plan<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     plan: crate::query::scan::ScanPlan,
