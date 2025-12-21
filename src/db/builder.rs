@@ -1,5 +1,6 @@
 use std::{env, io, sync::Arc, time::Duration};
 
+use arrow_schema::SchemaRef;
 use fusio::{
     DynFs, Fs,
     dynamic::{MaybeSend, MaybeSync},
@@ -965,7 +966,7 @@ where
         layout: &StorageLayout<FS>,
         cfg: &MinorCompactionOptions,
         start_id: u64,
-        schema: arrow_schema::SchemaRef,
+        schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
     where
@@ -1047,11 +1048,10 @@ where
             mode_config,
             state,
             compaction_strategy,
-            compaction_interval: _compaction_interval,
+            compaction_interval: _,
             compaction_loop_cfg,
             minor_compaction,
         } = self;
-
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
         let table_name = state
@@ -1263,7 +1263,7 @@ where
         layout: &StorageLayout<FS>,
         manifest: &TonboManifest<FS, E>,
         table_meta: &TableMeta,
-        schema: arrow_schema::SchemaRef,
+        schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
     where
@@ -1297,7 +1297,6 @@ where
             compaction_loop_cfg,
             minor_compaction,
         } = self;
-
         state.prepare().await?;
         let layout = state.layout()?;
         let mut wal_cfg = RuntimeWalConfig::default();

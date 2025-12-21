@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
-use tonbo::{mode::DynModeConfig, schema::SchemaBuilder};
+use tonbo::{db::DynModeConfig, schema::SchemaBuilder};
 
 /// Convenience helper that builds a DynMode configuration with embedded PK metadata.
 pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {

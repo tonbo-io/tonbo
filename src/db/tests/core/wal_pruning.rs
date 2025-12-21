@@ -35,6 +35,7 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
         DB::<InMemoryFs, TokioExecutor>::builder(mode_config)
             .disable_minor_compaction()
             .in_memory(namespace.to_string())?
+            .disable_minor_compaction()
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
@@ -173,6 +174,7 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
         DB::<InMemoryFs, TokioExecutor>::builder(mode_config)
             .disable_minor_compaction()
             .in_memory(namespace.to_string())?
+            .disable_minor_compaction()
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
