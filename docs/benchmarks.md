@@ -44,6 +44,9 @@ report --results-dir <path> [--current-run <id>] [--baseline-run <id>] [--limit 
 
 # Regression compare (thresholded)
 compare --current <path> --baseline <path> --thresholds <yaml> [--report <path>]
+
+# Parameter sweep runner
+sweep --config <sweep-config.yaml> [--output <path>] [--format csv|jsonl]
 ```
 
 ## Manual Execution
@@ -75,6 +78,27 @@ cargo run -p tonbo-bench-runner -- report \
   --output-json target/bench-reports/perf-report.json
 ```
 
+## Sweep Config (Example)
+
+```yaml
+run:
+  mode: component
+  config: benches/harness/configs/deep-disk.yaml
+parameters:
+  - name: wal_sync_policy
+    env: TONBO_BENCH_WAL_SYNC
+    values: ["always", "interval_ms:1", "disabled"]
+output:
+  format: csv
+  path: target/bench-results/sweeps/wal-sync.csv
+```
+
+Use `env` to vary environment variables or `config_path` (dot-separated) to override YAML fields.
+
+```bash
+cargo run -p tonbo-bench-runner -- sweep --config benches/harness/sweeps/wal-sync.yaml
+```
+
 ## Output
 
 Results are written to: `target/bench-results/<run-id>/<bench-target>/<storage-substrate>/<benchmark>.json`
@@ -83,16 +107,6 @@ Results are written to: `target/bench-results/<run-id>/<bench-target>/<storage-s
 
 When diagnostics are enabled, benchmarks sample `DB::metrics_snapshot()` and embed those
 metrics alongside workload results. The same snapshot API is intended for production monitoring.
-
-## Parameter Sweeps
-
-For parameter sweeps (varying config values across runs), use [hyperfine](https://github.com/sharkdp/hyperfine):
-
-```bash
-hyperfine --export-json sweep.json \
-  -L sync always,disabled \
-  'TONBO_BENCH_WAL_SYNC={sync} cargo run -p tonbo-bench-runner -- --profile ci'
-```
 
 ## Available Configs
 

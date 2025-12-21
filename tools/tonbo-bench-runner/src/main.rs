@@ -1,4 +1,4 @@
-//! Consolidated runner for Tonbo benchmarks (run/report/compare).
+//! Consolidated runner for Tonbo benchmarks (run/report/compare/sweep).
 //!
 //! Recon notes:
 //! - Current benches run via `cargo bench --bench tonbo_scenarios -- --config <path>` and `cargo
@@ -37,6 +37,8 @@ enum CommandKind {
     Report(ReportArgs),
     /// Compare benchmark results against a baseline.
     Compare(CompareArgs),
+    /// Run a parameter sweep and emit a plot-ready dataset.
+    Sweep(SweepArgs),
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -117,6 +119,7 @@ fn main() -> Result<()> {
     match args.command {
         Some(CommandKind::Report(report)) => run_report(report),
         Some(CommandKind::Compare(compare)) => run_compare(compare),
+        Some(CommandKind::Sweep(sweep)) => run_sweep(sweep),
         None => run_bench(args.run),
     }
 }
@@ -204,6 +207,22 @@ struct CompareArgs {
     missing_baseline: String,
 }
 
+#[derive(Debug, clap::Args)]
+struct SweepArgs {
+    /// Path to YAML sweep config.
+    #[arg(long)]
+    config: PathBuf,
+    /// Print commands without executing them.
+    #[arg(long)]
+    dry_run: bool,
+    /// Override sweep output path.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Override sweep output format (csv or jsonl).
+    #[arg(long, value_enum)]
+    format: Option<SweepOutputFormat>,
+}
+
 fn run_report(args: ReportArgs) -> Result<()> {
     if args.limit == 0 {
         return Err(anyhow!("--limit must be > 0"));
@@ -282,6 +301,71 @@ fn run_compare(args: CompareArgs) -> Result<()> {
     } else {
         std::process::exit(exit_code);
     }
+}
+
+fn run_sweep(args: SweepArgs) -> Result<()> {
+    let sweep = SweepConfig::from_yaml(&args.config)?;
+    let sweep_id = sweep_id();
+    let output = sweep.output.resolve(&sweep_id, args.output, args.format);
+    let mut run = sweep.run.to_run_args();
+    run.dry_run = args.dry_run;
+
+    if sweep.parameters.is_empty() {
+        return Err(anyhow!("sweep config defines no parameters"));
+    }
+    let param_sets = expand_sweep_parameters(&sweep.parameters)?;
+
+    let mut records = Vec::new();
+    for (index, case) in param_sets.into_iter().enumerate() {
+        let case_id = index + 1;
+        let mut case_run = run.clone();
+        let env_overrides = case.env_overrides.clone();
+        let config_overrides = case.config_overrides.clone();
+
+        if !config_overrides.is_empty() {
+            let config_paths =
+                prepare_sweep_configs(&sweep_id, case_id, &case_run, &config_overrides)?;
+            case_run.config = None;
+            case_run.scenario_config = config_paths.scenario;
+            case_run.component_config = config_paths.component;
+        }
+
+        if case_run.dry_run {
+            let configs = resolve_configs(&case_run)?;
+            let commands = build_commands(&case_run, &configs, &env_overrides)?;
+            for cmd in &commands {
+                println!("{} [case {}]", format_command(cmd), case_id);
+            }
+            continue;
+        }
+
+        let before_runs = list_run_dirs(default_results_root());
+        let configs = resolve_configs(&case_run)?;
+        let commands = build_commands(&case_run, &configs, &env_overrides)?;
+
+        for cmd in &commands {
+            println!("Running sweep case {}: {}", case_id, format_command(cmd));
+            let status = spawn_command(cmd)?;
+            if !status.success() {
+                anyhow::bail!(
+                    "command failed ({}): exit code {:?}",
+                    cmd.description,
+                    status.code()
+                );
+            }
+        }
+
+        let after_runs = list_run_dirs(default_results_root());
+        let run_results = collect_run_results(&before_runs, &after_runs);
+        records.extend(build_sweep_records(&sweep_id, case_id, &case, &run_results));
+    }
+
+    if !records.is_empty() {
+        write_sweep_output(&output, &records)?;
+        println!("Wrote sweep output to {}", output.path.display());
+    }
+
+    Ok(())
 }
 
 fn build_commands(
@@ -1423,6 +1507,467 @@ fn write_machine_report(path: &Path, samples: &[MetricSample]) -> Result<()> {
     let buf = serde_json::to_vec_pretty(&out)?;
     fs::write(path, buf).with_context(|| format!("write report {}", path.display()))?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SweepRunConfig {
+    #[serde(default)]
+    mode: Option<Mode>,
+    #[serde(default)]
+    profile: Option<Profile>,
+    #[serde(default)]
+    config: Option<PathBuf>,
+    #[serde(default)]
+    scenario_config: Option<PathBuf>,
+    #[serde(default)]
+    component_config: Option<PathBuf>,
+    #[serde(default)]
+    diagnostics_sample_ms: Option<u64>,
+    #[serde(default)]
+    diagnostics_max_samples: Option<usize>,
+}
+
+impl SweepRunConfig {
+    fn to_run_args(&self) -> RunArgs {
+        RunArgs {
+            mode: self.mode.unwrap_or(Mode::All),
+            config: self.config.clone(),
+            scenario_config: self.scenario_config.clone(),
+            component_config: self.component_config.clone(),
+            profile: self.profile.unwrap_or(Profile::Local),
+            dry_run: false,
+            report_md: None,
+            diagnostics_sample_ms: self.diagnostics_sample_ms,
+            diagnostics_max_samples: self.diagnostics_max_samples,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SweepConfig {
+    #[serde(default)]
+    run: SweepRunConfig,
+    #[serde(default)]
+    parameters: Vec<SweepParameter>,
+    #[serde(default)]
+    output: SweepOutputConfig,
+}
+
+impl SweepConfig {
+    fn from_yaml(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("read sweep config {}", path.display()))?;
+        let cfg: SweepConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("parse sweep config {}", path.display()))?;
+        Ok(cfg)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SweepParameter {
+    name: String,
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    config_path: Option<String>,
+    values: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigOverride {
+    path: String,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+struct SweepCase {
+    params: BTreeMap<String, String>,
+    env_overrides: Vec<(String, String)>,
+    config_overrides: Vec<ConfigOverride>,
+}
+
+impl SweepParameter {
+    fn expand(&self, cases: &[SweepCase]) -> Result<Vec<SweepCase>> {
+        if self.values.is_empty() {
+            return Err(anyhow!("sweep parameter {} has no values", self.name));
+        }
+        if self.env.is_none() && self.config_path.is_none() {
+            return Err(anyhow!(
+                "sweep parameter {} must define env or config_path",
+                self.name
+            ));
+        }
+
+        let mut next = Vec::new();
+        for case in cases {
+            for value in &self.values {
+                let mut params = case.params.clone();
+                params.insert(self.name.clone(), value.clone());
+                let mut env_overrides = case.env_overrides.clone();
+                if let Some(env) = &self.env {
+                    env_overrides.push((env.clone(), value.clone()));
+                }
+                let mut config_overrides = case.config_overrides.clone();
+                if let Some(path) = &self.config_path {
+                    config_overrides.push(ConfigOverride {
+                        path: path.clone(),
+                        value: value.clone(),
+                    });
+                }
+                next.push(SweepCase {
+                    params,
+                    env_overrides,
+                    config_overrides,
+                });
+            }
+        }
+        Ok(next)
+    }
+}
+
+fn expand_sweep_parameters(params: &[SweepParameter]) -> Result<Vec<SweepCase>> {
+    let mut cases = vec![SweepCase {
+        params: BTreeMap::new(),
+        env_overrides: Vec::new(),
+        config_overrides: Vec::new(),
+    }];
+    for param in params {
+        cases = param.expand(&cases)?;
+    }
+    Ok(cases)
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SweepOutputConfig {
+    #[serde(default)]
+    format: Option<SweepOutputFormat>,
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
+impl SweepOutputConfig {
+    fn resolve(
+        &self,
+        sweep_id: &str,
+        override_path: Option<PathBuf>,
+        override_format: Option<SweepOutputFormat>,
+    ) -> SweepOutput {
+        let format = override_format
+            .or(self.format)
+            .unwrap_or(SweepOutputFormat::Csv);
+        let path = override_path
+            .or_else(|| self.path.clone())
+            .unwrap_or_else(|| default_sweep_output_path(sweep_id, format));
+        SweepOutput { format, path }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum SweepOutputFormat {
+    Csv,
+    Jsonl,
+}
+
+struct SweepOutput {
+    format: SweepOutputFormat,
+    path: PathBuf,
+}
+
+fn default_sweep_output_path(sweep_id: &str, format: SweepOutputFormat) -> PathBuf {
+    let ext = match format {
+        SweepOutputFormat::Csv => "csv",
+        SweepOutputFormat::Jsonl => "jsonl",
+    };
+    PathBuf::from("target")
+        .join("bench-results")
+        .join("sweeps")
+        .join(format!("{sweep_id}.{ext}"))
+}
+
+fn sweep_id() -> String {
+    let now = Utc::now();
+    let millis = now.timestamp_subsec_millis();
+    format!("{}-{millis:03}", now.format("%Y%m%d%H%M%S"))
+}
+
+struct SweepConfigPaths {
+    scenario: Option<PathBuf>,
+    component: Option<PathBuf>,
+}
+
+fn prepare_sweep_configs(
+    sweep_id: &str,
+    case_id: usize,
+    run: &RunArgs,
+    overrides: &[ConfigOverride],
+) -> Result<SweepConfigPaths> {
+    let resolved = resolve_configs(run)?;
+    let base_dir = PathBuf::from("target")
+        .join("bench-results")
+        .join("sweeps")
+        .join(sweep_id)
+        .join("configs")
+        .join(format!("case-{case_id:03}"));
+    fs::create_dir_all(&base_dir)
+        .with_context(|| format!("create sweep config dir {}", base_dir.display()))?;
+
+    let scenario = match resolved.scenario {
+        Some(path) => Some(apply_config_overrides(
+            &path, &base_dir, "scenario", overrides,
+        )?),
+        None => None,
+    };
+    let component = match resolved.component {
+        Some(path) => Some(apply_config_overrides(
+            &path,
+            &base_dir,
+            "component",
+            overrides,
+        )?),
+        None => None,
+    };
+
+    Ok(SweepConfigPaths {
+        scenario,
+        component,
+    })
+}
+
+fn apply_config_overrides(
+    base_path: &Path,
+    out_dir: &Path,
+    label: &str,
+    overrides: &[ConfigOverride],
+) -> Result<PathBuf> {
+    let content = fs::read_to_string(base_path)
+        .with_context(|| format!("read config {}", base_path.display()))?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("parse YAML {}", base_path.display()))?;
+
+    for override_entry in overrides {
+        set_yaml_path(&mut value, &override_entry.path, &override_entry.value)?;
+    }
+
+    let stem = base_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config");
+    let path = out_dir.join(format!("{stem}-{label}.yaml"));
+    let buf = serde_yaml::to_string(&value)?;
+    fs::write(&path, buf).with_context(|| format!("write config {}", path.display()))?;
+    Ok(path)
+}
+
+fn set_yaml_path(root: &mut serde_yaml::Value, path: &str, value: &str) -> Result<()> {
+    let mut current = root;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        let is_last = parts.peek().is_none();
+        match current {
+            serde_yaml::Value::Mapping(map) => {
+                let key = serde_yaml::Value::String(part.to_string());
+                if is_last {
+                    let parsed = serde_yaml::from_str(value)
+                        .unwrap_or_else(|_| serde_yaml::Value::String(value.to_string()));
+                    map.insert(key, parsed);
+                    return Ok(());
+                }
+                current = map
+                    .entry(key)
+                    .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+            }
+            _ => {
+                return Err(anyhow!("cannot set path {} on non-mapping YAML node", path));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct BenchResultRecord {
+    run_id: String,
+    bench_target: String,
+    storage_substrate: String,
+    benchmark_name: String,
+    benchmark_type: String,
+    backend: String,
+    #[serde(default)]
+    git_commit: Option<String>,
+    #[serde(default)]
+    metrics: Value,
+}
+
+fn collect_run_results(before: &[PathBuf], after: &[PathBuf]) -> Vec<BenchResultRecord> {
+    let before_set: HashSet<_> = before.iter().collect();
+    let mut new_runs: Vec<&PathBuf> = after.iter().filter(|p| !before_set.contains(p)).collect();
+    if new_runs.is_empty() && !after.is_empty() {
+        new_runs.push(
+            after
+                .iter()
+                .max_by_key(|p| p.file_name().map(|s| s.to_os_string()).unwrap_or_default())
+                .unwrap(),
+        );
+    }
+
+    let mut results = Vec::new();
+    for run in new_runs {
+        let files = list_json_files(run);
+        for file in files {
+            if let Ok(buf) = fs::read_to_string(&file)
+                && let Ok(result) = serde_json::from_str::<BenchResultRecord>(&buf)
+            {
+                results.push(result);
+            }
+        }
+    }
+    results
+}
+
+#[derive(Debug)]
+struct SweepRecord {
+    sweep_id: String,
+    case_id: usize,
+    run_id: String,
+    bench_target: String,
+    benchmark_name: String,
+    benchmark_type: String,
+    backend: String,
+    storage_substrate: String,
+    metric: String,
+    value: f64,
+    git_commit: Option<String>,
+    params: BTreeMap<String, String>,
+}
+
+fn build_sweep_records(
+    sweep_id: &str,
+    case_id: usize,
+    case: &SweepCase,
+    results: &[BenchResultRecord],
+) -> Vec<SweepRecord> {
+    let mut out = Vec::new();
+    for result in results {
+        let metrics = extract_numeric_metrics(&result.metrics);
+        for (metric, value) in metrics {
+            out.push(SweepRecord {
+                sweep_id: sweep_id.to_string(),
+                case_id,
+                run_id: result.run_id.clone(),
+                bench_target: result.bench_target.clone(),
+                benchmark_name: result.benchmark_name.clone(),
+                benchmark_type: result.benchmark_type.clone(),
+                backend: result.backend.clone(),
+                storage_substrate: result.storage_substrate.clone(),
+                metric,
+                value,
+                git_commit: result.git_commit.clone(),
+                params: case.params.clone(),
+            });
+        }
+    }
+    out
+}
+
+fn write_sweep_output(output: &SweepOutput, records: &[SweepRecord]) -> Result<()> {
+    if let Some(parent) = output.path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create sweep output dir {}", parent.display()))?;
+    }
+
+    match output.format {
+        SweepOutputFormat::Csv => write_sweep_csv(&output.path, records),
+        SweepOutputFormat::Jsonl => write_sweep_jsonl(&output.path, records),
+    }
+}
+
+fn write_sweep_csv(path: &Path, records: &[SweepRecord]) -> Result<()> {
+    let mut param_names: BTreeSet<String> = BTreeSet::new();
+    for record in records {
+        for key in record.params.keys() {
+            param_names.insert(key.clone());
+        }
+    }
+
+    let mut header = vec![
+        "sweep_id".to_string(),
+        "case_id".to_string(),
+        "run_id".to_string(),
+        "bench_target".to_string(),
+        "benchmark_name".to_string(),
+        "benchmark_type".to_string(),
+        "backend".to_string(),
+        "storage_substrate".to_string(),
+        "metric".to_string(),
+        "value".to_string(),
+        "git_commit".to_string(),
+    ];
+    for name in &param_names {
+        header.push(format!("param.{name}"));
+    }
+
+    let mut lines = Vec::new();
+    lines.push(header.join(","));
+    for record in records {
+        let mut row = vec![
+            record.sweep_id.clone(),
+            record.case_id.to_string(),
+            record.run_id.clone(),
+            record.bench_target.clone(),
+            record.benchmark_name.clone(),
+            record.benchmark_type.clone(),
+            record.backend.clone(),
+            record.storage_substrate.clone(),
+            record.metric.clone(),
+            format!("{}", record.value),
+            record.git_commit.clone().unwrap_or_default(),
+        ];
+        for name in &param_names {
+            row.push(record.params.get(name).cloned().unwrap_or_default());
+        }
+        let escaped = row.into_iter().map(csv_escape).collect::<Vec<_>>();
+        lines.push(escaped.join(","));
+    }
+
+    fs::write(path, lines.join("\n"))
+        .with_context(|| format!("write sweep CSV {}", path.display()))?;
+    Ok(())
+}
+
+fn write_sweep_jsonl(path: &Path, records: &[SweepRecord]) -> Result<()> {
+    let mut out = String::new();
+    for record in records {
+        let json = serde_json::json!({
+            "sweep_id": record.sweep_id,
+            "case_id": record.case_id,
+            "run_id": record.run_id,
+            "bench_target": record.bench_target,
+            "benchmark_name": record.benchmark_name,
+            "benchmark_type": record.benchmark_type,
+            "backend": record.backend,
+            "storage_substrate": record.storage_substrate,
+            "metric": record.metric,
+            "value": record.value,
+            "git_commit": record.git_commit,
+            "params": record.params,
+        });
+        out.push_str(&serde_json::to_string(&json)?);
+        out.push('\n');
+    }
+    fs::write(path, out).with_context(|| format!("write sweep JSONL {}", path.display()))?;
+    Ok(())
+}
+
+fn csv_escape(input: String) -> String {
+    if input.contains(['"', ',', '\n', '\r']) {
+        let escaped = input.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        input
+    }
 }
 
 fn extract_numeric_metrics(value: &Value) -> BTreeMap<String, f64> {
