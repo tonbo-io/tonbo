@@ -1,13 +1,13 @@
-# RFD 0005: SSTable Skeleton (Dynamic Mode)
+# RFD 0005: SSTable Skeleton
 
-- Status: Draft
+- Status: Implementing
 - Authors: Tonbo team
 - Created: 2025-10-24
 - Area: SsTable, Compaction
 
 ## Summary
 
-Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that sketches out the write/read surfaces for Parquet-backed sorted string tables. The goal of this RFD is to capture the current scaffolding, align it with the legacy Tonbo design on `main`, and enumerate the remaining pieces required to turn sealed immutables into durable SSTables. This draft also calls out the forthcoming MVCC sidecar plan from RFC 0006 so the writer/manifest work tracks that direction.
+Tonbo’s dynamic mode now ships a working on-disk module (`ondisk::sstable`) that turns sealed immutables into Parquet SSTables and streams them back with MVCC-aware merge. The data file appends `_commit_ts` to user columns; tombstones live in an optional key-only delete sidecar. WAL ids and stats are captured for manifest/compaction, and the scan path merges data + delete streams to enforce latest-wins. This RFD describes the current implementation and the remaining gaps (pruning, richer stats, caching).
 
 ## Motivation
 
@@ -17,64 +17,30 @@ Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that sketc
 
 ## Non-Goals
 
-* Implementing the actual Parquet writer/reader (streaming + caching) – this RFD tracks API scaffolding only.
-* Designing the version set or manifest reconciliation – a follow-up RFD will cover level management once SST files exist.
+* Redesigning manifest/version management (covered in RFC 0007).
+* Advanced page-level pruning/caching policies (tracked separately).
 
 ## Current State
 
 ### Config + Identity
 
-```rust
-pub struct SsTableConfig {
-    schema: SchemaRef,
-    target_level: usize,
-    compression: SsTableCompression,
-    fs: Arc<dyn DynFs>,
-    root: Path,
-}
-
-pub struct SsTableDescriptor {
-    id: SsTableId,
-    level: usize,
-    approximate_stats: Option<SsTableStats>,
-}
-```
-
-* Mirrors `main/src/ondisk/sstable.rs`, but parameterised for dynamic mode.
-* `SsTableCompression` currently exposes `None | Zstd`; default matches main.
-* `fs` + `root` inline the former `ParquetStore` wrapper.
-* `SsTableDescriptor` now captures optional WAL IDs alongside enriched stats for manifest consumers.
+SST configuration captures the Arrow schema, target level, compression choice, storage root, optional key extractor, and a guardrail for merge iteration. Descriptors carry the table id + level, optional stats (rows/bytes/key + commit_ts bounds/tombstones), optional WAL identifiers, and the resolved data/delete paths. Paths are level-scoped (`L{level}/{id}.parquet` plus optional `L{level}/{id}.delete.parquet`).
 
 ### Builder Skeleton
 
-```rust
-pub struct SsTableBuilder<M: Mode> { .. }
-
-impl<M: Mode> SsTableBuilder<M> {
-    pub(crate) fn add_immutable(&mut self, seg: &Immutable<M>) -> Result<(), SsTableError>;
-    pub async fn finish(self) -> Result<SsTable<M>, SsTableError>;
-}
-```
-
-* Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats` (min/max key, commit horizon, tombstone count).
-* `finish` streams the user batch through `AsyncArrowWriter`, records byte size, and returns an `SsTable` handle populated with the enriched `SsTableStats`. A follow-up will add the MVCC sidecar writer described in RFC 0006.
-* `SsTableError::NoImmutableSegments` still guards empty flush attempts.
-* Future: extend writer with page indexes/compression tuning.
+Builder is responsible for:
+- staging immutables,
+- optionally attaching WAL ids gathered from sealed segments,
+- aggregating MVCC-aware stats (min/max key, commit_ts range, row/tombstone counts, bytes),
+- writing Parquet data with `_commit_ts` appended, plus a key-only delete sidecar when tombstones exist,
+- returning a descriptor with stats/paths/WAL ids or failing fast on empty input or MVCC sidecar mismatches.
+Future work: page-size tuning, page indexes, and richer stats.
 
 ### DB Integration
 
-```rust
-impl<M: Mode, E: Executor + Timer> DB<M, E> {
-    pub async fn flush_immutables_with_descriptor(
-        &self,
-        config: Arc<SsTableConfig>,
-        descriptor: SsTableDescriptor,
-    ) -> Result<SsTable<M>, SsTableError>;
-}
-```
-
-* Minor compaction entry point – owner of the sealed `immutables` deque.
-* Drains the in-memory runs into the builder, attaches collected WAL IDs, and clears them once the staged flush succeeds; immutables stay untouched on error.
+Flush entry point:
+- drains sealed immutables, attaches WAL ids when available, writes Parquet (data + optional delete sidecar), and publishes manifest edits as one atomic step;
+- on success, drains the sealed immutables and their WAL ranges; on error, in-memory state remains intact.
 
 ### Compaction Helper
 
@@ -97,44 +63,40 @@ impl MinorCompactor {
 
 ### Read Path Placeholders
 
-* `SsTableReader`, `SsTableScanPlan`, and `SsTableStream` exist but always return `SsTableError::Unimplemented`.
-* API surface aligns with main: open via config + descriptor, plan scans with ranges, MVCC timestamp, and optional `Predicate<M::Key>`.
+Read path:
+- streams Parquet data plus optional delete sidecar,
+- merges by primary key + commit_ts (latest-wins, delete wins on tie),
+- applies projection before materialization; MVCC filtering happens during the merge.
+Delete sidecar schema: primary-key columns + `_commit_ts` only; data file carries user columns + `_commit_ts`.
+Current gaps: no row-group/page pruning; projection indices are positional (exclude `_commit_ts`).
 
 ## Delta vs. Legacy Tonbo (`main`)
 
-| Area | Legacy Tonbo | Current Scaffold | Notes |
+| Area | Legacy Tonbo | Current state | Notes |
 | --- | --- | --- | --- |
-| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` returns stub `SsTable` | Need to port `AsyncWriter`, compute byte sizes, and persist MVCC metadata via the forthcoming sidecar. |
-| Store wrapper | `ParquetStore` newtype | Inlined `fs` + `root` on `SsTableConfig` | Simpler config; future manifest can still derive full paths. |
-| Reader | Async `SsTable::scan/get` returning `SsTableScan` stream | Placeholder `SsTableReader`/`SsTableStream` | Requires row filter + ordering support once IO lands. |
-| DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` drains immutables and returns staged descriptor | Real writer + WAL/plumbing will extend this; manifest work can observe descriptors today. |
-
-| Compaction helper | Policy-driven scheduler in legacy code | `MinorCompactor` with segment threshold | Acts as a placeholder orchestrator until version-set logic lands. |
+| Writer | Parquet writer with range filters and LRU caching | Async Parquet writer; appends `_commit_ts`, optional delete sidecar; records stats + WAL ids | Page-size tuning/index pruning still TODO |
+| Store wrapper | `ParquetStore` newtype | Inlined store config with level-scoped paths | Paths `L{level}/{id}.parquet` and optional `.delete.parquet` |
+| Reader | Async `SsTable::scan/get` returning `SsTableScan` stream | Streaming merge of data + delete with MVCC filtering | No row-group/page pruning yet |
+| DB flush | Handled by compaction pipeline in legacy code | Flush writes Parquet and publishes manifest edits | Uses WAL refs when available |
+| Compaction helper | Policy-driven scheduler | `MinorCompactor` with segment threshold | Major compaction handled separately (RFC 0011) |
 
 ## Execution Plan
 
-1. **Implement Writer IO**
-   * `ParquetTableWriter` performs real Parquet writes (via `AsyncArrowWriter`) and records enriched stats today; extend it to emit the aligned MVCC sidecar per RFC 0006, then iterate on page indexes & compression tuning.
-2. **Hook Minor Compaction**
-   * `DB::flush_immutables_with_descriptor` drains immutables on success and propagates WAL IDs into the descriptor.
-   * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
-3. **Reader + Row Filter**
-   * Port `get_range_filter` logic from main to dynamic `KeyOwned`.
-   * Implement `SsTableReader::open` using fusio LRU cache.
-   * Materialize `SsTableScanPlan::execute` -> Parquet stream + selection vector.
-4. **Testing & Validation**
-   * Unit tests cover immutable MVCC ranges, builder stats, DB flush guards, and the compactor path.
-   * Still pending: Parquet round-trip tests once IO lands; integration covering WAL replay + flush + manifest hand-off.
-5. **Docs/Manifest Follow-up**
-   * Update `0004-storage-layout` once SST files land on disk.
-   * Draft RFD for version-set/manifest interactions (leveling, metadata).
+1. **Pruning and page tuning**
+   * Add row-group/page pruning and optional page-size overrides tuned for object storage.
+2. **Stats & planning**
+   * Persist richer stats (column-level NDV/histograms) and feed them into scan/compaction planners.
+3. **Caching/read ergonomics**
+   * Add reader-side caching hooks (LRU) and selection-vector based projection to trim IO.
+4. **Validation**
+   * Maintain round-trip tests for data + delete sidecars; extend integration to cover WAL replay -> flush -> manifest publish -> read.
 
 ## Hints
 
-* **Path Layout** – Match Tonbo main: write SSTables under `<level>/<sstable_id>.parquet` so the directory structure lines up with the existing compaction tooling.
-* **MVCC Sidecar** – For each data file, produce `<level>/<sstable_id>.mvcc.parquet` carrying `_commit_ts`/`_tombstone`; manifest descriptors reference both URIs atomically.
-* **Stats Scope** – Record byte size first to support leveled compaction heuristics, but keep `SsTableStats` open for additional metrics (row counts, bloom filters, custom policy hooks) so bespoke compactors can plug in later.
-* **Schema Fingerprints** – Leave schema identity tracking to the manifest/catalog layer; SST descriptors will reference entries maintained by the future manifest component.
+* **Path Layout** – Level directories with `{:020}.parquet` data files plus optional `{:020}.delete.parquet`.
+* **MVCC contract** – `_commit_ts` lives in the data file; deletes are key-only sidecars; latest-wins enforced during streaming merge.
+* **Stats Scope** – `SsTableStats` already records rows/bytes/key + commit bounds/tombstones; keep it extensible for planner heuristics.
+* **Schema Fingerprints** – Leave schema identity tracking to the manifest/catalog layer; SST descriptors reference the Arrow schema carried by `SsTableConfig`.
 
 ## References
 

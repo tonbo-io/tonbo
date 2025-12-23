@@ -1,17 +1,15 @@
 # RFC 0007: Manifest Integration on Top of `fusio-manifest`
 
-- Status: Draft
+- Status: Implementing
 - Authors: Tonbo team
 - Created: 2025-10-28
 - Area: Storage, Durability, GC
 
 ## Summary
 
-Tonbo’s current `dev` branch accepts Arrow `RecordBatch` ingest, persists batches through the async WAL (`src/wal/mod.rs`, `src/wal/writer.rs`), and can flush sealed immutables into Parquet-backed SSTables (`src/ondisk/sstable.rs`). However, there is no manifest/ version-set layer to define visibility, coordinate WAL reclamation, or accelerate recovery. The existing documentation (`docs/overview.md`) calls for CAS-published manifests, yet the implementation lacks any manifest modules.
+Tonbo uses a manifest-backed control plane to define visibility, WAL retention, and version lineage over immutable objects. The manifest builds on `fusio-manifest` (CAS head, append-only segments, checkpoints, leases) to publish SST additions/removals, WAL floors, and catalog metadata. Reads resolve snapshot manifests for MVCC; writes and compaction publish edits atomically.
 
-This RFC introduces a Tonbo-specific manifest module built on the `fusio-manifest` crate under the same workspace (`/Users/xing/Idea/fusio/fusio-manifest`). The module will capture Tonbo’s table metadata, SST versions, and WAL segment lifecycles using fusio-manifest’s serializable key–value transactions, snapshots, and GC APIs. By grounding the manifest on fusio-manifest we align Tonbo’s durability story with the Arrow-first engine and unlock downstream read-path, compaction, and MVCC work.
-
-The implementation now splits responsibilities across **two fusio-manifest instances** rooted under `root/manifest`: a catalog manifest that owns logical table metadata and a version manifest that owns table heads, committed versions, and WAL retention floors. Each instance has its own codec and directory prefix so catalog replication/evolution never interferes with high-churn version edits.
+Manifest data is split across catalog, version, and gc-plan prefixes under `root/manifest`. Catalog owns table identity and schema fingerprints; version owns heads and committed versions (including WAL floors and SST entries); gc-plan stores deletion plans. Separation keeps high-churn version edits isolated from catalog evolution and GC coordination.
 
 ## Goals
 
@@ -28,45 +26,27 @@ The implementation now splits responsibilities across **two fusio-manifest insta
 
 ## Background
 
-Tonbo's dev branch has Arrow-first mutable/immutable layers and SST writer scaffolding, but lacks manifest modules. The WAL writes durable segments yet has no id allocation or reclamation logic. The architecture overview references manifest-driven CAS updates, snapshot visibility, and GC—none of which exist in code.
-
-This RFC builds on `fusio-manifest`, which provides backend-agnostic CAS HEAD objects, append-only segments, checkpoints, snapshot leases, and retention/GC.
+The architecture requires CAS-published manifests to coordinate stateless readers/writers over object storage. `fusio-manifest` provides backend-agnostic CAS heads, append-only segments, checkpoints, snapshot leases, and retention/GC primitives that map directly onto Tonbo’s durability model.
 
 ## Design
 
 ### Key Space
 
-The manifest uses two separate key spaces to isolate catalog metadata from high-churn version edits:
+Manifest content is partitioned:
 
-**Catalog manifest keys:**
+- **Catalog keys** — catalog root and per-table metadata (name, schema fingerprint, primary-key layout, retention, schema version).
+- **Version keys** — table head (current version pointer, WAL floor), immutable table versions keyed by manifest timestamp, WAL floor records.
+- **GC-plan keys** — per-table GC plans describing obsolete SSTs/WAL segments targeted for deletion.
 
-| Key | Purpose |
-|-----|---------|
-| CatalogRoot | Global catalog state (known tables, ID allocator) |
-| TableMeta | Per-table metadata (name, schema fingerprint, PK layout, retention) |
-
-**Version manifest keys:**
-
-| Key | Purpose |
-|-----|---------|
-| TableHead | Current head pointer per table (latest version, WAL floor) |
-| TableVersion | Versioned state snapshots keyed by `(table_id, manifest_ts)` |
-| WalFloor | Lowest retained WAL segment reference per table |
-
-This separation allows catalog replication/evolution without touching high-frequency version commits.
+Catalog and version are separate key spaces to isolate high-churn version commits from catalog evolution; gc-plan is isolated so deletion intent does not interfere with either.
 
 ### Values
 
-**Catalog manifest values:**
-- `CatalogState`: Known tables plus allocator state
-- `TableMeta`: Table name, schema fingerprint, PK layout, retention settings, schema version
+- **Catalog values:** catalog state (known tables, allocator), per-table metadata (name, schema fingerprint, primary-key layout, retention, schema version).
+- **Version values:** table head (current version pointer, WAL floor, schema version), version state (levelled SST entries with stats and WAL segments, tombstone watermark), WAL floor records.
+- **GC-plan values:** deletion plans for SSTs/WAL segments safe to reclaim.
 
-**Version manifest values:**
-- `TableHead`: Schema version, latest WAL floor, last manifest transaction timestamp
-- `VersionState`: SST entries, WAL segment references, tombstone watermark, aggregated stats
-- `WalFloor`: Lowest WAL segment still referenced by any retained version
-
-Each version commit stores a full `VersionState` under its `TableVersion` key. The manifest timestamp defines global ordering.
+Each version commit stores a self-contained `VersionState` under its manifest timestamp; manifest ordering defines visibility.
 
 ### SST Entry Metadata
 
@@ -84,31 +64,14 @@ These fields allow compaction and read-path pruning without inspecting Parquet c
 
 ### Catalog Registration and Table Definitions
 
-The catalog manifest mints `TableId`s and guarantees schema compatibility. Registration happens through a `TableDefinition` payload containing:
-
-- `name`: logical table identifier. The DB builder defaults to `tonbo-default` but exposes `.table_name(...)` so callers can supply custom names.
-- `schema_fingerprint`: SHA-256 of the canonicalized Arrow schema (field ordering preserved, map/object keys sorted). Each `Mode` implements the new `CatalogDescribe` trait to compute this deterministically from its config.
-- `primary_key_columns`: ordered list of key column names derived from the mode’s `KeyProjection::key_indices`.
-- `retention`: optional overrides for version-count/TTL retention knobs.
-- `schema_version`: explicit monotonic counter for schema evolution.
-
-`TonboManifest::register_table` now orchestrates catalog + version bootstrap:
-
-1. Ensure the catalog root exists (`init_catalog`).
-2. Look up an existing table by name. If schema fingerprint, key layout, version number, or retention differ, return `ManifestError::CatalogConflict`; otherwise reuse the prior `TableId`.
-3. Persist/return `TableMeta` and create the matching `TableHead` entry inside the version manifest so writers can immediately publish versions.
-
-This split lets us replicate catalog metadata (e.g., to serve discovery APIs) at a slower cadence than high-frequency version commits while still keeping schema checks manifest-backed.
+Registration mints a `TableId` and records a `TableDefinition` (name, schema fingerprint, primary key columns, retention policy, schema version). If a table already exists under the same name, schema and key layout must match or registration fails. A corresponding head entry is created so writers can publish versions immediately.
 
 ### Sessions and Workflow
 
-- **Write path:** `TonboManifest::apply_version_edits` opens a fusio `WriteSession`, loads `TableHead`, assembles `VersionState` from the SST flush (including WAL segment refs), stages:
-  - `put(TableVersion {...}, new_version)`
-  - `put(TableHead {...}, updated_head_with_wal_floor)`
-  and commits. CAS success defines global order.
-- **Read path:** `snapshot_latest` opens a `ReadSession`, fetches `TableHead`, reads the `VersionState` stored at `last_manifest_txn`, and pairs the result with `TableMeta` fetched from the catalog manifest so callers receive both physical (versions) and logical (schema/name) metadata in a single `TableSnapshot`.
-- **Recovery:** On open, call `manifest.recover_orphans()` (fusio-manifest handles adopting contiguous segments). Load `CatalogState` and each `TableHead` to rebuild table descriptors; replay WAL only above the manifest’s `wal_floor`.
-- **GC:** `TonboManifest::compute_gc_plan` wraps fusio-manifest’s compactor GC APIs; plans delete SST objects once versions expire and advance `WalFloor` so WAL segments < floor can be truncated.
+- **Write path:** assemble a `VersionState` (SST adds/removes, WAL segments, stats, tombstone watermark) and CAS-apply it alongside the updated table head (including WAL floor). CAS success defines global ordering; conflicts are retried with refreshed state.
+- **Read path:** fetch table head, then load the referenced `VersionState` and matching catalog metadata to build a snapshot for planning/reads.
+- **Recovery:** adopt orphaned manifest segments if present, reload catalog + heads, and replay WAL only at or above the recorded WAL floor.
+- **GC:** compute GC plans from retained versions and published floors; gc-plan manifest stores planned deletions to coordinate execution.
 
 ### API Surface
 
@@ -130,32 +93,21 @@ The manifest module exposes operations for table lifecycle and version managemen
 
 ### Storage Layout
 
-Manifest data follows RFC 0004 with two prefixes under `root/manifest/`:
+Manifest data follows RFC 0004 with three prefixes under `root/manifest/`:
 
 | Prefix | Contents |
 |--------|----------|
-| `catalog/` | HEAD pointer, segments, checkpoints, leases for table metadata |
-| `version/` | HEAD pointer, segments, checkpoints, leases for version history |
+| `catalog/` | Head, segments, checkpoints, leases for table metadata |
+| `version/` | Head, segments, checkpoints, leases for version history |
+| `gc/` | Head, segments, checkpoints, leases for GC plans |
 
-This separation allows catalog replication/checkpointing without touching the heavier version log, and vice versa. Both prefixes use fusio-manifest's standard directory structure.
+Each prefix uses fusio-manifest’s standard directory structure and CAS semantics.
 
-## Initial Integration Step
+## Integration Notes
 
-The first task for the development team is to wire Tonbo’s existing SST flush and WAL layers into the manifest so WAL segments gain explicit lifecycle management.
-
-1. **Capture WAL segment refs during flush.**
-   - `DB::flush_immutables_with_descriptor` already gathers `wal_ids` via `SsTableDescriptor::with_wal_ids` (`src/ondisk/sstable.rs:216-242`). Convert those into `WalSegmentRef { seq, file_id, first_frame, last_frame }`.
-   - Add a temporary helper (`wal::manifest_ext`) to fetch the active segment’s first/last frame numbers when sealing.
-2. **Call `TonboManifest::apply_version_edits`.**
-   - After successful Parquet write, construct the `VersionEdit` payload with the new `SstEntry` and WAL refs (pass as a single-element slice until batching is required).
-   - Update `TableHead.wal_floor` to the minimum WAL sequence still referenced by retained versions.
-3. **Compute and persist `wal_floor`.**
-   - For MVP, `wal_floor = last_retained_wal_ref.seq`. Later iterations will consider retention and multiple versions.
-4. **Teach WAL GC to respect the floor.**
-   - Expose `TonboManifest::wal_floor(table_id)` so WAL cleanup can remove segments with `seq < wal_floor`.
-   - Ensure recovery only replays WAL frames at or above the floor.
-
-Once this integration lands, WAL space is bounded, recovery gains a durable high-water mark, and future manifest features (snapshots, compaction GC) have a solid foundation.
+- Writers and compactors publish SST additions/removals together with WAL segment references; table heads record the minimum WAL sequence (floor) required for recovery.
+- Recovery replays WAL at or above the recorded floor and ignores objects not referenced by any manifest version.
+- GC consumes manifest state (retained versions + floors) to decide which SSTs/WAL segments can be deleted safely; gc-plan records planned deletions to coordinate execution.
 
 ## Risks
 
