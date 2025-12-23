@@ -1,7 +1,7 @@
 # Rethinking Tonbo — Dev Branch Summary
 
 <aside>
-💡 Build a new Arrow-first core alongside the existing code, then cut over incrementally (“strangler” migration). Don’t rewrite the whole repo from zero, and don’t refactor legacy paths in-place.
+Build a new Arrow-first core alongside the existing code, then cut over incrementally ("strangler" migration). Don't rewrite the whole repo from zero, and don't refactor legacy paths in-place.
 </aside>
 
 Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar core with native `RecordBatch` ingest and pushdown-capable read APIs. It sheds legacy surfaces that failed user expectations, making composite keys, schema versioning, and a clear path to durability and snapshot isolation first-class. The result is a simpler, interoperable DBaaS foundation—one storage truth (indexed columnar segments), better performance and UX for Python/JS users, and clearer evolution without backward-compatibility baggage.
@@ -43,21 +43,21 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 
 ## Execution Plan
 
-### Phase 1
+### Phase 1 (Complete)
 
-- Primary key + version columns: define primary key encoding; append `_commit_ts` and `_tombstone` columns; choose in-memory segment layout; define filter format.
-- In-memory segment + index: build a read-only in-memory segment with a primary-key index; attach Arrow record batches; remove duplicates inside each batch; skip unused columns.
-- Range scan + filter + order/limit: add range scans; run column-based filters; support `ORDER BY` primary key ascending; stop early when `LIMIT` is reached.
-- On-disk files + index + stats: write Arrow files (IPC format) plus a separate primary-key index file; record per-segment stats; define the manifest record format.
-- Log + publish + recovery: add a batch write-ahead log that can be replayed safely; publish data and index together in one step on the local file system; on restart, rebuild state from the manifest and the log; run an end-to-end durability test.
+- [x] Primary key + version columns: primary key encoding via `KeyExtractor`; `_commit_ts` MVCC column; tombstones via delete sidecar.
+- [x] In-memory segment + index: `ImmutableSegment` with Arrow record batches; PK index for dedup; projection support.
+- [x] Range scan + filter + order/limit: `ScanBuilder` with predicates, projection, limit; PK ascending order via `MergeStream`.
+- [x] On-disk files + index + stats: Parquet SSTs with `SsTableStats`; manifest tracks SST entries per level.
+- [x] Log + publish + recovery: batch WAL with frame-level writes; manifest publish via CAS; `recover_with_wal` tested end-to-end.
 
 ### Phase 2
 
-- Streaming API: stream Arrow batches over HTTP; add flow control and chunk size; use one scan path for both memory and disk segments.
-- Multi-table basics: add a small table catalog and request routing; per-table directories; simple usage limits.
-- Snapshots: add a snapshot token (64-bit); keep an in-process list of active readers; make scans respect the safe cutoff (no deletions yet).
-- Checkpoints: write and list named checkpoints (pin file IDs, commit time, schema version, stats); integrate with the manifest.
-- Stats + planner: aggregate table and column stats; feed rows and row width to the Postgres FDW; stabilize, document, and run basic benchmarks.
+- [x] Streaming API: `ScanBuilder` streams Arrow batches; unified scan path for memory and disk segments via `MergeStream`.
+- [ ] Multi-table basics: internal `CatalogCodec` exists; per-table manifest entries work; public admin APIs pending.
+- [x] Snapshots: 64-bit `Timestamp` as snapshot token; `snapshot_at()` and `list_versions()` APIs work; manifest-backed durability.
+- [ ] Checkpoints: manifest-integrated version tracking works; named checkpoints with tags pending (#554).
+- [ ] Stats + planner: table/column stats computed at flush time; scan planning exists; Parquet page-level pruning pending (#551).
 
 ## Component-Level Changes
 
@@ -75,19 +75,21 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 
 ### Row/Size Estimation
 
-- **Previous:** No table-level stats; no persisted per-segment stats; PG planner blind to row counts.
-- **Target:** Table stats (rows, bytes, avg width); column stats (`min`, `max`, `null_count`, later NDV/histograms); unified across memory + SST; FDW integration; expose via admin API.
+- **Previous:** No table-level stats; no persisted per-segment stats.
+- **Current:** `StagedTableStats` computes rows, bytes, key bounds, commit_ts range at flush time; stats stored in SST descriptors and manifest.
+- **Remaining:** Column-level NDV/histograms; public stats API; query planner integration.
 
 ### Multi-table (Column-Family Style)
 
-- **Previous:** Single-table process; no catalog; duplicated caches; 1:1 endpoints.
-- **Target:** Many tables per process; shared resources (threadpools, caches, fusio handles); catalog APIs; per-table WAL/manifest; quotas and isolation; per-table access control & schema/version policy.
+- **Previous:** Single-table process; no catalog; duplicated caches.
+- **Current:** `CatalogCodec` in manifest supports multi-table registration; per-table `TableId` and manifest entries; `register_table()` with schema validation.
+- **Remaining:** Public catalog APIs; shared resource pools; quotas and isolation; per-table access control.
 
 ### Snapshot & Checkpoint
 
-- **Previous:** In-memory `read_ts` only; manifest compaction after N edits; recovery replays per-row WAL; no durable checkpoints.
-- **Problems:** u32 wrap risk; no snapshot token; no reader registry; slow recovery; no batch idempotency.
-- **Target:** u64 commit/read timestamps; serialized snapshot tokens; uniform MVCC columns; reader registry for GC watermarks; manifest-integrated checkpoints (pin SST IDs, commit_ts, schema version, WAL HWM, stats); GC never deletes checkpointed SSTs; prune only when `end_ts <= watermark`.
+- **Previous:** In-memory `read_ts` only; no durable checkpoints; u32 wrap risk.
+- **Current:** u64 `Timestamp`; `snapshot_at()` and `list_versions()` APIs; manifest-backed snapshots survive restart; uniform MVCC columns (`_commit_ts`); WAL floor tracking.
+- **Remaining:** Named checkpoints with tags (#554); reader registry for GC watermarks (#547); version retention policies.
 
 ## Risks
 
@@ -97,26 +99,27 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 - **MVCC complexity:** start single-writer or coarse commit allocator; expand once WAL/manifest hardened.
 - **Stats drift:** compute `min/max/nulls` eagerly; NDV/histograms opportunistically; bound CPU with sampling; cache aggregates in manifest.
 
-## Status Update (October 2025)
+## Status Update (December 2025)
 
 | Component | Status | Evidence |
 | --- | --- | --- |
-| Manifest Core | In progress | `TonboManifest` wraps catalog+version stores and `flush_immutables_with_descriptor` publishes SST + WAL refs (`src/manifest/bootstrap.rs:63-185`; `src/db/mod.rs:776-855`). |
-| Recovery Pipeline | In progress | `recover_with_wal` replays segments with state hints and is exercised end-to-end (`src/db/mod.rs:549-657`; `tests/wal_recovery.rs:1-185`). |
-| GC & Watermarks | In progress | Manifest `wal_floor` plus `prune_wal_segments_below_floor` and `wal_gc_respects_pinned_segments` enforce retention (`src/db/mod.rs:460-489`; `tests/wal_gc.rs:96-199`). |
-| Table Catalog & Admin Surface | Not started | No catalog/admin modules exported (`src/lib.rs:9-41`). |
-| Range Planner MVP | Not started | Only `RangeSet` utilities exist; no planner implementation (`src/scan.rs:1-160`). |
-| Merge Executor | In progress | `MergeStream` + `PackageStream` perform MVCC-aware k-way merges, but DB `plan_scan`/`execute_scan` still stubbed (`src/query/stream/merge.rs:1-165`; `src/db/mod.rs:353-372`). |
-| SST Integration | Not started | `SsTableReader::collect` returns `Unimplemented` (`src/ondisk/sstable.rs:335-347`). |
-| Projection & Filters | In progress | Dynamic memtable builds `DynProjection`s and scans honor optional projection schemas (`src/inmem/mutable/memtable.rs:525-571`). |
-| Minor Flush Pipeline | In progress | Parquet writer emits data/MVCC/delete files and manifest publication runs after flush (`src/ondisk/sstable.rs:420-640`; `src/db/mod.rs:776-860`). |
-| Stats & PK Index Build | In progress | `StagedTableStats` tracks key/ts bounds and bytes though PK sidecar persistence still TBD (`src/ondisk/sstable.rs:320-520`). |
-| Leveled/Range Planner | Not started | Compaction module lacks leveled scheduling or overlap logic (`src/compaction.rs:21-140`). |
-| Stateless Compaction Trigger | In progress | CLI trigger + manifest-backed idempotency landed (`src/bin/tonbo-admin.rs`, `docs/admin_trigger.md`); HTTP helper exposed under `http-server` feature but no built-in router due to `DB` being !Send/!Sync. |
-| Observability & Tuning | In progress | Memtable stats drive sealing decisions and WAL writer updates `WalMetrics` queue-depth/sync counters (`src/inmem/mutable/memtable.rs:557-569`; `src/wal/writer.rs:210-219`). |
-| Snapshot Tokens & Reader Registry | Not started | MVCC module offers timestamps only; no durable snapshots (`src/mvcc/mod.rs:1-120`). |
-| Tombstone Pruning | In progress | Immutable segments track tombstones without compaction pruning (`src/inmem/immutable/memtable.rs:18-200`). |
-| Conflict Detection & Idempotency | In progress | Transaction commit path locks keys, checks mutable/immutable conflicts, and batches WAL tickets before publishing (`src/transaction/mod.rs:388-479`). |
-| WAL Replay Hardening | In progress | Replayer honors manifest WAL floors and recovery bumps commit clocks with tests guarding pinned segments (`src/db/mod.rs:599-657`; `src/wal/manifest_ext.rs:1-78`). |
+| Manifest Core | Complete | `TonboManifest` wraps catalog+version stores; flush publish path includes SST and WAL refs with CAS. |
+| Recovery Pipeline | Complete | WAL replay restores state with ordering hints; `recover_with_wal` path tested end-to-end. |
+| GC & Watermarks | In progress | WAL floor tracking and `prune_wal_segments_below_floor` implemented; GC worker for SST deletion pending (#547). |
+| Table Catalog & Admin Surface | In progress | Internal `CatalogCodec` exists; public admin APIs not yet exported. |
+| Scan Planning | In progress | `ScanPlan` with `plan_scan()` implemented; SST/page-level pruning pending (#551). |
+| Merge Executor | Complete | `MergeStream` + `PackageStream` perform MVCC-aware k-way merges; plan/execute scan path wired. |
+| SST Integration | Complete | `SstableScan` streams Parquet data and delete sidecars with MVCC filtering. |
+| Projection & Filters | In progress | Predicates are applied post-merge/materialize; no page/row-group pruning or pushdown yet. |
+| Minor Flush Pipeline | Complete | Parquet writer emits data + MVCC + delete sidecar files; manifest publication runs after flush. |
+| Stats & PK Index Build | In progress | `StagedTableStats` tracks key/ts bounds and bytes; stats written to SST descriptors; PK sidecar index format TBD. |
+| Leveled Compaction Planner | In progress | `LeveledCompactionPlanner` implemented with level selection logic; background scheduling pending (#545). |
+| Major Compaction Executor | In progress | `CompactionExecutor` and `SstableMerger` work; manifest CAS with retry implemented; background loop pending (#550). |
+| Observability & Tuning | In progress | Memtable stats drive sealing; WAL writer tracks queue-depth/sync counters; comprehensive metrics pending (#552). |
+| Snapshot & Time Travel | Complete | `snapshot_at(timestamp)` and `list_versions()` public APIs work against manifest-backed snapshots. |
+| Reader Registry | Not started | Required for GC watermark computation; tracked in #547. |
+| Tombstone Pruning | In progress | Tombstones tracked in immutable segments and delete sidecars; compaction-time pruning pending (#549). |
+| Conflict Detection & Idempotency | Complete | Transaction commit locks keys, checks mutable/immutable conflicts, batches WAL tickets. |
+| WAL Replay Hardening | Complete | Replayer honors manifest WAL floors; recovery bumps commit clocks; pinned segment tests pass. |
 
-This table is the concise requirements tracker referenced throughout the migration; keep it in sync with `docs/overview.md` and the RFCs as implementation progresses.
+This table is the concise requirements tracker referenced throughout the migration; see GitHub issues #545-556 for detailed epic tracking.
