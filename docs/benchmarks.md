@@ -69,6 +69,20 @@ cargo run -p tonbo-bench-runner -- compare \
   --missing-baseline fail
 ```
 
+## Baseline Policy
+
+Baselines in `benchmarks/baselines/scenarios` are sourced from CI runs so comparisons match the
+environment and configuration used by the gated workflow. If CI artifacts are unavailable,
+local runs may be used as a temporary stand-in only when they use the same CI config, and the
+baseline should be replaced by CI output as soon as practical.
+
+To refresh baselines:
+
+- Run the `benchmarks-baseline` workflow in CI (same config as `.github/workflows/benchmarks.yml`).
+- Download the `tonbo-benchmark-baseline` artifact and replace the JSON files under
+  `benchmarks/baselines/scenarios`.
+- Commit the updated baselines as a deliberate change and note the source (CI vs local fallback).
+
 ## Report Generation
 
 ```bash

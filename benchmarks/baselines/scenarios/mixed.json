@@ -1,10 +1,13 @@
 {
+  "run_id": "20260105102306-423",
+  "bench_target": "ci",
+  "storage_substrate": "disk",
   "benchmark_name": "mixed",
   "benchmark_type": "scenario",
   "backend": "disk",
   "backend_details": {
-    "type": "disk",
-    "path": "baseline/bench-tmp"
+    "path": "target/bench-tmp",
+    "type": "disk"
   },
   "workload_type": "mixed",
   "parameters": {
@@ -17,8 +20,9 @@
     "write_ratio": 0.3
   },
   "metrics": {
-    "bytes_per_sec": 65151.705649045914,
-    "ops_per_sec": 508.9977003831712,
-    "wall_time_ms": 2357
-  }
+    "bytes_per_sec": 47944.55446006397,
+    "ops_per_sec": 374.56683171924976,
+    "wall_time_ms": 3203
+  },
+  "git_commit": "df6a66834fb136759dedb56842ad2d80c552b3ed"
 }

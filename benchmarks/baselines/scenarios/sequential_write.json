@@ -1,10 +1,13 @@
 {
+  "run_id": "20260105102305-963",
+  "bench_target": "ci",
+  "storage_substrate": "disk",
   "benchmark_name": "sequential_write",
   "benchmark_type": "scenario",
   "backend": "disk",
   "backend_details": {
-    "type": "disk",
-    "path": "baseline/bench-tmp"
+    "path": "target/bench-tmp",
+    "type": "disk"
   },
   "workload_type": "write_only",
   "parameters": {
@@ -13,8 +16,9 @@
     "value_size_bytes": 256
   },
   "metrics": {
-    "bytes_per_sec": 37793276.192327425,
-    "ops_per_sec": 147629.985126279,
-    "wall_time_ms": 20
-  }
+    "bytes_per_sec": 67586333.62092726,
+    "ops_per_sec": 264009.1157067471,
+    "wall_time_ms": 11
+  },
+  "git_commit": "df6a66834fb136759dedb56842ad2d80c552b3ed"
 }
