@@ -47,6 +47,8 @@ jobs:
         run: cargo run -p tonbo-bench-runner -- --mode component --profile ci
 
       - name: Compare against baseline
+        id: compare
+        continue-on-error: true
         run: |
           cargo run -p tonbo-bench-runner -- compare \
             --current target/bench-results \
@@ -56,6 +58,7 @@ jobs:
             --report target/bench-results/regression-report.json
 
       - name: Generate performance report
+        if: ${{ always() }}
         run: |
           cargo run -p tonbo-bench-runner -- report \
             --results-dir target/bench-results \
@@ -64,6 +67,7 @@ jobs:
             --output-json target/bench-reports/perf-report.json
 
       - name: Upload benchmark artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: tonbo-benchmarks
@@ -73,3 +77,7 @@ jobs:
             target/bench-reports/perf-report.md
             target/bench-reports/perf-report.json
           if-no-files-found: ignore
+
+      - name: Fail on regression
+        if: ${{ steps.compare.outcome == 'failure' }}
+        run: exit 1
