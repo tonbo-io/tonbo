@@ -86,3 +86,66 @@ impl KeyHeapSize for KeyRow {
         self.heap_size()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primitive_key_heap_size_is_zero() {
+        assert_eq!(0u64.key_heap_size(), 0);
+        assert_eq!(false.key_heap_size(), 0);
+    }
+
+    #[test]
+    fn tuple_key_heap_size_sums_components() {
+        let key = (KeyOwned::from("ab"), KeyOwned::from(vec![1u8, 2, 3]));
+        assert_eq!(key.key_heap_size(), 2 + 3);
+    }
+
+    #[test]
+    fn key_owned_heap_size_counts_buffers() {
+        let key = KeyOwned::from("alpha");
+        assert_eq!(key.key_heap_size(), "alpha".len());
+    }
+
+    #[test]
+    fn dyn_cell_heap_size_covers_nested_variants() {
+        let struct_cell = DynCell::Struct(vec![
+            Some(DynCell::Str("hi".to_string())),
+            None,
+            Some(DynCell::Bin(vec![1, 2])),
+        ]);
+        assert_eq!(dyn_cell_owned_heap_size(&struct_cell), 2 + 2);
+
+        let list_cell = DynCell::List(vec![
+            Some(DynCell::Str("a".to_string())),
+            Some(DynCell::Bin(vec![3, 4, 5])),
+        ]);
+        assert_eq!(dyn_cell_owned_heap_size(&list_cell), 1 + 3);
+
+        let fixed_list_cell = DynCell::FixedSizeList(vec![Some(DynCell::Str("zz".to_string()))]);
+        assert_eq!(dyn_cell_owned_heap_size(&fixed_list_cell), 2);
+
+        let map_cell = DynCell::Map(vec![
+            (
+                DynCell::Str("key".to_string()),
+                Some(DynCell::Bin(vec![9, 8])),
+            ),
+            (DynCell::Str("k2".to_string()), None),
+        ]);
+        assert_eq!(dyn_cell_owned_heap_size(&map_cell), 3 + 2 + 2);
+
+        let union_cell = DynCell::Union {
+            type_id: 1,
+            value: Some(Box::new(DynCell::Str("u".to_string()))),
+        };
+        assert_eq!(dyn_cell_owned_heap_size(&union_cell), 1);
+
+        let union_null = DynCell::Union {
+            type_id: 2,
+            value: None,
+        };
+        assert_eq!(dyn_cell_owned_heap_size(&union_null), 0);
+    }
+}

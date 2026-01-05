@@ -27,10 +27,25 @@ if ! rustup toolchain list | grep -q "nightly"; then
   exit 1
 fi
 
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+  echo "[${HOOK_NAME}] cargo-llvm-cov required (cargo install cargo-llvm-cov)" >&2
+  exit 1
+fi
+
+ACTIVE_TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
+if ! rustup component list --toolchain "${ACTIVE_TOOLCHAIN}" | grep -q "llvm-tools"; then
+  echo "[${HOOK_NAME}] llvm-tools required (rustup component add llvm-tools --toolchain ${ACTIVE_TOOLCHAIN})" >&2
+  echo "[${HOOK_NAME}] if your toolchain only offers llvm-tools-preview, install it instead." >&2
+  exit 1
+fi
+
 FMT_CHECK_CMD="cargo +nightly fmt --all -- --check"
 CLIPPY_CMD="cargo clippy --workspace -- -D warnings"
 BUILD_CMD="cargo build --verbose"
 TEST_CMD="cargo test --verbose"
+COVERAGE_LINES_MIN="${COVERAGE_LINES_MIN:-80}"
+COVERAGE_DIR="target/coverage"
+COVERAGE_CMD="cargo llvm-cov --workspace --lcov --output-path ${COVERAGE_DIR}/lcov.info --fail-under-lines ${COVERAGE_LINES_MIN}"
 
 run_step() {
   local cmd="$1"
@@ -48,6 +63,8 @@ run_step "$FMT_CHECK_CMD"
 run_step "$CLIPPY_CMD"
 run_step "$BUILD_CMD"
 run_step "$TEST_CMD"
+mkdir -p "${COVERAGE_DIR}"
+run_step "$COVERAGE_CMD"
 
 log "bootstrap LocalStack (if available) for S3-backed public_api_e2e"
 if source "${S3_ENV_SCRIPT}"; then
