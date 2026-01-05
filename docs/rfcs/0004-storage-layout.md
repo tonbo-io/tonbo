@@ -35,8 +35,8 @@ Given a database root `root: Arc<Path>`, Tonbo will create and manage the follow
 ```
 root/
   wal/
-    wal-<seq>.wal          // monotonic start sequence per segment
-    state.json                // optional small manifest: last_seq, last_commit_ts
+    wal-<seq>.tonwal      // monotonic start sequence per segment
+    state.json            // optional small manifest: last_seq, last_commit_ts
   sst/
     L0/                       // reserved for future levelled SST layout
       ...<id>.parquet         // user data file (includes _commit_ts column)
@@ -53,15 +53,18 @@ root/
       segments/
       checkpoints/
       leases/
-  mutable/
-    spill/                    // optional spill files/checkpoints (future)
+    gc/                       // fusio-manifest GC plan namespace
+      head.json
+      segments/
+      checkpoints/
+      leases/
 ```
 
 All paths are created through `fusio` APIs; the layout makes no assumptions about POSIX semantics beyond directory hierarchy support.
 
 ### WAL directory (`root.join("wal")`)
 
-- **Segments**: `wal-<start_seq>.wal`, where `<start_seq>` is the first frame sequence stored in the file (zero-padded decimal). The writer rotates files at the configured size/time threshold.
+- **Segments**: `wal-<start_seq>.tonwal`, where `<start_seq>` is the first frame sequence stored in the file (zero-padded decimal). The writer rotates files at the configured size/time threshold.
 - **State file**: `state.json` (small JSON blob) records `last_segment_seq` (highest fully sealed segment start sequence), `last_frame_seq` (highest frame sequence emitted), and `last_commit_ts` (highest MVCC commit timestamp observed). This file is optional during MVP but reserved so WAL rotation, retention, and recovery can avoid scanning all segments when metadata is reliable.
 - `wal::WalStorage::ensure_dir` creates the directory and the state file stub as needed.
 
@@ -72,29 +75,25 @@ All paths are created through `fusio` APIs; the layout makes no assumptions abou
 
 ### Manifest directory (`root.join("manifest")`)
 
-- Reserved exclusively for the `fusio-manifest` subsystem. Tonbo now creates two independent prefixes under this directory:
+- Reserved exclusively for the `fusio-manifest` subsystem. Tonbo now creates three independent prefixes under this directory:
   - `manifest/catalog/...` stores the catalog manifest (logical table metadata, schema fingerprints, retention knobs) with its own `head.json`, `segments/`, `checkpoints/`, and `leases/` directories.
   - `manifest/version/...` stores the version manifest (table heads, committed versions, WAL floors, future GC plans) with the same sub-structure.
-- The dual-prefix layout lets us replicate or compact catalog metadata without touching high-churn version edits (and vice versa) while keeping every manifest path opaque to Tonbo code outside the manifest module.
-
-### Mutable spill directory (`root.join("mutable")`)
-
-- Reserved for optional spill files, checkpoints, or crash diagnostics. Empty today; keeping the namespace avoids future path churn.
+- `manifest/gc/...` stores GC plans produced by compaction/GC orchestration, keeping deletion plans isolated from catalog/version churn.
+- The multi-prefix layout lets us replicate or compact catalog metadata without touching high-churn version edits (and vice versa) while keeping every manifest path opaque to Tonbo code outside the manifest module.
 
 ## DB Initialization Flow
 
 When a caller constructs a DB with `DB::new_dyn_with_root(schema, extractor, executor, root: Arc<Path>, cfg: WalConfig)`, the following steps occur:
 
-1. Build a `DbPaths` helper that resolves the four subdirectories using `root.join("wal")`, `root.join("sst")`, etc.
+1. Provision the layout via the builder (or a `DbPaths` helper) so `wal/`, `sst/`, and `manifest/{version,catalog,gc}` exist under `root`.
 2. Call `WalStorage::ensure_dir(&paths.wal)` to create the WAL directory and associated state file if missing.
-3. If any WAL segments exist (`WalStorage::list_segments` TBD), reopen the manifest under `root/manifest` via `init_fs_manifest`, register (or look up) the logical table to obtain its `TableId`, and invoke the manifest-aware recovery helper via `DbBuilder::recover_or_init` (which internally calls `recover_with_wal_with_manifest`). This ensures catalog metadata already persisted under the root is reused rather than silently replaced. The recovery routine updates `commit_clock` from either the state file or replayed events.
-4. Ensure `sst/`, `manifest/`, and `mutable/` directories exist (no-op today).
+3. If any WAL segments exist, reopen the manifest under `root/manifest`, register (or look up) the logical table to obtain its `TableId`, and invoke the manifest-aware recovery helper. This ensures catalog metadata already persisted under the root is reused rather than silently replaced. The recovery routine updates `commit_clock` from either the state file or replayed events.
 
 The same flow applies to typed modes once they return; only the ingest adapter changes.
 
 ## Recovery Notes
 
-- During recovery, `Replayer::scan` enumerates segments under `wal/` in lexical order (`wal-0000000001.wal`, ...). If `state.json` is present and trusted, it provides the last durable frame/commit metadata; otherwise, replay scans until the first invalid frame per RFC 0002.
+- During recovery, `Replayer::scan` enumerates segments under `wal/` in lexical order (`wal-00000000000000000001.tonwal`, ...). If `state.json` is present and trusted, it provides the last durable frame/commit metadata; otherwise, replay scans until the first invalid frame per RFC 0002.
 - After replay completes, `commit_clock` is set to `last_commit_ts + 1` so new ingests pick up the correct MVCC timestamp sequence.
 - Future work: once the manifest exists, recovery will first consult the latest `manifest/v*.json` to determine which SSTs are durable and how far the WAL can be truncated.
 

@@ -110,6 +110,29 @@ See [docs/overview.md](./docs/overview.md) for the full design.
 - **API Reference**: [docs.rs/tonbo](https://docs.rs/tonbo): full Rust API documentation
 - **RFCs**: [docs/rfcs/](./docs/rfcs/): design documents for contributors
 
+## Development
+
+### Coverage
+
+Install coverage tooling once:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --version 0.6.12 --locked
+```
+
+Run coverage locally:
+
+```bash
+cargo llvm-cov --workspace --lcov --output-path lcov.info --summary
+```
+
+Generate an HTML report:
+
+```bash
+cargo llvm-cov --workspace --html
+```
+
 ### Project status
 
 Tonbo is currently in **alpha**. APIs may change, and we're actively iterating based on feedback.

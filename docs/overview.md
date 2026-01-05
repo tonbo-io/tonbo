@@ -8,8 +8,8 @@ Tonbo combines the flexibility of embedded databases with the scalability and ef
 - **Arrow/Parquet native:** fully compatible with Arrow data types and columnar semantics.
 - **Edge-first runtime:** embeddable into Deno, Node.js, or other serverless runtimes as stateless query engines.
 - **Object-storage optimized:** interacts natively with S3-compatible backends and fully leverages object storage throughput, parallelism, and cost efficiency.
-- **Unified analytics layer:** supports real-time, scalable analytics on the same data with pluggable index types (vector, inverted, graph) for AI and edge workloads.
-- **Composable with existing engines:** interoperates with Postgres and DataFusion through predicate and calculator pushdown, allowing Tonbo to act as an external or federated engine to accelerate online analytical workloads.
+- **Unified analytics layer:** supports real-time, scalable analytics with foundation for pluggable index types (vector, inverted, graph planned for future releases).
+- **Composable with existing engines:** designed for interoperability with query engines; DataFusion TableProvider and Postgres FDW integrations are on the roadmap.
 
 Unlike conventional databases that abstract storage behind a local filesystem, Tonbo directly orchestrates Arrow and Parquet files on object storage, enabling fine-grained compaction, tiered caching, and zero-copy reads across distributed environments.
 
@@ -226,18 +226,22 @@ When a memtable freezes, its immutable snapshot is merged and serialized directl
 
 #### Major Compaction
 
-Major compaction runs in the background once a level’s SST count exceeds configured thresholds. The process pulls SSTs from object storage, merges them locally using streaming readers, uploads the compacted results back to S3, and updates the manifest atomically. Old SSTs are retired asynchronously through garbage collection.
+> **Status:** The compaction executor and planner are implemented; background scheduling is pending (#550).
+
+Major compaction merges L0..Ln SSTs when level thresholds are exceeded. The process pulls SSTs from object storage, merges them using streaming readers, uploads the compacted results back to S3, and updates the manifest atomically. Old SSTs are retired asynchronously through garbage collection. Currently triggered via admin API; automatic background scheduling is in progress.
 
 #### Design Characteristics
 
 - **Stateless and async:** any process can perform compaction safely.
 - **Object-storage optimized:** no object mutation—new SSTs are appended and atomically switched.
 - **Crash-safe lineage:** every compaction produces a new manifest version, ensuring consistent recovery.
-- **Heuristic-first triggers:** flattening/compaction is automatic by default; there’s no manual “flatten” button needed to keep SST sizes healthy (admin triggers remain optional tooling).
+- **Heuristic-first triggers:** minor compaction is automatic by default; major compaction background loop is being added (#550).
 
 #### Garbage Collection
 
-Tonbo’s GC is **manifest-driven and snapshot-safe**, designed for object storage:
+> **Status:** WAL floor tracking implemented; SST GC worker pending (#547).
+
+Tonbo's GC is **manifest-driven and snapshot-safe**, designed for object storage:
 
 - **Reachability by manifest:** only delete WAL/SST objects **not referenced** by the HEAD manifest or any **retained versions** (time-travel).
 - **Snapshot grace:** respect active snapshot timestamps so **no in-use object** is collected.
@@ -255,7 +259,7 @@ Resolve a **snapshot manifest** (HEAD or a specific version), then build a minim
 - sources (txn/mutable/immutable, L0..Ln SSTs),
 - row-groups/segments via min/max & stats,
 - columns via projection,
-- ranges & optional indexes (bloom/inverted/vector),
+- ranges & Parquet bloom filters (sidecar indexes like inverted/vector are planned),
   producing the exact set of objects/row-groups/columns for Phase 2.
 
 ```
@@ -275,7 +279,7 @@ Resolve a **snapshot manifest** (HEAD or a specific version), then build a minim
       |
       |
       |        +-----------------------------+  +-----------------------------+
-      |        | Sources                     |  | Sidecar Indexes             |
+      |        | Sources                     |  | Sidecar Indexes (planned)   |
       |        | Txn / Mem / Imm / L0..Ln    |  | vector / inverted / bitmap  |
       |        | metadata + file statistics  |  +-------------+---------------+
       |        +-----------+-----------------+                |
@@ -341,7 +345,7 @@ Open only the planned sources and perform a **k-way, heap-driven async merge** a
             v
 +-----------------------+
 | Consumer              |
-| (Tonbo API / DF / FDW)|
+| (Tonbo Rust API)      |
 +-----------------------+
 ```
 
@@ -433,10 +437,10 @@ Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publi
 
 ### Primitives
 
-* **Snapshot (read)**: a stable `(manifest_version, read_ts, schema_set)` view; sessions pin it for reproducible scans.
-* **Checkpoint (write)**: `flush -> L0 -> CAS publish` atomically switches **SST visibility + catalog edits**; may attach a **tag** (e.g., `episode:123`, `schema:users@v7`).
-* **Time travel**: address by **version / tag / timestamp** within retention; **pins** keep important versions from GC.
-* **Export / restore**: materialize a tagged version; optionally move `HEAD` back to a prior version.
+* **Snapshot (read)**: a stable `(manifest_version, read_ts, schema_set)` view; sessions pin it for reproducible scans. *Implemented via `snapshot_at()` and `list_versions()` APIs.*
+* **Checkpoint (write)**: `flush -> L0 -> CAS publish` atomically switches **SST visibility + catalog edits**. *Basic checkpoint flow works.* Named tags (e.g., `episode:123`) are planned (#554).
+* **Time travel**: address by **version / timestamp** within retention. *Implemented.* Addressing by tag and **pins** to prevent GC are planned (#554).
+* **Export / restore**: materialize a tagged version; optionally move `HEAD` back to a prior version. *Planned feature.*
 
 ### Catalog-aware DDL
 
@@ -445,10 +449,12 @@ Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publi
   * **Soft drop (default)**: hide in catalog at checkpoint; background compaction rewrites; old snapshots remain readable until GC.
   * **Hard drop (compliance)**: checkpoint carries a rewrite plan; compactor rewrites immediately; tighten retention to retire prior versions early.
 
-### Sidecar indexes
+### Sidecar indexes (planned)
 
-* Vector / inverted / bitmap indexes are **versioned with SST generations** and carry the snapshot’s `schema_id`; rebuild when schema requires.
-* Indexes are **snapshot-aware** (no per-row MVCC), switching at checkpoint boundaries for efficiency.
+> **Note:** Sidecar indexes are a planned feature, not yet implemented.
+
+* Vector / inverted / bitmap indexes will be **versioned with SST generations** and carry the snapshot's `schema_id`; rebuild when schema requires.
+* Indexes will be **snapshot-aware** (no per-row MVCC), switching at checkpoint boundaries for efficiency.
 
 ### Ops defaults
 
@@ -481,7 +487,7 @@ Tonbo is **Arrow-native in memory** and **Parquet on disk**: Arrow gives a typed
 - **Row groups & pages**: use min/max stats, column indexes/bloom for **Phase-1** pruning.
 - **Page-level index & page sizing (object-storage aware)**: we **heavily rely on page-level indexes** for fine-grained pruning; to reduce remote round-trips and exploit S3 range-GET throughput, **increase Parquet data page size** beyond defaults — **~8–16 MB per data page** is a good starting point (trade-off: larger pages may over-read when predicates are extremely selective).
 - **Encodings & compression**: Parquet encodings (dict, RLE/bitpack) and compression (ZSTD/LZ4) are writer options.
-- **Sidecar indexes (optional)**: vector / inverted / graph indexes stored as sibling objects keyed to the SST generation.
+- **Sidecar indexes (planned)**: vector / inverted / graph indexes will be stored as sibling objects keyed to the SST generation (not yet implemented).
 
 ### Schema evolution
 
@@ -489,6 +495,8 @@ Tonbo is **Arrow-native in memory** and **Parquet on disk**: Arrow gives a typed
 - **Destructive** (drop/rename/retighten) requires rewrite via compaction to keep snapshots consistent.
 
 ## Runtime
+
+> **Note:** WASM and browser support are experimental; OPFS integration is in progress. Production use is recommended on native runtimes (Tokio).
 
 Tonbo runs on **async Rust** with a **Fusio-based Executor / Timer / FS** stack, so the same engine works in servers, serverless/edge, and the **browser**.
 
@@ -516,9 +524,9 @@ Arrow-native, **pushdown-first**, **snapshot-consistent** query layer. It resolv
 ### Plan -> Scan
 
 ```
-PG FDW     DataFusion     JS/Python
-   \          |              /
-    \         |             /
+              Rust API
+           (Tonbo native)
+                 |
      +-------------------------+
      |   Predicate Adapter     |
      +-------------------------+
@@ -531,7 +539,7 @@ PG FDW     DataFusion     JS/Python
           |                 |
 +----------------+   +------------------+
 | Manifest       |   | Sidecar Indexes  |
-| (HEAD/version) |   | (vector/inv/bm)  |
+| (HEAD/version) |   | (planned)        |
 +----------------+   +------------------+
                  |
      +-------------------------+
@@ -569,10 +577,10 @@ PG FDW     DataFusion     JS/Python
 
 ### Key points
 
-- **Interfaces:** Postgres FDW, DataFusion `TableProvider`, lightweight JS and Python SDK — all adapt into one shared predicate model.
+- **Interfaces:** Native Rust API today; Postgres FDW, DataFusion `TableProvider`, and JS/Python SDKs are on the roadmap.
 - **Execution:** Two phases — **Plan** builds RowSet and projection and marks residuals; **Scan** does k-way merge across sources with page pruning, projection, early LIMIT, and residual recheck.
 - **Pushdown:** Filter, projection, limit, order by primary key. Filters classified as **Eq**, **Neq**, **In**, etc.; exact parts drive RowSet and Parquet page pruning.
-- **Pruning & indexes:** Uses manifest snapshot, primary key ranges, segment and column stats, Parquet page indexes; optional sidecar indexes such as vector, inverted, bitmap produce RowSets intersected with PK.
+- **Pruning & indexes:** Uses manifest snapshot, primary key ranges, segment and column stats, Parquet page indexes; sidecar indexes (vector, inverted, bitmap) are planned for future releases.
 - **Correctness:** Manifest-defined snapshot plus read timestamp; append-only WAL and SST with CAS publishes; compaction rewrites only; time-travel within GC window.
 - **Performance:** Columnar only-read, larger Parquet pages for object storage efficiency, cached plans and RowSets, tunable batch size, simple stats-based hints; heavy aggregations and joins live in callers.
 
