@@ -240,9 +240,14 @@ impl LocalCompactionExecutor {
     }
 
     /// Cap the number of bytes per output SST. Prevents oversized single files when splitting.
-    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
+        self
+    }
+
+    /// Cap the number of rows per output SST. Prevents oversized single files when splitting.
+    pub(crate) fn with_max_output_rows(mut self, max_output_rows: usize) -> Self {
+        self.max_output_rows = Some(max_output_rows.max(1));
         self
     }
 

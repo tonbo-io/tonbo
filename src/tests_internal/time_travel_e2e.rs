@@ -66,7 +66,7 @@ async fn snapshot_at_reads_older_manifest_version() -> Result<(), Box<dyn std::e
     let executor = Arc::new(TokioExecutor::default());
     let mut inner = DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();

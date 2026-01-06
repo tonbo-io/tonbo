@@ -51,7 +51,7 @@ async fn plan_execute_scan_merges_layers_with_residuals() -> Result<(), Box<dyn 
     let executor = Arc::new(TokioExecutor::default());
     let mut db = DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();

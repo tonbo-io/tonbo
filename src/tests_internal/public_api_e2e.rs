@@ -47,7 +47,7 @@ async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Erro
     let mut db = DbBuilder::from_schema_key_name(schema.clone(), "id")?
         .on_disk(harness.root.to_string_lossy().into_owned())?
         .wal_config(harness.wal_config.clone())
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open()
         .await?
         .into_inner();
@@ -108,7 +108,7 @@ async fn public_compaction_s3(
         .object_store(harness.object.clone())
         .map_err(|err| format!("object_store config: {err}"))?
         .wal_config(harness.wal_config.clone())
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open()
         .await?
         .into_inner();
@@ -266,7 +266,7 @@ async fn snapshot_and_merge_local(schema: Arc<Schema>) -> Result<(), Box<dyn Err
     let mut inner = DbBuilder::from_schema_key_name(schema.clone(), "id")?
         .on_disk(harness.root.to_string_lossy().into_owned())?
         .wal_config(harness.wal_config.clone())
-        .with_minor_compaction(1, 0, 10)
+        .with_minor_compaction(1, 0)
         .open()
         .await?
         .into_inner();
@@ -357,7 +357,7 @@ async fn snapshot_and_merge_s3(
         .object_store(harness.object.clone())
         .map_err(|err| format!("object_store config: {err}"))?
         .wal_config(harness.wal_config.clone())
-        .with_minor_compaction(1, 0, 10)
+        .with_minor_compaction(1, 0)
         .open()
         .await?
         .into_inner();

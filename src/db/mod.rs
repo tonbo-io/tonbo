@@ -27,7 +27,8 @@ mod tests;
 mod wal;
 
 pub use builder::{
-    AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig, wal_tuning,
+    AwsCreds, AwsCredsError, CompactionOptions, DbBuildError, DbBuilder, ObjectSpec, S3Spec,
+    WalConfig, wal_tuning,
 };
 pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
@@ -901,6 +902,7 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
+                self.kick_compaction_worker();
                 Ok(table)
             }
             Err(err) => Err(err),

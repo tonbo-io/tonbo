@@ -132,7 +132,7 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
             .wal_config(wal_cfg.clone())
-            .with_minor_compaction(1, 0, 1)
+            .with_minor_compaction(1, 0)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
@@ -278,7 +278,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
             .wal_config(wal_cfg.clone())
-            .with_minor_compaction(1, 0, 10)
+            .with_minor_compaction(1, 0)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
