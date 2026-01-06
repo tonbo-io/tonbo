@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, channel::mpsc, lock::Mutex, stream::FuturesUnordered};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -25,12 +25,15 @@ pub(super) enum CompactionScheduleError {
     /// Scheduler channel closed.
     #[error("compaction scheduler closed")]
     Closed,
+    /// Scheduler queue full; admission drops the job.
+    #[error("compaction scheduler queue full")]
+    Full,
 }
 
 /// In-process scheduler that hands out leases and enqueues compaction tasks.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CompactionScheduler {
-    tx: mpsc::Sender<ScheduledCompaction>,
+    tx: std::sync::Arc<Mutex<mpsc::Sender<ScheduledCompaction>>>,
     budget: usize,
 }
 
@@ -41,10 +44,12 @@ impl CompactionScheduler {
         capacity: usize,
         budget: usize,
     ) -> (Self, mpsc::Receiver<ScheduledCompaction>) {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let capacity = capacity.max(1);
+        let channel_capacity = capacity.saturating_sub(1);
+        let (tx, rx) = mpsc::channel(channel_capacity);
         (
             Self {
-                tx,
+                tx: std::sync::Arc::new(Mutex::new(tx)),
                 budget: budget.max(1),
             },
             rx,
@@ -52,6 +57,9 @@ impl CompactionScheduler {
     }
 
     /// Enqueue a planned compaction task with an issued lease.
+    ///
+    /// Admission is non-blocking: if the queue is full, the task is dropped and
+    /// [`CompactionScheduleError::Full`] is returned.
     pub(super) async fn enqueue(
         &self,
         task: CompactionTask,
@@ -64,14 +72,19 @@ impl CompactionScheduler {
             owner: owner.into(),
             ttl_ms,
         };
-        let mut tx = self.tx.clone();
-        tx.send(ScheduledCompaction {
+        let mut tx = self.tx.lock().await;
+        tx.try_send(ScheduledCompaction {
             task,
             manifest_head,
             lease,
         })
-        .await
-        .map_err(|_| CompactionScheduleError::Closed)
+        .map_err(|err| {
+            if err.is_disconnected() {
+                CompactionScheduleError::Closed
+            } else {
+                CompactionScheduleError::Full
+            }
+        })
     }
 
     /// Drain up to the configured budget of scheduled jobs, invoking `f` per job.
@@ -96,5 +109,45 @@ impl CompactionScheduler {
         }
         while running.next().await.is_some() {}
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+    use crate::{
+        compaction::planner::{CompactionInput, CompactionTask},
+        ondisk::sstable::SsTableId,
+    };
+
+    fn task(id: u64) -> CompactionTask {
+        CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(id),
+            }],
+            key_range: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enqueue_drops_when_full() {
+        let (scheduler, mut rx) = CompactionScheduler::new(1, 1);
+        scheduler
+            .enqueue(task(1), None, "test", 5)
+            .await
+            .expect("first enqueue");
+        let err = scheduler
+            .enqueue(task(2), None, "test", 5)
+            .await
+            .expect_err("second enqueue should drop");
+        assert!(matches!(err, CompactionScheduleError::Full));
+
+        let scheduled = rx.next().await.expect("scheduled task");
+        assert_eq!(scheduled.task, task(1));
     }
 }

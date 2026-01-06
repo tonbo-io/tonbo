@@ -2,6 +2,8 @@
 //!
 //! This module provides the bridge between the DB type and the compaction subsystem.
 
+use std::sync::Arc;
+
 use fusio::executor::{Executor, Timer};
 
 use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
@@ -42,6 +44,8 @@ where
             self.manifest_table,
             self.wal_config.clone(),
             self.wal_handle().cloned(),
+            Arc::clone(&self.executor),
+            self.cas_backoff.clone(),
         )
     }
 

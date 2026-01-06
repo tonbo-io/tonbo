@@ -4,7 +4,10 @@
 //! the earlier `Mode` trait indirection has been removed to simplify the core
 //! engine while we focus on a single runtime representation.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
@@ -27,8 +30,8 @@ mod tests;
 mod wal;
 
 pub use builder::{
-    AwsCreds, AwsCredsError, CompactionOptions, DbBuildError, DbBuilder, ObjectSpec, S3Spec,
-    WalConfig, wal_tuning,
+    AwsCreds, AwsCredsError, CasBackoffConfig, CascadeConfig, CompactionOptions, DbBuildError,
+    DbBuilder, L0BackpressureConfig, ObjectSpec, S3Spec, WalConfig, wal_tuning,
 };
 pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
@@ -107,6 +110,42 @@ impl MinorCompactionState {
         self.compactor
             .maybe_compact(db, Arc::clone(&self.config))
             .await
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct L0Stats {
+    file_count: usize,
+    total_bytes: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BackpressureDecision {
+    Proceed,
+    Slowdown(Duration),
+    Stall(Duration),
+}
+
+impl L0BackpressureConfig {
+    fn decision(&self, stats: L0Stats) -> BackpressureDecision {
+        let slowdown_files = stats.file_count >= self.slowdown_files();
+        let stop_files = stats.file_count >= self.stop_files();
+        let slowdown_bytes = match (self.slowdown_bytes_limit(), stats.total_bytes) {
+            (Some(limit), Some(total)) => total >= limit,
+            _ => false,
+        };
+        let stop_bytes = match (self.stop_bytes_limit(), stats.total_bytes) {
+            (Some(limit), Some(total)) => total >= limit,
+            _ => false,
+        };
+
+        if stop_files || stop_bytes {
+            return BackpressureDecision::Stall(self.stop_delay_value());
+        }
+        if slowdown_files || slowdown_bytes {
+            return BackpressureDecision::Slowdown(self.slowdown_delay_value());
+        }
+        BackpressureDecision::Proceed
     }
 }
 
@@ -340,7 +379,6 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[cfg(test)]
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -392,6 +430,10 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Optional L0 backpressure configuration for ingest and minor compaction.
+    l0_backpressure: Option<L0BackpressureConfig>,
+    /// Backoff policy for compaction publish CAS conflicts.
+    cas_backoff: CasBackoffConfig,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
@@ -439,6 +481,10 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Optional L0 backpressure configuration for ingest and minor compaction.
+    l0_backpressure: Option<L0BackpressureConfig>,
+    /// Backoff policy for compaction publish CAS conflicts.
+    cas_backoff: CasBackoffConfig,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -543,6 +589,8 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
+            l0_backpressure: None,
+            cas_backoff: CasBackoffConfig::default(),
         }
     }
 
@@ -638,6 +686,8 @@ where
                 actual: batch.schema(),
             });
         }
+
+        self.apply_l0_backpressure().await?;
 
         let commit_ts = self.next_commit_ts();
         let mut wal_spans: Vec<(u64, u64)> = Vec::new();
@@ -790,8 +840,101 @@ where
         self.seal_state_lock().immutables.len()
     }
 
+    async fn l0_stats(&self) -> Result<L0Stats, ManifestError> {
+        let snapshot = self
+            .manifest
+            .snapshot_latest_with_fallback(self.manifest_table, &self.table_meta)
+            .await?;
+        let Some(version) = snapshot.latest_version else {
+            return Ok(L0Stats {
+                file_count: 0,
+                total_bytes: Some(0),
+            });
+        };
+        let Some(level0) = version.ssts().first() else {
+            return Ok(L0Stats {
+                file_count: 0,
+                total_bytes: Some(0),
+            });
+        };
+        let mut total_bytes = Some(0usize);
+        for entry in level0 {
+            let Some(stats) = entry.stats() else {
+                total_bytes = None;
+                break;
+            };
+            total_bytes = total_bytes.map(|sum| sum.saturating_add(stats.bytes));
+        }
+        Ok(L0Stats {
+            file_count: level0.len(),
+            total_bytes,
+        })
+    }
+
+    async fn l0_backpressure_decision(
+        &self,
+        config: &L0BackpressureConfig,
+    ) -> Result<BackpressureDecision, ManifestError> {
+        let stats = self.l0_stats().await?;
+        Ok(config.decision(stats))
+    }
+
+    async fn apply_l0_backpressure(&self) -> Result<(), KeyExtractError> {
+        let Some(config) = &self.l0_backpressure else {
+            return Ok(());
+        };
+        if self.compaction_worker.is_none() {
+            return Ok(());
+        }
+        let mut decision = self
+            .l0_backpressure_decision(config)
+            .await
+            .map_err(manifest_error_as_key_extract)?;
+        match decision {
+            BackpressureDecision::Proceed => {}
+            BackpressureDecision::Slowdown(delay) => {
+                self.kick_compaction_worker();
+                self.executor.sleep(delay).await;
+            }
+            BackpressureDecision::Stall(delay) => {
+                self.kick_compaction_worker();
+                loop {
+                    self.executor.sleep(delay).await;
+                    decision = self
+                        .l0_backpressure_decision(config)
+                        .await
+                        .map_err(manifest_error_as_key_extract)?;
+                    match decision {
+                        BackpressureDecision::Stall(_) => continue,
+                        BackpressureDecision::Slowdown(next_delay) => {
+                            self.executor.sleep(next_delay).await;
+                            break;
+                        }
+                        BackpressureDecision::Proceed => break,
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Best-effort minor compaction trigger based on configured policy.
     pub(crate) async fn maybe_run_minor_compaction(&self) -> Result<Option<SsTable>, SsTableError> {
+        if let Some(config) = &self.l0_backpressure
+            && self.compaction_worker.is_some()
+        {
+            match self
+                .l0_backpressure_decision(config)
+                .await
+                .map_err(SsTableError::Manifest)?
+            {
+                BackpressureDecision::Stall(_) => {
+                    self.kick_compaction_worker();
+                    return Ok(None);
+                }
+                BackpressureDecision::Slowdown(_) | BackpressureDecision::Proceed => {}
+            }
+        }
         if let Some(compaction) = &self.minor_compaction {
             compaction.maybe_compact(self).await
         } else {

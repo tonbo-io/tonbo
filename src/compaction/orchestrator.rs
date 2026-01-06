@@ -29,6 +29,24 @@ where
     planner.plan(&layout)
 }
 
+/// Plan compaction from a version snapshot, starting from a minimum source level.
+///
+/// Returns `None` if the snapshot is empty or the planner finds no work to do.
+pub(crate) fn plan_from_version_with_min_level<P>(
+    planner: &P,
+    version: &VersionState,
+    min_level: usize,
+) -> Option<CompactionTask>
+where
+    P: CompactionPlanner,
+{
+    let layout: CompactionSnapshot = version.into();
+    if layout.is_empty() {
+        return None;
+    }
+    planner.plan_with_min_level(&layout, min_level)
+}
+
 /// Resolve SST descriptors for a planned compaction task.
 ///
 /// Looks up each input SST in the version state and builds full descriptors

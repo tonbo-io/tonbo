@@ -19,6 +19,6 @@ pub mod planner;
 /// Scheduler scaffolding for background/remote compaction (native builds only for now).
 mod scheduler;
 
-pub(crate) use driver::CompactionDriver;
+pub(crate) use driver::{CompactionDriver, CompactionWorkerConfig};
 pub(crate) use handle::CompactionHandle;
 pub(crate) use minor::MinorCompactor;

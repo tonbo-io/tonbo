@@ -7,9 +7,9 @@ use std::{sync::Arc, time::Duration};
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
-    executor::{Executor, RwLock, Timer},
+    executor::{Executor, Instant, RwLock, Timer},
 };
-use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle};
+use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle, lock::Mutex};
 
 use crate::{
     compaction::{
@@ -17,8 +17,9 @@ use crate::{
         handle::{CompactionHandle, CompactionTrigger},
         orchestrator,
         planner::{CompactionPlanner, CompactionTask},
-        scheduler::{CompactionScheduler, ScheduledCompaction},
+        scheduler::{CompactionScheduleError, CompactionScheduler, ScheduledCompaction},
     },
+    db::{CasBackoffConfig, CascadeConfig},
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
@@ -26,6 +27,66 @@ use crate::{
 /// Maximum retries for CAS conflicts when applying compaction edits.
 const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 const DEFAULT_COMPACTION_LEASE_TTL_MS: u64 = 30_000;
+
+#[derive(Debug)]
+struct CascadeControl {
+    max_follow_ups: usize,
+    cooldown: Duration,
+    remaining: usize,
+    last_cascade_at: Option<Instant>,
+}
+
+impl CascadeControl {
+    fn new(max_follow_ups: usize, cooldown: Duration) -> Self {
+        Self {
+            max_follow_ups,
+            cooldown,
+            remaining: max_follow_ups,
+            last_cascade_at: None,
+        }
+    }
+
+    fn reset_budget(&mut self) {
+        self.remaining = self.max_follow_ups;
+    }
+
+    fn try_acquire(&mut self, now: Instant) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        if let Some(last) = self.last_cascade_at
+            && now.duration_since(last) < self.cooldown
+        {
+            return false;
+        }
+        self.remaining = self.remaining.saturating_sub(1);
+        self.last_cascade_at = Some(now);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use fusio::executor::Instant;
+
+    use super::CascadeControl;
+
+    #[test]
+    fn cascade_control_enforces_budget_and_cooldown() {
+        let mut control = CascadeControl::new(1, Duration::from_millis(5));
+        let now = Instant::now();
+        assert!(control.try_acquire(now));
+        assert!(!control.try_acquire(now));
+
+        control.reset_budget();
+        assert!(!control.try_acquire(now));
+
+        let later = now + Duration::from_millis(10);
+        assert!(control.try_acquire(later));
+    }
+}
 
 /// Compaction driver that coordinates planning, execution, and manifest updates.
 ///
@@ -41,6 +102,32 @@ where
     pub(crate) table_id: TableId,
     pub(crate) wal_config: Option<RuntimeWalConfig>,
     pub(crate) wal_handle: Option<WalHandle<E>>,
+    pub(crate) runtime: Arc<E>,
+    pub(crate) cas_backoff: CasBackoffConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompactionWorkerConfig {
+    pub(crate) periodic_interval: Option<Duration>,
+    pub(crate) queue_capacity: usize,
+    pub(crate) max_concurrent_jobs: usize,
+    pub(crate) cascade: CascadeConfig,
+}
+
+impl CompactionWorkerConfig {
+    pub(crate) fn new(
+        periodic_interval: Option<Duration>,
+        queue_capacity: usize,
+        max_concurrent_jobs: usize,
+        cascade: CascadeConfig,
+    ) -> Self {
+        Self {
+            periodic_interval,
+            queue_capacity,
+            max_concurrent_jobs,
+            cascade,
+        }
+    }
 }
 
 impl<FS, E> CompactionDriver<FS, E>
@@ -55,12 +142,16 @@ where
         table_id: TableId,
         wal_config: Option<RuntimeWalConfig>,
         wal_handle: Option<WalHandle<E>>,
+        runtime: Arc<E>,
+        cas_backoff: CasBackoffConfig,
     ) -> Self {
         Self {
             manifest,
             table_id,
             wal_config,
             wal_handle,
+            runtime,
+            cas_backoff,
         }
     }
 
@@ -139,6 +230,44 @@ where
         Ok(orchestrator::plan_from_version(planner, version))
     }
 
+    /// Build a compaction plan starting from a minimum source level.
+    pub(crate) async fn plan_compaction_task_from_level<P>(
+        &self,
+        planner: &P,
+        min_level: usize,
+    ) -> ManifestResult<Option<CompactionTask>>
+    where
+        P: CompactionPlanner,
+    {
+        let snapshot = self.manifest.snapshot_latest(self.table_id).await?;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        Ok(orchestrator::plan_from_version_with_min_level(
+            planner, version, min_level,
+        ))
+    }
+
+    fn cas_backoff_delay(&self, attempt: usize) -> Duration {
+        if attempt == 0 {
+            return Duration::from_millis(0);
+        }
+        let mut delay = self.cas_backoff.base_delay();
+        for _ in 1..attempt {
+            delay = delay.saturating_mul(2);
+        }
+        let max_delay = self.cas_backoff.max_delay();
+        if delay > max_delay { max_delay } else { delay }
+    }
+
+    async fn sleep_cas_backoff(&self, attempt: usize) {
+        let delay = self.cas_backoff_delay(attempt);
+        if !delay.is_zero() {
+            self.runtime.sleep(delay).await;
+        }
+    }
+
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn run_compaction<CE, P>(
@@ -212,6 +341,7 @@ where
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
                         return Err(CompactionError::CasConflict);
                     }
+                    self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
@@ -295,6 +425,7 @@ where
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
                         return Err(CompactionError::CasConflict);
                     }
+                    self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
@@ -311,22 +442,32 @@ where
         runtime: Arc<E>,
         planner: P,
         executor: CE,
-        periodic_interval: Option<Duration>,
-        queue_capacity: usize,
-        max_concurrent_jobs: usize,
+        config: CompactionWorkerConfig,
     ) -> CompactionHandle<E>
     where
         CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
         P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
     {
+        let CompactionWorkerConfig {
+            periodic_interval,
+            queue_capacity,
+            max_concurrent_jobs,
+            cascade,
+        } = config;
         let budget = max_concurrent_jobs.max(1);
         let queue_capacity = queue_capacity.max(budget).max(1);
         let (scheduler, mut rx) = CompactionScheduler::new(queue_capacity, budget);
         let (tick_tx, mut tick_rx) = mpsc::channel::<CompactionTrigger>(1);
+        let planner = Arc::new(planner);
         let driver = Arc::clone(self);
         let driver_for_loop = Arc::clone(&driver);
         let executor = Arc::new(executor);
         let runtime_for_loop = Arc::clone(&runtime);
+        let cascade_trigger = tick_tx.clone();
+        let cascade_control = Arc::new(Mutex::new(CascadeControl::new(
+            cascade.max_follow_ups(),
+            cascade.cooldown(),
+        )));
         let lease_ttl_ms = periodic_interval
             .map(|interval| interval.as_millis().max(1) as u64)
             .unwrap_or(DEFAULT_COMPACTION_LEASE_TTL_MS);
@@ -361,9 +502,13 @@ where
                     continue;
                 }
                 pending_tick = false;
+                {
+                    let mut guard = cascade_control.lock().await;
+                    guard.reset_budget();
+                }
 
                 for _ in 0..budget {
-                    match driver_for_loop.plan_compaction_task(&planner).await {
+                    match driver_for_loop.plan_compaction_task(planner.as_ref()).await {
                         Ok(Some(task)) => {
                             let manifest_head = match driver_for_loop
                                 .manifest
@@ -376,12 +521,19 @@ where
                                     continue;
                                 }
                             };
-                            if let Err(err) = scheduler
+                            match scheduler
                                 .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
                                 .await
                             {
-                                eprintln!("compaction scheduler closed: {err}");
-                                return;
+                                Ok(()) => {}
+                                Err(CompactionScheduleError::Full) => {
+                                    eprintln!("compaction scheduler queue full; dropping task");
+                                    break;
+                                }
+                                Err(CompactionScheduleError::Closed) => {
+                                    eprintln!("compaction scheduler closed");
+                                    return;
+                                }
                             }
                         }
                         Ok(None) => break,
@@ -396,12 +548,67 @@ where
                     .drain_with_budget(&mut rx, |job| {
                         let driver = Arc::clone(&driver);
                         let executor = Arc::clone(&executor);
+                        let planner = Arc::clone(&planner);
+                        let scheduler = scheduler.clone();
+                        let cascade_control = Arc::clone(&cascade_control);
+                        let runtime = Arc::clone(&runtime);
+                        let mut cascade_trigger = cascade_trigger.clone();
                         async move {
-                            if let Err(err) = driver
+                            let source_level = job.task.source_level;
+                            let target_level = job.task.target_level;
+                            let result = driver
                                 .run_scheduled_compaction(job, executor.as_ref())
-                                .await
-                            {
+                                .await;
+                            if let Err(err) = result {
                                 eprintln!("scheduled compaction failed: {err}");
+                                return;
+                            }
+                            let Ok(Some(_)) = result else {
+                                return;
+                            };
+                            if source_level == 0 && target_level == 1 {
+                                let allow = {
+                                    let mut guard = cascade_control.lock().await;
+                                    guard.try_acquire(runtime.now())
+                                };
+                                if !allow {
+                                    return;
+                                }
+                                let Ok(Some(task)) = driver
+                                    .plan_compaction_task_from_level(planner.as_ref(), 1)
+                                    .await
+                                else {
+                                    return;
+                                };
+                                let manifest_head =
+                                    match driver.manifest.snapshot_latest(driver.table_id).await {
+                                        Ok(snapshot) => snapshot.head.last_manifest_txn,
+                                        Err(err) => {
+                                            eprintln!("cascade snapshot failed: {err}");
+                                            return;
+                                        }
+                                    };
+                                match scheduler
+                                    .enqueue(
+                                        task,
+                                        manifest_head,
+                                        "cascade-compaction",
+                                        lease_ttl_ms,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        let _ = cascade_trigger.try_send(CompactionTrigger::Kick);
+                                    }
+                                    Err(CompactionScheduleError::Full) => {
+                                        eprintln!(
+                                            "compaction scheduler queue full; dropping cascade"
+                                        );
+                                    }
+                                    Err(CompactionScheduleError::Closed) => {
+                                        eprintln!("compaction scheduler closed");
+                                    }
+                                }
                             }
                         }
                     })
