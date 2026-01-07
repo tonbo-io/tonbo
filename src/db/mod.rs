@@ -20,7 +20,7 @@ use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
-use crate::compaction::{CompactionHandle, MinorCompactor};
+use crate::compaction::{CompactionHandle, MinorCompactor, metrics::CompactionBackpressureSignal};
 mod builder;
 mod compaction;
 mod error;
@@ -426,6 +426,8 @@ where
     _key_locks: LockMap<KeyOwned>,
     /// Optional background compaction worker handle.
     compaction_worker: Option<CompactionHandle<E>>,
+    /// Optional compaction metrics observer.
+    compaction_metrics: Option<Arc<crate::compaction::metrics::CompactionMetrics>>,
     /// Async gate to serialize flushes triggered by minor compaction or manual calls.
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
@@ -477,6 +479,8 @@ where
     _key_locks: LockMap<KeyOwned>,
     /// Optional background compaction worker handle.
     compaction_worker: Option<CompactionHandle<E>>,
+    /// Optional compaction metrics observer.
+    compaction_metrics: Option<Arc<crate::compaction::metrics::CompactionMetrics>>,
     /// Async gate to serialize flushes triggered by minor compaction or manual calls.
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
@@ -587,6 +591,7 @@ where
             mutable_wal_range: Arc::new(Mutex::new(None)),
             _key_locks: Arc::new(LockableHashMap::new()),
             compaction_worker: None,
+            compaction_metrics: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
             l0_backpressure: None,
@@ -894,11 +899,17 @@ where
             BackpressureDecision::Proceed => {}
             BackpressureDecision::Slowdown(delay) => {
                 self.kick_compaction_worker();
+                if let Some(metrics) = self.compaction_metrics.as_ref() {
+                    metrics.record_backpressure(CompactionBackpressureSignal::Slowdown, delay);
+                }
                 self.executor.sleep(delay).await;
             }
             BackpressureDecision::Stall(delay) => {
                 self.kick_compaction_worker();
                 loop {
+                    if let Some(metrics) = self.compaction_metrics.as_ref() {
+                        metrics.record_backpressure(CompactionBackpressureSignal::Stall, delay);
+                    }
                     self.executor.sleep(delay).await;
                     decision = self
                         .l0_backpressure_decision(config)
@@ -907,6 +918,12 @@ where
                     match decision {
                         BackpressureDecision::Stall(_) => continue,
                         BackpressureDecision::Slowdown(next_delay) => {
+                            if let Some(metrics) = self.compaction_metrics.as_ref() {
+                                metrics.record_backpressure(
+                                    CompactionBackpressureSignal::Slowdown,
+                                    next_delay,
+                                );
+                            }
                             self.executor.sleep(next_delay).await;
                             break;
                         }

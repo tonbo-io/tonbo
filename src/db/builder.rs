@@ -18,7 +18,7 @@ use super::{DB, DbInner, MinorCompactionState};
 use crate::{
     compaction::{
         CompactionWorkerConfig, MinorCompactor, executor::LocalCompactionExecutor,
-        planner::CompactionStrategy,
+        metrics::CompactionMetrics, planner::CompactionStrategy,
     },
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
@@ -1098,6 +1098,7 @@ where
         if let Some(options) = compaction_options.as_ref() {
             inner.l0_backpressure = options.backpressure().cloned();
             inner.cas_backoff = options.cas_backoff_config().clone();
+            inner.compaction_metrics = options.metrics();
         }
 
         if let Some(cfg) = wal_cfg.take() {
@@ -1153,6 +1154,7 @@ pub struct CompactionOptions {
     backpressure: Option<L0BackpressureConfig>,
     cascade: CascadeConfig,
     cas_backoff: CasBackoffConfig,
+    compaction_metrics: Option<Arc<CompactionMetrics>>,
 }
 
 impl Default for CompactionOptions {
@@ -1167,6 +1169,7 @@ impl Default for CompactionOptions {
             backpressure: Some(L0BackpressureConfig::default()),
             cascade: CascadeConfig::default(),
             cas_backoff: CasBackoffConfig::default(),
+            compaction_metrics: None,
         }
     }
 }
@@ -1254,6 +1257,14 @@ impl CompactionOptions {
         self
     }
 
+    /// Attach compaction metrics to record per-job and scheduler counters.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn compaction_metrics(mut self, metrics: Arc<CompactionMetrics>) -> Self {
+        self.compaction_metrics = Some(metrics);
+        self
+    }
+
     fn effective_concurrency(&self) -> usize {
         self.max_concurrent_jobs.max(1)
     }
@@ -1276,6 +1287,10 @@ impl CompactionOptions {
 
     fn cas_backoff_config(&self) -> &CasBackoffConfig {
         &self.cas_backoff
+    }
+
+    fn metrics(&self) -> Option<Arc<CompactionMetrics>> {
+        self.compaction_metrics.clone()
     }
 }
 
@@ -1662,6 +1677,7 @@ where
             if let Some(options) = compaction_options.as_ref() {
                 inner.l0_backpressure = options.backpressure().cloned();
                 inner.cas_backoff = options.cas_backoff_config().clone();
+                inner.compaction_metrics = options.metrics();
             }
             inner.enable_wal(wal_cfg).await?;
             if let (Some(options), Some((sst_config, start_id))) =

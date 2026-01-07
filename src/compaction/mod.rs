@@ -10,6 +10,8 @@ mod driver;
 pub(crate) mod executor;
 /// Unified handle for background compaction workers.
 mod handle;
+/// Compaction observability counters and summaries.
+pub(crate) mod metrics;
 /// Naïve minor-compaction driver for flushing immutable memtables.
 mod minor;
 /// Pure orchestration functions for version/outcome manipulation.
