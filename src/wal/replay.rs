@@ -1,6 +1,6 @@
 //! Recovery helpers for scanning WAL segments.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use fusio::Read;
 #[cfg(all(test, feature = "tokio"))]
@@ -43,6 +43,8 @@ impl Replayer {
     ) -> WalResult<Vec<WalEvent>> {
         use crate::wal::WalRecoveryMode;
 
+        let started_at = Instant::now();
+
         match self.cfg.recovery {
             WalRecoveryMode::PointInTime | WalRecoveryMode::TolerateCorruptedTail => {
                 // Both variants currently share the same implementation: stop at the first
@@ -69,14 +71,40 @@ impl Replayer {
             .and_then(|handle| handle.state().last_segment_seq);
 
         let segments = self.storage.list_segments_with_hint(state_hint).await?;
-        if segments.is_empty() {
+        let total_segments = segments.len();
+        let log_completion = |events_len: usize, segments_scanned: usize| {
+            if log::log_enabled!(log::Level::Info) {
+                log::info!(
+                    target: "tonbo::wal::replay",
+                    "event=replay_completed segment_count={} segments_scanned={} events={} duration_ms={}",
+                    total_segments,
+                    segments_scanned,
+                    events_len,
+                    started_at.elapsed().as_millis(),
+                );
+            }
+        };
+        if total_segments == 0 {
+            log_completion(0, 0);
             return Ok(Vec::new());
         }
 
         let floor_seq = floor.map(|f| f.seq());
         let floor_first_frame = floor.map(|f| f.first_frame());
 
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                target: "tonbo::wal::replay",
+                "event=replay_started segment_count={} floor_present={} floor_seq={} floor_first_frame={}",
+                total_segments,
+                floor.is_some(),
+                floor_seq.unwrap_or(0),
+                floor_first_frame.unwrap_or(0),
+            );
+        }
+
         let mut events = Vec::new();
+        let mut segments_scanned = 0usize;
         for segment in segments {
             if let Some(seq) = floor_seq
                 && segment.seq < seq
@@ -103,6 +131,7 @@ impl Replayer {
                     ))
                 })?;
 
+            segments_scanned = segments_scanned.saturating_add(1);
             let (read_res, data) = file.read_to_end_at(Vec::new(), 0).await;
             read_res.map_err(|err| {
                 WalError::Storage(format!(
@@ -124,6 +153,14 @@ impl Replayer {
                         // recovery returns the events observed before the partial frame. Any
                         // other corruption surfaces as an error to avoid silently skipping valid
                         // transactions further in the log.
+                        log::info!(
+                            target: "tonbo::wal::replay",
+                            "event=replay_truncated_tail segment_seq={} offset={} reason={}",
+                            segment.seq,
+                            offset,
+                            reason,
+                        );
+                        log_completion(events.len(), segments_scanned);
                         return Ok(events);
                     }
                     Err(err) => return Err(err),
@@ -131,6 +168,15 @@ impl Replayer {
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
+                    log::info!(
+                        target: "tonbo::wal::replay",
+                        "event=replay_truncated_payload segment_seq={} offset={} payload_end={} data_len={}",
+                        segment.seq,
+                        offset,
+                        payload_end,
+                        data.len(),
+                    );
+                    log_completion(events.len(), segments_scanned);
                     return Ok(events);
                 }
                 let payload = &data[payload_start..payload_end];
@@ -149,6 +195,7 @@ impl Replayer {
             }
         }
 
+        log_completion(events.len(), segments_scanned);
         Ok(events)
     }
 

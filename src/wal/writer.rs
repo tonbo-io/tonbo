@@ -133,6 +133,15 @@ where
     let (sender, receiver) = mpsc::channel(cfg.queue_size);
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
+    log::debug!(
+        target: "tonbo::wal",
+        "event=wal_writer_spawned queue_size={} initial_segment_seq={} initial_frame_seq={} fs_tag={:?}",
+        cfg.queue_size,
+        initial_segment_seq,
+        initial_frame_seq,
+        cfg.segment_backend.file_system(),
+    );
+
     let fut = run_writer_loop::<E>(
         WriterLoopInit {
             exec: Arc::clone(&exec),
@@ -440,6 +449,14 @@ where
     ctx.queue_depth.store(0, Ordering::SeqCst);
     ctx.update_queue_depth_metric().await;
 
+    log::info!(
+        target: "tonbo::wal",
+        "event=wal_writer_shutdown synced={} active_segment_seq={} completed_segments={}",
+        shutdown_synced,
+        ctx.segment_seq,
+        ctx.completed_segments.len(),
+    );
+
     Ok(())
 }
 
@@ -575,6 +592,17 @@ where
             }
         }
         ctx.enforce_retention_limit().await?;
+        log::debug!(
+            target: "tonbo::wal",
+            "event=wal_writer_bootstrap segment_seq={} segment_bytes={} next_segment_seq={} next_frame_seq={} completed_segments={} active_segment_present={} state_dirty={}",
+            ctx.segment_seq,
+            ctx.segment_bytes,
+            ctx.next_segment_seq,
+            ctx.next_frame_seq,
+            ctx.completed_segments.len(),
+            ctx.active_segment.is_some(),
+            ctx.state_dirty,
+        );
         Ok(ctx)
     }
 
@@ -816,6 +844,17 @@ where
         self.record_sealed_segment(bounds);
         self.enforce_retention_limit().await?;
 
+        log::info!(
+            target: "tonbo::wal",
+            "event=wal_segment_rotated sealed_seq={} sealed_bytes={} new_seq={} new_bytes={} sync_performed={} completed_segments={}",
+            sealed_seq,
+            old_bytes,
+            new_seq,
+            new_bytes,
+            sync_performed,
+            self.completed_segments.len(),
+        );
+
         Ok(RotationOutcome {
             performed: true,
             sync_performed,
@@ -942,13 +981,27 @@ where
 
     async fn enforce_retention_limit(&mut self) -> WalResult<()> {
         if let Some(limit) = self.cfg.retention_bytes {
+            let mut removed_segments = 0usize;
+            let mut removed_bytes = 0usize;
             while self.total_retained_bytes() > limit {
                 if let Some(evicted) = self.completed_segments.pop_front() {
+                    removed_segments = removed_segments.saturating_add(1);
+                    removed_bytes = removed_bytes.saturating_add(evicted.bytes());
                     self.remove_sealed_segment_metadata(evicted.seq());
                     self.storage.remove_segment(evicted.path()).await?;
                 } else {
                     break;
                 }
+            }
+            if removed_segments > 0 {
+                log::info!(
+                    target: "tonbo::wal",
+                    "event=wal_retention_pruned removed_segments={} removed_bytes={} retention_bytes={} retained_bytes={}",
+                    removed_segments,
+                    removed_bytes,
+                    limit,
+                    self.total_retained_bytes(),
+                );
             }
         }
         Ok(())

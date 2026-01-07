@@ -961,6 +961,50 @@ where
             .map(|seq| seq.saturating_add(1))
             .unwrap_or(frame::INITIAL_FRAME_SEQ);
 
+        if log::log_enabled!(log::Level::Info) {
+            let (segment_max_age_ms, segment_max_age_set) = match cfg.segment_max_age {
+                Some(age) => (age.as_millis(), true),
+                None => (0, false),
+            };
+            let (retention_bytes, retention_bytes_set) = match cfg.retention_bytes {
+                Some(bytes) => (bytes, true),
+                None => (0, false),
+            };
+            let (sync_policy, sync_value) = match &cfg.sync {
+                WalSyncPolicy::Always => ("always", 0u128),
+                WalSyncPolicy::IntervalBytes(bytes) => ("interval_bytes", *bytes as u128),
+                WalSyncPolicy::IntervalTime(interval) => ("interval_time_ms", interval.as_millis()),
+                WalSyncPolicy::Disabled => ("disabled", 0u128),
+            };
+            let recovery_mode = match cfg.recovery {
+                WalRecoveryMode::PointInTime => "point_in_time",
+                WalRecoveryMode::TolerateCorruptedTail => "tolerate_corrupted_tail",
+                WalRecoveryMode::AbsoluteConsistency => "absolute_consistency",
+                WalRecoveryMode::SkipCorrupted => "skip_corrupted",
+            };
+
+            log::info!(
+                target: "tonbo::wal",
+                "event=wal_enabled dir={} segment_max_bytes={} segment_max_age_ms={} segment_max_age_set={} flush_interval_ms={} sync_policy={} sync_value={} recovery_mode={} retention_bytes={} retention_bytes_set={} queue_size={} state_store_present={} prune_dry_run={} next_payload_seq={} initial_frame_seq={} tail_present={}",
+                cfg.dir,
+                cfg.segment_max_bytes,
+                segment_max_age_ms,
+                segment_max_age_set,
+                cfg.flush_interval.as_millis(),
+                sync_policy,
+                sync_value,
+                recovery_mode,
+                retention_bytes,
+                retention_bytes_set,
+                cfg.queue_size,
+                cfg.state_store.is_some(),
+                cfg.prune_dry_run,
+                next_payload_seq,
+                initial_frame_seq,
+                tail_metadata.is_some(),
+            );
+        }
+
         let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
         let writer = writer::spawn_writer(
             Arc::clone(self.executor()),

@@ -130,8 +130,21 @@ pub(crate) async fn prune_wal_segments(
             .into_iter()
             .filter(|descriptor| descriptor.seq < floor.seq())
             .count();
+        log::info!(
+            target: "tonbo::wal",
+            "event=wal_prune_dry_run floor_seq={} removable_segments={}",
+            floor.seq(),
+            removable,
+        );
         Ok(removable)
     } else {
-        storage.prune_below(floor.seq()).await
+        let removed = storage.prune_below(floor.seq()).await?;
+        log::info!(
+            target: "tonbo::wal",
+            "event=wal_prune_completed floor_seq={} removed_segments={}",
+            floor.seq(),
+            removed,
+        );
+        Ok(removed)
     }
 }
