@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::{
-    logging::{LogContext, tonbo_log},
+    logging::{LogContext, log_info},
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError,
@@ -133,8 +133,7 @@ pub(crate) async fn prune_wal_segments(
             .into_iter()
             .filter(|descriptor| descriptor.seq < floor.seq())
             .count();
-        tonbo_log!(
-            log::Level::Info,
+        log_info!(
             ctx: WAL_LOG_CTX,
             "wal_prune_dry_run",
             "floor_seq={} removable_segments={}",
@@ -144,8 +143,7 @@ pub(crate) async fn prune_wal_segments(
         Ok(removable)
     } else {
         let removed = storage.prune_below(floor.seq()).await?;
-        tonbo_log!(
-            log::Level::Info,
+        log_info!(
             ctx: WAL_LOG_CTX,
             "wal_prune_completed",
             "floor_seq={} removed_segments={}",

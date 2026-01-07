@@ -7,7 +7,7 @@ use fusio::Read;
 use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::{
-    logging::{LogContext, tonbo_log},
+    logging::{LogContext, log_info},
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError, WalResult,
@@ -76,8 +76,7 @@ impl Replayer {
         let segments = self.storage.list_segments_with_hint(state_hint).await?;
         let total_segments = segments.len();
         let log_completion = |events_len: usize, segments_scanned: usize| {
-            tonbo_log!(
-                log::Level::Info,
+            log_info!(
                 ctx: WAL_LOG_CTX,
                 "replay_completed",
                 "op=replay segment_count={} segments_scanned={} events={} duration_ms={}",
@@ -95,8 +94,7 @@ impl Replayer {
         let floor_seq = floor.map(|f| f.seq());
         let floor_first_frame = floor.map(|f| f.first_frame());
 
-        tonbo_log!(
-            log::Level::Info,
+        log_info!(
             ctx: WAL_LOG_CTX,
             "replay_started",
             "op=replay segment_count={} floor_present={} floor_seq={} floor_first_frame={}",
@@ -156,8 +154,7 @@ impl Replayer {
                         // recovery returns the events observed before the partial frame. Any
                         // other corruption surfaces as an error to avoid silently skipping valid
                         // transactions further in the log.
-                        tonbo_log!(
-                            log::Level::Info,
+                        log_info!(
                             ctx: WAL_LOG_CTX,
                             "replay_truncated_tail",
                             "op=replay segment_seq={} offset={} reason={}",
@@ -173,8 +170,7 @@ impl Replayer {
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
-                    tonbo_log!(
-                        log::Level::Info,
+                    log_info!(
                         ctx: WAL_LOG_CTX,
                         "replay_truncated_payload",
                         "op=replay segment_seq={} offset={} payload_end={} data_len={}",

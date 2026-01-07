@@ -35,7 +35,7 @@ use ulid::Ulid;
 use crate::{
     id::FileId,
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
-    logging::{LogContext, tonbo_log},
+    logging::{LogContext, log_info},
     mvcc::Timestamp,
     wal::metrics::WalMetrics,
 };
@@ -986,8 +986,7 @@ where
                 WalRecoveryMode::SkipCorrupted => "skip_corrupted",
             };
 
-            tonbo_log!(
-                log::Level::Info,
+            log_info!(
                 ctx: WAL_LOG_CTX,
                 "wal_enabled",
                 "wal_dir={} segment_max_bytes={} segment_max_age_ms={} segment_max_age_set={} \

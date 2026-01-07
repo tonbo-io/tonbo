@@ -28,7 +28,7 @@ use futures::{
 };
 
 use crate::{
-    logging::{LogContext, tonbo_log},
+    logging::{LogContext, log_debug, log_info},
     mvcc::Timestamp,
     wal::{
         WalAck, WalCommand, WalConfig, WalError, WalResult, WalSnapshot, WalSyncPolicy,
@@ -136,8 +136,7 @@ where
     let (sender, receiver) = mpsc::channel(cfg.queue_size);
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
-    tonbo_log!(
-        log::Level::Debug,
+    log_debug!(
         ctx: WAL_LOG_CTX,
         "wal_writer_spawned",
         "queue_size={} initial_segment_seq={} initial_frame_seq={} fs_tag={:?}",
@@ -454,8 +453,7 @@ where
     ctx.queue_depth.store(0, Ordering::SeqCst);
     ctx.update_queue_depth_metric().await;
 
-    tonbo_log!(
-        log::Level::Info,
+    log_info!(
         ctx: WAL_LOG_CTX,
         "wal_writer_shutdown",
         "synced={} active_segment_seq={} completed_segments={}",
@@ -599,8 +597,7 @@ where
             }
         }
         ctx.enforce_retention_limit().await?;
-        tonbo_log!(
-            log::Level::Debug,
+        log_debug!(
             ctx: WAL_LOG_CTX,
             "wal_writer_bootstrap",
             "segment_seq={} segment_bytes={} next_segment_seq={} next_frame_seq={} \
@@ -854,8 +851,7 @@ where
         self.record_sealed_segment(bounds);
         self.enforce_retention_limit().await?;
 
-        tonbo_log!(
-            log::Level::Info,
+        log_info!(
             ctx: WAL_LOG_CTX,
             "wal_segment_rotated",
             "sealed_seq={} sealed_bytes={} new_seq={} new_bytes={} sync_performed={} \
@@ -1007,8 +1003,7 @@ where
                 }
             }
             if removed_segments > 0 {
-                tonbo_log!(
-                    log::Level::Info,
+                log_info!(
                     ctx: WAL_LOG_CTX,
                     "wal_retention_pruned",
                     "removed_segments={} removed_bytes={} retention_bytes={} retained_bytes={}",

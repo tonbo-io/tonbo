@@ -59,6 +59,11 @@ Tonbo’s I/O layer, powered by **Fusio**, is *fully asynchronous from end to en
 
 This design removes runtime awareness from Tonbo’s core: the database can run on a thread-pool executor, an edge worker, or even a WASM environment with OPFS, all while maintaining non-blocking behavior and consistent durability semantics.
 
+## Observability
+
+Tonbo is a library; logging is opt-in via the `log` facade and a no-op until configured by the host.
+See [docs/observability.md](observability.md) for the structured logging conventions and event catalog.
+
 ## First-class Object Storage
 
 Tonbo treats **object storage as the primary substrate** for durability and coordination—not just as a backup layer.
