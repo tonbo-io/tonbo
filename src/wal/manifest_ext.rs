@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::{
+    logging::{LogContext, tonbo_log},
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError,
@@ -10,6 +11,8 @@ use crate::{
         wal_segment_file_id,
     },
 };
+
+const WAL_LOG_CTX: LogContext = LogContext::new("component=wal");
 
 /// Collect WAL segment references using the configuration supplied to the writer.
 pub(crate) async fn collect_wal_segment_refs(
@@ -130,18 +133,22 @@ pub(crate) async fn prune_wal_segments(
             .into_iter()
             .filter(|descriptor| descriptor.seq < floor.seq())
             .count();
-        log::info!(
-            target: "tonbo::wal",
-            "event=wal_prune_dry_run floor_seq={} removable_segments={}",
+        tonbo_log!(
+            log::Level::Info,
+            ctx: WAL_LOG_CTX,
+            "wal_prune_dry_run",
+            "floor_seq={} removable_segments={}",
             floor.seq(),
             removable,
         );
         Ok(removable)
     } else {
         let removed = storage.prune_below(floor.seq()).await?;
-        log::info!(
-            target: "tonbo::wal",
-            "event=wal_prune_completed floor_seq={} removed_segments={}",
+        tonbo_log!(
+            log::Level::Info,
+            ctx: WAL_LOG_CTX,
+            "wal_prune_completed",
+            "floor_seq={} removed_segments={}",
             floor.seq(),
             removed,
         );

@@ -35,6 +35,7 @@ use ulid::Ulid;
 use crate::{
     id::FileId,
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+    logging::{LogContext, tonbo_log},
     mvcc::Timestamp,
     wal::metrics::WalMetrics,
 };
@@ -48,6 +49,8 @@ pub mod storage;
 pub mod writer;
 pub use state::WalSegmentBounds;
 // Writer logic will live here once the async queue is implemented.
+
+const WAL_LOG_CTX: LogContext = LogContext::new("component=wal");
 
 /// Sync policy controlling how frequently the WAL forces durability.
 #[derive(Debug, Clone)]
@@ -983,9 +986,14 @@ where
                 WalRecoveryMode::SkipCorrupted => "skip_corrupted",
             };
 
-            log::info!(
-                target: "tonbo::wal",
-                "event=wal_enabled dir={} segment_max_bytes={} segment_max_age_ms={} segment_max_age_set={} flush_interval_ms={} sync_policy={} sync_value={} recovery_mode={} retention_bytes={} retention_bytes_set={} queue_size={} state_store_present={} prune_dry_run={} next_payload_seq={} initial_frame_seq={} tail_present={}",
+            tonbo_log!(
+                log::Level::Info,
+                ctx: WAL_LOG_CTX,
+                "wal_enabled",
+                "wal_dir={} segment_max_bytes={} segment_max_age_ms={} segment_max_age_set={} \
+                 flush_interval_ms={} sync_policy={} sync_value={} recovery_mode={} \
+                 retention_bytes={} retention_bytes_set={} queue_size={} state_store_present={} \
+                 prune_dry_run={} next_payload_seq={} initial_frame_seq={} tail_present={}",
                 cfg.dir,
                 cfg.segment_max_bytes,
                 segment_max_age_ms,

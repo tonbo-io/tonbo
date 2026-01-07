@@ -28,6 +28,7 @@ use futures::{
 };
 
 use crate::{
+    logging::{LogContext, tonbo_log},
     mvcc::Timestamp,
     wal::{
         WalAck, WalCommand, WalConfig, WalError, WalResult, WalSnapshot, WalSyncPolicy,
@@ -38,6 +39,8 @@ use crate::{
         wal_segment_file_id,
     },
 };
+
+const WAL_LOG_CTX: LogContext = LogContext::new("component=wal");
 
 // Wrapper around executor-specific sleep futures so we can store them in the timer slot.
 type SleepFuture = Pin<Box<dyn MaybeSendFuture<Output = ()>>>;
@@ -133,9 +136,11 @@ where
     let (sender, receiver) = mpsc::channel(cfg.queue_size);
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
-    log::debug!(
-        target: "tonbo::wal",
-        "event=wal_writer_spawned queue_size={} initial_segment_seq={} initial_frame_seq={} fs_tag={:?}",
+    tonbo_log!(
+        log::Level::Debug,
+        ctx: WAL_LOG_CTX,
+        "wal_writer_spawned",
+        "queue_size={} initial_segment_seq={} initial_frame_seq={} fs_tag={:?}",
         cfg.queue_size,
         initial_segment_seq,
         initial_frame_seq,
@@ -449,9 +454,11 @@ where
     ctx.queue_depth.store(0, Ordering::SeqCst);
     ctx.update_queue_depth_metric().await;
 
-    log::info!(
-        target: "tonbo::wal",
-        "event=wal_writer_shutdown synced={} active_segment_seq={} completed_segments={}",
+    tonbo_log!(
+        log::Level::Info,
+        ctx: WAL_LOG_CTX,
+        "wal_writer_shutdown",
+        "synced={} active_segment_seq={} completed_segments={}",
         shutdown_synced,
         ctx.segment_seq,
         ctx.completed_segments.len(),
@@ -592,9 +599,12 @@ where
             }
         }
         ctx.enforce_retention_limit().await?;
-        log::debug!(
-            target: "tonbo::wal",
-            "event=wal_writer_bootstrap segment_seq={} segment_bytes={} next_segment_seq={} next_frame_seq={} completed_segments={} active_segment_present={} state_dirty={}",
+        tonbo_log!(
+            log::Level::Debug,
+            ctx: WAL_LOG_CTX,
+            "wal_writer_bootstrap",
+            "segment_seq={} segment_bytes={} next_segment_seq={} next_frame_seq={} \
+             completed_segments={} active_segment_present={} state_dirty={}",
             ctx.segment_seq,
             ctx.segment_bytes,
             ctx.next_segment_seq,
@@ -844,9 +854,12 @@ where
         self.record_sealed_segment(bounds);
         self.enforce_retention_limit().await?;
 
-        log::info!(
-            target: "tonbo::wal",
-            "event=wal_segment_rotated sealed_seq={} sealed_bytes={} new_seq={} new_bytes={} sync_performed={} completed_segments={}",
+        tonbo_log!(
+            log::Level::Info,
+            ctx: WAL_LOG_CTX,
+            "wal_segment_rotated",
+            "sealed_seq={} sealed_bytes={} new_seq={} new_bytes={} sync_performed={} \
+             completed_segments={}",
             sealed_seq,
             old_bytes,
             new_seq,
@@ -994,9 +1007,11 @@ where
                 }
             }
             if removed_segments > 0 {
-                log::info!(
-                    target: "tonbo::wal",
-                    "event=wal_retention_pruned removed_segments={} removed_bytes={} retention_bytes={} retained_bytes={}",
+                tonbo_log!(
+                    log::Level::Info,
+                    ctx: WAL_LOG_CTX,
+                    "wal_retention_pruned",
+                    "removed_segments={} removed_bytes={} retention_bytes={} retained_bytes={}",
                     removed_segments,
                     removed_bytes,
                     limit,

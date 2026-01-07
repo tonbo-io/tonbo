@@ -7,6 +7,7 @@ use fusio::Read;
 use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::{
+    logging::{LogContext, tonbo_log},
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError, WalResult,
@@ -14,6 +15,8 @@ use crate::{
         storage::WalStorage,
     },
 };
+
+const WAL_LOG_CTX: LogContext = LogContext::new("component=wal");
 
 /// Scans WAL segments on disk and yields decoded events.
 pub struct Replayer {
@@ -73,16 +76,16 @@ impl Replayer {
         let segments = self.storage.list_segments_with_hint(state_hint).await?;
         let total_segments = segments.len();
         let log_completion = |events_len: usize, segments_scanned: usize| {
-            if log::log_enabled!(log::Level::Info) {
-                log::info!(
-                    target: "tonbo::wal::replay",
-                    "event=replay_completed segment_count={} segments_scanned={} events={} duration_ms={}",
-                    total_segments,
-                    segments_scanned,
-                    events_len,
-                    started_at.elapsed().as_millis(),
-                );
-            }
+            tonbo_log!(
+                log::Level::Info,
+                ctx: WAL_LOG_CTX,
+                "replay_completed",
+                "op=replay segment_count={} segments_scanned={} events={} duration_ms={}",
+                total_segments,
+                segments_scanned,
+                events_len,
+                started_at.elapsed().as_millis(),
+            );
         };
         if total_segments == 0 {
             log_completion(0, 0);
@@ -92,16 +95,16 @@ impl Replayer {
         let floor_seq = floor.map(|f| f.seq());
         let floor_first_frame = floor.map(|f| f.first_frame());
 
-        if log::log_enabled!(log::Level::Info) {
-            log::info!(
-                target: "tonbo::wal::replay",
-                "event=replay_started segment_count={} floor_present={} floor_seq={} floor_first_frame={}",
-                total_segments,
-                floor.is_some(),
-                floor_seq.unwrap_or(0),
-                floor_first_frame.unwrap_or(0),
-            );
-        }
+        tonbo_log!(
+            log::Level::Info,
+            ctx: WAL_LOG_CTX,
+            "replay_started",
+            "op=replay segment_count={} floor_present={} floor_seq={} floor_first_frame={}",
+            total_segments,
+            floor.is_some(),
+            floor_seq.unwrap_or(0),
+            floor_first_frame.unwrap_or(0),
+        );
 
         let mut events = Vec::new();
         let mut segments_scanned = 0usize;
@@ -153,9 +156,11 @@ impl Replayer {
                         // recovery returns the events observed before the partial frame. Any
                         // other corruption surfaces as an error to avoid silently skipping valid
                         // transactions further in the log.
-                        log::info!(
-                            target: "tonbo::wal::replay",
-                            "event=replay_truncated_tail segment_seq={} offset={} reason={}",
+                        tonbo_log!(
+                            log::Level::Info,
+                            ctx: WAL_LOG_CTX,
+                            "replay_truncated_tail",
+                            "op=replay segment_seq={} offset={} reason={}",
                             segment.seq,
                             offset,
                             reason,
@@ -168,9 +173,11 @@ impl Replayer {
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
-                    log::info!(
-                        target: "tonbo::wal::replay",
-                        "event=replay_truncated_payload segment_seq={} offset={} payload_end={} data_len={}",
+                    tonbo_log!(
+                        log::Level::Info,
+                        ctx: WAL_LOG_CTX,
+                        "replay_truncated_payload",
+                        "op=replay segment_seq={} offset={} payload_end={} data_len={}",
                         segment.seq,
                         offset,
                         payload_end,

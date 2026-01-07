@@ -240,6 +240,8 @@ pub(crate) mod id;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub(crate) mod key;
+/// Internal logging helpers.
+pub(crate) mod logging;
 pub(crate) mod mode;
 pub(crate) mod mutation;
 /// Convenience re-exports for common usage.
