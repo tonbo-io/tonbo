@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use aisle::Expr;
 use arrow_schema::{Schema, SchemaRef};
 use parquet::arrow::arrow_reader::RowSelection;
 
@@ -9,6 +8,7 @@ use crate::{
     key::KeyOwned,
     manifest::{SstEntry, TableSnapshot},
     mvcc::Timestamp,
+    query::Expr,
 };
 
 /// Selection information for a single SSTable scan.
@@ -160,7 +160,6 @@ fn collect_predicate_columns(predicate: &Expr, out: &mut BTreeSet<String>) {
                 collect_predicate_columns(child, out);
             }
         }
-        _ => {}
     }
 }
 

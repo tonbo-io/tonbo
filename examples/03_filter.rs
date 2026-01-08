@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 9. NOT: NOT category == 'Electronics'
     println!("\n9. NOT category == 'Electronics':");
-    let filter = Expr::not(Expr::eq("category", ScalarValue::from("Electronics")));
+    let filter = Expr::negate(Expr::eq("category", ScalarValue::from("Electronics")));
     print_products(&db, filter).await?;
 
     // 10. Complex: (Electronics OR Furniture) AND price > 100
