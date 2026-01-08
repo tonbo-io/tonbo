@@ -160,6 +160,7 @@ fn collect_predicate_columns(predicate: &Expr, out: &mut BTreeSet<String>) {
                 collect_predicate_columns(child, out);
             }
         }
+        _ => {}
     }
 }
 

@@ -7,6 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use aisle::{CmpOp, Expr};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion_common::ScalarValue;
@@ -16,10 +17,7 @@ use pin_project_lite::pin_project;
 use thiserror::Error;
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
-use crate::query::{
-    CmpOp, Expr,
-    stream::{StreamError, merge::MergeStream},
-};
+use crate::query::stream::{StreamError, merge::MergeStream};
 
 pin_project! {
     /// Stream adapter that batches merged rows into `RecordBatch` chunks.
@@ -337,6 +335,7 @@ impl ResidualEvaluator {
                 Ok(result)
             }
             Expr::Not(child) => Ok(self.evaluate_expr(child, row)?.not()),
+            _ => Err(ResidualError::UnexpectedResidual),
         }
     }
 
