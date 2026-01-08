@@ -4,7 +4,6 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
 use futures::{Stream, StreamExt, TryStreamExt, stream};
-use tonbo_predicate::Predicate;
 use typed_arrow_dyn::DynRow;
 
 use crate::{
@@ -22,7 +21,8 @@ use crate::{
         sstable::open_parquet_stream,
     },
     query::{
-        scan::{ScanPlan, projection_with_predicate},
+        Expr,
+        scan::{ScanPlan, ScanSelection, SstScanSelection, projection_with_predicate},
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
             package::PackageStream,
@@ -39,7 +39,7 @@ impl TxSnapshot {
     pub(crate) async fn plan_scan<FS, E>(
         &self,
         db: &DbInner<FS, E>,
-        predicate: &Predicate,
+        predicate: &Expr,
         projected_schema: Option<&SchemaRef>,
         limit: Option<usize>,
     ) -> Result<ScanPlan, crate::db::DBError>
@@ -59,10 +59,24 @@ impl TxSnapshot {
         let prune_input: Vec<&ImmutableSegment> =
             seal.immutables.iter().map(|arc| arc.as_ref()).collect();
         let immutable_indexes = immutable::prune_segments(&prune_input);
+        let sst_selections = self
+            .table_snapshot()
+            .latest_version
+            .as_ref()
+            .map(|v| v.ssts())
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
+            .cloned()
+            .map(SstScanSelection::all)
+            .collect();
         let read_ts = self.read_view().read_ts();
         Ok(ScanPlan {
             _predicate: predicate.clone(),
             immutable_indexes,
+            mutable_selection: ScanSelection::AllRows,
+            immutable_selection: ScanSelection::AllRows,
+            sst_selections,
             residual_predicate,
             projected_schema,
             scan_schema,
@@ -138,11 +152,16 @@ where
             streams.push(ScanStream::from(txn_scan));
         }
         let projection_schema = Arc::clone(&plan.scan_schema);
-        let mutable_scan = OwnedMutableScan::from_guard(
-            self.mem.read(),
-            Some(Arc::clone(&projection_schema)),
-            plan.read_ts,
-        )?;
+        let mutable_scan = match &plan.mutable_selection {
+            ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
+                // TODO: apply key-range/memtable pruning once selection is wired.
+                OwnedMutableScan::from_guard(
+                    self.mem.read(),
+                    Some(Arc::clone(&projection_schema)),
+                    plan.read_ts,
+                )?
+            }
+        };
         streams.push(ScanStream::from(mutable_scan));
 
         let immutables: Vec<Arc<ImmutableSegment>> = {
@@ -153,17 +172,30 @@ where
                 .collect()
         };
         for segment in immutables {
-            let owned = OwnedImmutableScan::from_arc(
-                Arc::clone(&segment),
-                Some(Arc::clone(&projection_schema)),
-                plan.read_ts,
-            )?;
+            let owned = match &plan.immutable_selection {
+                ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
+                    // TODO: apply key-range/immutable pruning once selection is wired.
+                    OwnedImmutableScan::from_arc(
+                        Arc::clone(&segment),
+                        Some(Arc::clone(&projection_schema)),
+                        plan.read_ts,
+                    )?
+                }
+            };
             streams.push(ScanStream::from(owned));
         }
 
         // Add SSTable scans for each SST entry in the plan
-        for sst_entry in plan.sst_entries() {
-            let data_path = sst_entry.data_path().clone();
+        for sst in plan.sst_selections() {
+            let (_row_groups, _row_selection) = match &sst.selection {
+                ScanSelection::Sst(selection) => (
+                    selection.row_groups.as_slice(),
+                    selection.row_selection.as_ref(),
+                ),
+                ScanSelection::AllRows | ScanSelection::KeyRange(_) => (&[][..], None),
+            };
+            // TODO: apply row group / row selection once SST pruning is wired.
+            let data_path = sst.entry.data_path().clone();
             let executor: E = (**self.executor()).clone();
             let data_stream =
                 open_parquet_stream(Arc::clone(&self.fs), data_path, None, executor.clone())
@@ -171,7 +203,7 @@ where
                     .map_err(crate::db::DBError::SsTable)?;
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
-            let delete_stream_with_extractor = if let Some(delete_path) = sst_entry.delete_path() {
+            let delete_stream_with_extractor = if let Some(delete_path) = sst.entry.delete_path() {
                 let stream = open_parquet_stream(
                     Arc::clone(&self.fs),
                     delete_path.clone(),
@@ -307,7 +339,7 @@ pub(crate) struct StagedOverlay<'a> {
 /// use arrow_schema::{DataType, Field, Schema};
 /// use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 /// use tonbo::{
-///     db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue},
+///     db::{DB, DbBuilder, Expr, ScalarValue},
 ///     schema::SchemaBuilder,
 /// };
 ///
@@ -338,7 +370,7 @@ pub(crate) struct StagedOverlay<'a> {
 ///     db.ingest(batch).await?;
 ///
 ///     // Scan with predicate + limit
-///     let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a"));
+///     let pred = Expr::eq("id", ScalarValue::Utf8(Some("a".to_string())));
 ///     let batches = db.scan().filter(pred).limit(1).collect().await?;
 ///     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 ///     Ok(())
@@ -355,7 +387,7 @@ where
     snapshot_source: SnapshotSource<'a>,
     /// Optional staged mutations overlay (Transaction scan only).
     staged_overlay: Option<StagedOverlay<'a>>,
-    predicate: Option<Predicate>,
+    predicate: Option<Expr>,
     projection: Option<SchemaRef>,
     limit: Option<usize>,
 }
@@ -426,7 +458,7 @@ where
     /// Only rows matching the predicate will be returned.
     /// If not called, all rows are returned.
     #[must_use]
-    pub fn filter(mut self, predicate: Predicate) -> Self {
+    pub fn filter(mut self, predicate: Expr) -> Self {
         self.predicate = Some(predicate);
         self
     }
@@ -463,7 +495,7 @@ where
             limit,
         } = self;
 
-        let predicate = predicate.unwrap_or_else(Predicate::always);
+        let predicate = predicate.unwrap_or(Expr::True);
 
         // Resolve snapshot: use pre-existing or create new one
         let snapshot = match snapshot_source {

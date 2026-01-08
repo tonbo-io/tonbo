@@ -15,4 +15,4 @@ default = []
 
 [dependencies]
 roaring = "0.11"
-typed-arrow-dyn = { version = "0.0.6", features = ["serde"] }
+typed-arrow-dyn = { version = "0.0.7", default-features = false, features = ["arrow-57", "serde"] }

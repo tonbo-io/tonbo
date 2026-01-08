@@ -24,7 +24,7 @@ use crate::{
     manifest::ManifestFs,
     mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
-    query::Predicate,
+    query::Expr,
     schema::SchemaBuilder,
     transaction::Snapshot as TxSnapshot,
 };
@@ -174,7 +174,7 @@ where
 pub(crate) fn plan_scan_snapshot<'a, FS, E>(
     snapshot: &'a TxSnapshot,
     db: &'a DbInner<FS, E>,
-    predicate: &'a Predicate,
+    predicate: &'a Expr,
     projected_schema: Option<&'a SchemaRef>,
     limit: Option<usize>,
 ) -> Pin<Box<dyn Future<Output = Result<crate::query::scan::ScanPlan, DBError>> + 'a>>

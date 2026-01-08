@@ -6,7 +6,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{executor::NoopExecutor, impls::mem::fs::InMemoryFs};
 
-use crate::db::{BatchesThreshold, ColumnRef, DB, Predicate, WalSyncPolicy};
+use crate::db::{BatchesThreshold, DB, Expr, WalSyncPolicy};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -55,7 +55,7 @@ async fn wasm_like_in_memory_roundtrip() -> Result<(), Box<dyn std::error::Error
 
     let db = DB::from_inner(Arc::new(inner));
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let mut rows: Vec<(String, i32)> = db
         .begin_snapshot()
         .await?

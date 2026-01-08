@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Filter + Limit: high price orders, max 2
     println!("\n3. WHERE price > 100 LIMIT 2:");
-    let filter = Predicate::gt(ColumnRef::new("price"), ScalarValue::from(100_i64));
+    let filter = Expr::gt("price", ScalarValue::from(100_i64));
     let batches = db.scan().filter(filter).limit(2).collect().await?;
     for batch in &batches {
         for o in batch.iter_views::<Order>()?.try_flatten()? {
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Filter + Projection: high-value orders, show only id and price
     println!("\n4. SELECT id, price WHERE price > 100:");
-    let filter = Predicate::gt(ColumnRef::new("price"), ScalarValue::from(100_i64));
+    let filter = Expr::gt("price", ScalarValue::from(100_i64));
     let projected_schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("price", DataType::Int64, false),
@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. All combined: Filter + Projection + Limit
     println!("\n5. SELECT id, product WHERE quantity = 1 LIMIT 3:");
-    let filter = Predicate::eq(ColumnRef::new("quantity"), ScalarValue::from(1_i64));
+    let filter = Expr::eq("quantity", ScalarValue::from(1_i64));
     let projected_schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("product", DataType::Utf8, false),

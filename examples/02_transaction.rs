@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tx.delete("u2")?;
 
     // Read-your-writes: see uncommitted changes within the transaction
-    let filter = Predicate::is_not_null(ColumnRef::new("id"));
+    let filter = Expr::is_not_null("id");
     let preview = tx.scan().filter(filter).collect().await?;
 
     println!("Before commit (read-your-writes):");
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tx.commit().await?;
 
     // Verify after commit
-    let filter = Predicate::is_not_null(ColumnRef::new("id"));
+    let filter = Expr::is_not_null("id");
     let committed = db.scan().filter(filter).collect().await?;
 
     println!("\nAfter commit:");

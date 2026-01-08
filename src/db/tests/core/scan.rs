@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{
-    db::{DB, DbInner},
+    db::{DB, DbInner, Expr, ScalarValue},
     extractor,
     inmem::policy::BatchesThreshold,
     mode::DynModeConfig,
@@ -16,7 +15,7 @@ use crate::{
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_filters_immutable_segments() {
     let db = db_with_immutable_keys(&["k1", "z1"]).await;
-    let predicate = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k1"));
+    let predicate = Expr::eq("id", ScalarValue::from("k1"));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &predicate, None, None)
@@ -31,9 +30,9 @@ async fn plan_scan_filters_immutable_segments() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_preserves_residual_predicate() {
     let db = db_with_immutable_keys(&["k1"]).await;
-    let key_pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k1"));
-    let value_pred = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(5i64));
-    let predicate = Predicate::and(vec![key_pred, value_pred]);
+    let key_pred = Expr::eq("id", ScalarValue::from("k1"));
+    let value_pred = Expr::gt("v", ScalarValue::from(5i64));
+    let predicate = Expr::and(vec![key_pred, value_pred]);
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &predicate, None, None)
@@ -45,9 +44,9 @@ async fn plan_scan_preserves_residual_predicate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_marks_empty_range() {
     let db = db_with_immutable_keys(&["k1"]).await;
-    let pred_a = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k1"));
-    let pred_b = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k2"));
-    let predicate = Predicate::and(vec![pred_a, pred_b]);
+    let pred_a = Expr::eq("id", ScalarValue::from("k1"));
+    let pred_b = Expr::eq("id", ScalarValue::from("k2"));
+    let predicate = Expr::and(vec![pred_a, pred_b]);
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &predicate, None, None)

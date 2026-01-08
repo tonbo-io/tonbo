@@ -7,7 +7,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 
 use crate::{
-    db::{BatchesThreshold, ColumnRef, DB, DbBuilder, NeverSeal, Predicate, ScalarValue},
+    db::{BatchesThreshold, DB, DbBuilder, Expr, NeverSeal, ScalarValue},
     tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
     wal::{WalExt, WalSyncPolicy},
 };
@@ -79,7 +79,7 @@ async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Erro
         .open()
         .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
     assert_eq!(
         rows,
@@ -141,7 +141,7 @@ async fn public_compaction_s3(
         .open()
         .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
     assert_eq!(
         rows,
@@ -198,7 +198,7 @@ async fn wal_rotation_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
         .open()
         .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
     assert!(
         rows.len() >= 3 * 64,
@@ -246,7 +246,7 @@ async fn wal_rotation_s3(schema: Arc<Schema>, harness: S3Harness) -> Result<(), 
         .open()
         .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
     assert!(
         rows.len() >= 3 * 64,
@@ -304,7 +304,7 @@ async fn snapshot_and_merge_local(schema: Arc<Schema>) -> Result<(), Box<dyn Err
     let db = DB::from_inner(Arc::new(inner));
 
     let snapshot = db.snapshot_at(first_ts).await?;
-    let base_predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let base_predicate = Expr::gt("v", ScalarValue::from(0i64));
     let snapshot_rows = extract_rows(
         snapshot
             .scan(&db)
@@ -395,7 +395,7 @@ async fn snapshot_and_merge_s3(
     let db = DB::from_inner(Arc::new(inner));
 
     let snapshot = db.snapshot_at(first_ts).await?;
-    let base_predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let base_predicate = Expr::gt("v", ScalarValue::from(0i64));
     let snapshot_rows = extract_rows(
         snapshot
             .scan(&db)

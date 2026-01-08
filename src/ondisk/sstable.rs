@@ -51,7 +51,7 @@ use crate::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
         scan::{ParquetStream, UnpinExec},
     },
-    query::Predicate,
+    query::Expr,
 };
 
 /// Identifier for an SSTable stored on disk.
@@ -899,7 +899,7 @@ impl SsTableReader {
     pub(crate) async fn into_stream<E>(
         self,
         _ts: Timestamp,
-        _predicate: Option<&Predicate>,
+        _predicate: Option<&Expr>,
         executor: E,
     ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError>
     where

@@ -62,11 +62,11 @@ async fn main() {
     db.ingest(batch).await.expect("insert");
 
     // Predicate over composite key: id = 'a' AND ts BETWEEN 5 AND 10
-    let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
-        Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(5i64)),
-            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
+    let pred = Expr::and(vec![
+        Expr::eq("id", ScalarValue::from("a")),
+        Expr::and(vec![
+            Expr::gt_eq("ts", ScalarValue::from(5i64)),
+            Expr::lt_eq("ts", ScalarValue::from(10i64)),
         ]),
     ]);
 

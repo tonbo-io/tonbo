@@ -124,7 +124,7 @@ async fn open_db(ctx: &RouteContext<()>) -> Result<DB<AmazonS3, WebExecutor>> {
 }
 
 async fn handle_write(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    use tonbo::db::{ColumnRef, Predicate, ScalarValue};
+    use tonbo::db::{Expr, ScalarValue};
 
     console_log!("POST /write - Opening DB...");
     let db = open_db(&ctx).await?;
@@ -147,7 +147,7 @@ async fn handle_write(_req: Request, ctx: RouteContext<()>) -> Result<Response> 
     console_log!("Write complete! Now reading back in same request...");
 
     // Read back one row to verify (keeping under subrequest limit)
-    let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("alice"));
+    let pred = Expr::eq("id", ScalarValue::from("alice"));
     let read_result = match db.scan().filter(pred).limit(1).collect().await {
         Ok(batches) => {
             let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -171,7 +171,7 @@ async fn handle_write(_req: Request, ctx: RouteContext<()>) -> Result<Response> 
 }
 
 async fn handle_read(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    use tonbo::db::{ColumnRef, Predicate, ScalarValue};
+    use tonbo::db::{Expr, ScalarValue};
 
     console_log!("GET /read - Opening DB...");
     let db = match open_db(&ctx).await {
@@ -190,7 +190,7 @@ async fn handle_read(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     // Query specific keys using filtered scan
     for key_str in ["alice", "bob"] {
         console_log!("Querying key: {}", key_str);
-        let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from(key_str));
+        let pred = Expr::eq("id", ScalarValue::from(key_str));
         match db.scan().filter(pred).limit(1).collect().await {
             Ok(batches) => {
                 let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
