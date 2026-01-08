@@ -79,3 +79,68 @@ impl KeyPredicateValue for KeyOwned {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_predicate_value_i32_from_scalar() {
+        let signed = ScalarValue::from(42i64);
+        assert_eq!(<i32 as KeyPredicateValue>::from_scalar(&signed), Some(42));
+
+        let unsigned = ScalarValue::from(42u64);
+        assert_eq!(<i32 as KeyPredicateValue>::from_scalar(&unsigned), Some(42));
+
+        let too_large = ScalarValue::from(i64::from(i32::MAX) + 1);
+        assert_eq!(<i32 as KeyPredicateValue>::from_scalar(&too_large), None);
+
+        let too_large_unsigned = ScalarValue::from(u64::from(i32::MAX as u32) + 1);
+        assert_eq!(
+            <i32 as KeyPredicateValue>::from_scalar(&too_large_unsigned),
+            None
+        );
+    }
+
+    #[test]
+    fn key_predicate_value_i64_from_scalar() {
+        let signed = ScalarValue::from(-9i64);
+        assert_eq!(<i64 as KeyPredicateValue>::from_scalar(&signed), Some(-9));
+
+        let unsigned = ScalarValue::from(9u64);
+        assert_eq!(<i64 as KeyPredicateValue>::from_scalar(&unsigned), Some(9));
+
+        let too_large = ScalarValue::from(u64::MAX);
+        assert_eq!(<i64 as KeyPredicateValue>::from_scalar(&too_large), None);
+    }
+
+    #[test]
+    fn key_owned_from_scalar_values() {
+        let null = ScalarValue::null();
+        assert_eq!(KeyOwned::from_scalar(&null), None);
+
+        let bool_val = ScalarValue::from(true);
+        assert_eq!(KeyOwned::from_scalar(&bool_val), Some(KeyOwned::from(true)));
+
+        let signed = ScalarValue::from(7i64);
+        assert_eq!(KeyOwned::from_scalar(&signed), Some(KeyOwned::from(7i64)));
+
+        let unsigned = ScalarValue::from(7u64);
+        assert_eq!(KeyOwned::from_scalar(&unsigned), Some(KeyOwned::from(7u64)));
+
+        let float_val = ScalarValue::from(1.25f64);
+        assert_eq!(
+            KeyOwned::from_scalar(&float_val),
+            Some(KeyOwned::from(1.25f64))
+        );
+
+        let text = ScalarValue::from("hello");
+        assert_eq!(KeyOwned::from_scalar(&text), Some(KeyOwned::from("hello")));
+
+        let bytes = ScalarValue::from(vec![1u8, 2, 3]);
+        assert_eq!(
+            KeyOwned::from_scalar(&bytes),
+            Some(KeyOwned::from(vec![1u8, 2, 3]))
+        );
+    }
+}

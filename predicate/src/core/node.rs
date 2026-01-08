@@ -307,3 +307,170 @@ impl Predicate {
         Predicate::from_kind(negated)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ComparisonOp, Predicate, PredicateNode};
+    use crate::core::{ColumnRef, Operand, ScalarValue};
+
+    fn cmp_predicate(op: ComparisonOp) -> Predicate {
+        Predicate::from_node(PredicateNode::Compare {
+            left: Operand::from(ColumnRef::new("a")),
+            op,
+            right: Operand::from(ScalarValue::from(1i64)),
+        })
+    }
+
+    #[test]
+    fn comparison_op_flipped_and_display() {
+        assert_eq!(ComparisonOp::Equal.flipped(), ComparisonOp::Equal);
+        assert_eq!(ComparisonOp::LessThan.flipped(), ComparisonOp::GreaterThan);
+        assert_eq!(
+            ComparisonOp::GreaterThanOrEqual.flipped(),
+            ComparisonOp::LessThanOrEqual
+        );
+        assert_eq!(ComparisonOp::NotEqual.to_string(), "!=");
+    }
+
+    #[test]
+    fn predicate_and_or_flattens_nested() {
+        let a = cmp_predicate(ComparisonOp::Equal);
+        let b = cmp_predicate(ComparisonOp::NotEqual);
+        let nested = Predicate::from_node(PredicateNode::And(vec![a.clone(), b.clone()]));
+        let combined = Predicate::and([a.clone(), nested, b.clone()]);
+        match combined.kind() {
+            PredicateNode::And(clauses) => assert_eq!(clauses.len(), 4),
+            other => panic!("expected And, got {other:?}"),
+        }
+
+        let nested_or = Predicate::from_node(PredicateNode::Or(vec![a.clone(), b.clone()]));
+        let combined_or = Predicate::or([a, nested_or, b]);
+        match combined_or.kind() {
+            PredicateNode::Or(clauses) => assert_eq!(clauses.len(), 4),
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_simplify_collapses_double_not() {
+        let wrapped = Predicate::from_node(PredicateNode::Not(Box::new(Predicate::from_node(
+            PredicateNode::Not(Box::new(Predicate::from_node(PredicateNode::True))),
+        ))));
+        assert_eq!(wrapped.simplify().kind(), &PredicateNode::True);
+    }
+
+    #[test]
+    fn predicate_negate_leaf_variants() {
+        let eq = cmp_predicate(ComparisonOp::Equal);
+        let negated = eq.negate();
+        match negated.kind() {
+            PredicateNode::Compare { op, .. } => assert_eq!(*op, ComparisonOp::NotEqual),
+            other => panic!("expected Compare, got {other:?}"),
+        }
+
+        let in_list = Predicate::from_node(PredicateNode::InList {
+            expr: Operand::from(ColumnRef::new("b")),
+            list: vec![ScalarValue::from(1i64)],
+            negated: false,
+        });
+        let toggled = in_list.negate();
+        match toggled.kind() {
+            PredicateNode::InList { negated, .. } => assert!(*negated),
+            other => panic!("expected InList, got {other:?}"),
+        }
+
+        let is_null = Predicate::from_node(PredicateNode::IsNull {
+            expr: Operand::from(ColumnRef::new("c")),
+            negated: false,
+        });
+        let toggled = is_null.negate();
+        match toggled.kind() {
+            PredicateNode::IsNull { negated, .. } => assert!(*negated),
+            other => panic!("expected IsNull, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_negate_applies_demorgan() {
+        let left = cmp_predicate(ComparisonOp::Equal);
+        let right = cmp_predicate(ComparisonOp::LessThan);
+        let predicate = Predicate::and(vec![left, right]);
+        let negated = predicate.negate();
+        match negated.kind() {
+            PredicateNode::Or(children) => {
+                assert_eq!(children.len(), 2);
+                let ops: Vec<ComparisonOp> = children
+                    .iter()
+                    .filter_map(|child| match child.kind() {
+                        PredicateNode::Compare { op, .. } => Some(*op),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(ops.contains(&ComparisonOp::NotEqual));
+                assert!(ops.contains(&ComparisonOp::GreaterThanOrEqual));
+            }
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_leaf_detection() {
+        let leaves = [
+            PredicateNode::True,
+            PredicateNode::Compare {
+                left: Operand::from(ColumnRef::new("a")),
+                op: ComparisonOp::Equal,
+                right: Operand::from(ScalarValue::from(1i64)),
+            },
+            PredicateNode::InList {
+                expr: Operand::from(ColumnRef::new("a")),
+                list: vec![ScalarValue::from(1i64)],
+                negated: false,
+            },
+            PredicateNode::IsNull {
+                expr: Operand::from(ColumnRef::new("a")),
+                negated: false,
+            },
+        ];
+        for leaf in leaves {
+            assert!(leaf.is_leaf());
+        }
+
+        let non_leaves = [
+            PredicateNode::Not(Box::new(Predicate::from_node(PredicateNode::True))),
+            PredicateNode::And(vec![Predicate::from_node(PredicateNode::True)]),
+            PredicateNode::Or(vec![Predicate::from_node(PredicateNode::True)]),
+        ];
+        for node in non_leaves {
+            assert!(!node.is_leaf());
+        }
+    }
+
+    #[test]
+    fn predicate_conjunction_and_disjunction_helpers() {
+        assert!(Predicate::conjunction(Vec::new()).is_none());
+        assert!(Predicate::disjunction(Vec::new()).is_none());
+
+        let single = cmp_predicate(ComparisonOp::Equal);
+        assert_eq!(
+            Predicate::conjunction(vec![single.clone()])
+                .expect("single conjunction")
+                .kind(),
+            single.kind()
+        );
+        assert_eq!(
+            Predicate::disjunction(vec![single.clone()])
+                .expect("single disjunction")
+                .kind(),
+            single.kind()
+        );
+
+        let left = cmp_predicate(ComparisonOp::Equal);
+        let right = cmp_predicate(ComparisonOp::LessThan);
+        let conj = Predicate::conjunction(vec![left.clone(), right.clone()]).expect("conjunction");
+        assert!(matches!(conj.kind(), PredicateNode::And(_)));
+
+        let disj = Predicate::disjunction(vec![left, right]).expect("disjunction");
+        assert!(matches!(disj.kind(), PredicateNode::Or(_)));
+    }
+}

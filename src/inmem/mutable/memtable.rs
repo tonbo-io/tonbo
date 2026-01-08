@@ -16,7 +16,7 @@ use crossbeam_skiplist::SkipMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
-use super::MutableMemTableMetrics;
+use super::{MutableMemTableMetrics, MutableMemTableMetricsSnapshot};
 use crate::{
     extractor::{self, KeyExtractError, KeyProjection, map_view_err},
     inmem::{
@@ -696,6 +696,11 @@ impl DynMem {
 
     pub(crate) fn delete_projection(&self) -> &Arc<dyn KeyProjection> {
         &self.delete_projection
+    }
+
+    /// Snapshot mutable memtable metrics.
+    pub(crate) fn metrics_snapshot(&self) -> MutableMemTableMetricsSnapshot {
+        self.inner.read().metrics.snapshot()
     }
 
     /// Consume the memtable and return any batches that were still pinned.

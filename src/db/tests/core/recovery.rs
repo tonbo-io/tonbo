@@ -23,6 +23,7 @@ use crate::{
     extractor::KeyExtractError,
     id::FileIdGenerator,
     manifest::{init_fs_manifest_in_memory, init_in_memory_manifest},
+    metrics::ObjectStoreMetrics,
     mode::{DynModeConfig, table_definition},
     mvcc::Timestamp,
     test::build_batch,
@@ -81,6 +82,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
 
     let (schema, delete_schema, commit_ack_mode, mem) = build_dyn_components(build_config)?;
     let db_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
+    let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
     let mut db = DbInner::from_components(
         schema.clone(),
         delete_schema,
@@ -91,6 +93,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         manifest_table,
         table_meta.clone(),
         Some(wal_cfg.clone()),
+        Arc::clone(&object_store_metrics),
         Arc::clone(&executor),
     );
     db.enable_wal(wal_cfg.clone()).await.expect("enable wal");
@@ -120,6 +123,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         manifest,
         manifest_table,
         table_meta.clone(),
+        object_store_metrics,
     )
     .await
     .expect("recover");
@@ -228,6 +232,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         .expect("register table");
     let manifest_table = table_meta.table_id;
     let test_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
     let db: DbInner<InMemoryFs, NoopExecutor> = DbInner::recover_with_wal_with_manifest(
         config,
         executor.clone(),
@@ -236,6 +241,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         manifest,
         manifest_table,
         table_meta,
+        object_store_metrics,
     )
     .await
     .expect("recover");

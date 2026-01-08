@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
-#![deny(clippy::unwrap_used, dead_code)]
+#![deny(clippy::unwrap_used)]
+#![cfg_attr(not(feature = "test"), deny(dead_code))]
 //! Tonbo is an embedded database for serverless data-intensive applications.
 //!
 //! - **Arrow-native schemas** with rich, typed structures
@@ -240,19 +241,28 @@ pub(crate) mod id;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub(crate) mod key;
+/// Metrics snapshots and observability surface.
+pub mod metrics;
 pub(crate) mod mode;
 pub(crate) mod mutation;
 /// Convenience re-exports for common usage.
 pub mod prelude;
 pub mod schema;
 
-#[cfg(test)]
-/// Test helper re-exports for crate-internal tests.
+#[cfg(feature = "test")]
+/// Test helper re-exports for integration and e2e tests.
 pub mod test {
     pub use crate::test_support::*;
 }
-#[cfg(test)]
+#[cfg(all(test, not(feature = "test")))]
+/// Test helper re-exports for unit tests.
+pub(crate) mod test {
+    pub(crate) use crate::test_support::*;
+}
+#[cfg(feature = "test")]
 pub mod test_support;
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests_internal;
 

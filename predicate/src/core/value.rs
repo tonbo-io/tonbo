@@ -383,3 +383,178 @@ impl<'a> PartialEq for ScalarValueRef<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use typed_arrow_dyn::DynCell;
+
+    use super::*;
+
+    fn scalar_ref<'a>(cell: &'a DynCell) -> ScalarValueRef<'a> {
+        ScalarValueRef::from_dyn(cell.as_ref().expect("scalar cell"))
+    }
+
+    #[test]
+    fn scalar_value_null_and_dyn_access() {
+        let null = ScalarValue::null();
+        assert!(null.is_null());
+        assert!(null.as_ref().is_null());
+        assert_eq!(null.compare(&ScalarValue::from(1i64)), None);
+        assert!(matches!(null.as_dyn(), DynCell::Null));
+        assert!(matches!(null.clone().into_dyn(), DynCell::Null));
+    }
+
+    #[test]
+    fn scalar_value_conversions_and_equality() {
+        let bool_val = ScalarValue::from(true);
+        assert_eq!(bool_val.as_ref().as_bool(), Some(true));
+
+        let signed = ScalarValue::from(-5i64);
+        assert_eq!(signed.as_ref().as_int_i128(), Some(-5));
+
+        let unsigned = ScalarValue::from(42u64);
+        assert_eq!(unsigned.as_ref().as_uint_u128(), Some(42));
+
+        let float_val = ScalarValue::from(1.25f64);
+        assert_eq!(float_val.as_ref().as_f64(), Some(1.25));
+
+        let text = ScalarValue::from("hi");
+        assert_eq!(text.as_ref().as_utf8(), Some("hi"));
+
+        let bytes = ScalarValue::from(&[1u8, 2][..]);
+        assert_eq!(bytes.as_ref().as_binary(), Some([1u8, 2].as_ref()));
+
+        let nan = ScalarValue::from(f64::NAN);
+        assert_eq!(nan.compare(&nan), None);
+        assert_eq!(nan, ScalarValue::from(f64::NAN));
+
+        let dyn_cell = DynCell::Str("hi".to_string());
+        assert_eq!(text.as_ref(), dyn_cell.as_ref().expect("scalar cell"));
+    }
+
+    #[test]
+    fn signed_and_unsigned_helpers_handle_widths() {
+        assert_eq!(signed_int_to_i128(&DynCellRaw::I8(-1)), Some(-1));
+        assert_eq!(signed_int_to_i128(&DynCellRaw::I16(2)), Some(2));
+        assert_eq!(signed_int_to_i128(&DynCellRaw::I32(-3)), Some(-3));
+        assert_eq!(signed_int_to_i128(&DynCellRaw::I64(4)), Some(4));
+        assert_eq!(signed_int_to_i128(&DynCellRaw::U8(5)), None);
+
+        assert_eq!(unsigned_int_to_u128(&DynCellRaw::U8(1)), Some(1));
+        assert_eq!(unsigned_int_to_u128(&DynCellRaw::U16(2)), Some(2));
+        assert_eq!(unsigned_int_to_u128(&DynCellRaw::U32(3)), Some(3));
+        assert_eq!(unsigned_int_to_u128(&DynCellRaw::U64(4)), Some(4));
+        assert_eq!(unsigned_int_to_u128(&DynCellRaw::I16(5)), None);
+    }
+
+    #[test]
+    fn scalar_value_ref_compare_and_accessors() {
+        let bool_cell = DynCell::Bool(false);
+        let bool_ref = scalar_ref(&bool_cell);
+        assert_eq!(bool_ref.as_bool(), Some(false));
+        assert_eq!(bool_ref.compare(&bool_ref), Some(Ordering::Equal));
+
+        let int_cell = DynCell::I32(-7);
+        let int_ref = scalar_ref(&int_cell);
+        assert_eq!(int_ref.as_int_i128(), Some(-7));
+        assert_eq!(int_ref.compare(&int_ref), Some(Ordering::Equal));
+
+        let uint_cell = DynCell::U32(7);
+        let uint_ref = scalar_ref(&uint_cell);
+        assert_eq!(uint_ref.as_uint_u128(), Some(7));
+        assert_eq!(uint_ref.compare(&uint_ref), Some(Ordering::Equal));
+
+        let float32_cell = DynCell::F32(1.5);
+        let float32_ref = scalar_ref(&float32_cell);
+        assert_eq!(float32_ref.as_f64(), Some(1.5));
+        assert_eq!(
+            float32_ref.compare(&scalar_ref(&DynCell::F32(2.0))),
+            Some(Ordering::Less)
+        );
+
+        let float64_cell = DynCell::F64(2.5);
+        let float64_ref = scalar_ref(&float64_cell);
+        assert_eq!(float64_ref.as_f64(), Some(2.5));
+        assert_eq!(
+            float64_ref.compare(&scalar_ref(&DynCell::F64(3.0))),
+            Some(Ordering::Less)
+        );
+
+        let text_cell = DynCell::Str("aa".to_string());
+        let text_ref = scalar_ref(&text_cell);
+        assert_eq!(text_ref.as_utf8(), Some("aa"));
+        assert_eq!(
+            text_ref.compare(&scalar_ref(&DynCell::Str("bb".to_string()))),
+            Some(Ordering::Less)
+        );
+
+        let bin_cell = DynCell::Bin(vec![1u8, 2]);
+        let bin_ref = scalar_ref(&bin_cell);
+        assert_eq!(bin_ref.as_binary(), Some([1u8, 2].as_ref()));
+        assert_eq!(
+            bin_ref.compare(&scalar_ref(&DynCell::Bin(vec![1u8, 3]))),
+            Some(Ordering::Less)
+        );
+
+        let signed_small = DynCell::I16(-1);
+        let signed_big = DynCell::I64(1);
+        assert_eq!(
+            scalar_ref(&signed_small).compare(&scalar_ref(&signed_big)),
+            Some(Ordering::Less)
+        );
+
+        let unsigned_small = DynCell::U16(9);
+        let unsigned_big = DynCell::U64(4);
+        assert_eq!(
+            scalar_ref(&unsigned_small).compare(&scalar_ref(&unsigned_big)),
+            Some(Ordering::Greater)
+        );
+
+        assert_eq!(
+            scalar_ref(&signed_small).compare(&scalar_ref(&unsigned_small)),
+            None
+        );
+
+        let null_cell = DynCell::Null;
+        assert_eq!(scalar_ref(&null_cell).compare(&bool_ref), None);
+    }
+
+    #[test]
+    fn scalar_value_ref_cells_equal_for_scalars() {
+        let left = DynCell::F64(f64::NAN);
+        let right = DynCell::F64(f64::NAN);
+        assert!(scalar_ref(&left).cells_equal(&scalar_ref(&right)));
+
+        let text_left = DynCell::Str("hi".to_string());
+        let text_right = DynCell::Str("hi".to_string());
+        assert!(scalar_ref(&text_left).cells_equal(&scalar_ref(&text_right)));
+
+        let bin_left = DynCell::Bin(vec![7u8, 8]);
+        let bin_right = DynCell::Bin(vec![7u8, 8]);
+        assert!(scalar_ref(&bin_left).cells_equal(&scalar_ref(&bin_right)));
+    }
+
+    #[test]
+    fn cells_equal_option_handles_missing() {
+        assert!(ScalarValueRef::cells_equal_option(None, None));
+
+        let left = DynCell::I64(1);
+        let right = DynCell::I64(2);
+
+        let left_ref = left.as_ref().expect("scalar cell");
+        assert!(ScalarValueRef::cells_equal_option(
+            Some(left_ref.clone()),
+            Some(left_ref)
+        ));
+
+        let left_ref = left.as_ref().expect("scalar cell");
+        let right_ref = right.as_ref().expect("scalar cell");
+        assert!(!ScalarValueRef::cells_equal_option(
+            Some(left_ref),
+            Some(right_ref)
+        ));
+
+        let left_ref = left.as_ref().expect("scalar cell");
+        assert!(!ScalarValueRef::cells_equal_option(Some(left_ref), None));
+    }
+}

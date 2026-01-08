@@ -1,0 +1,66 @@
+name: benchmarks-baseline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    name: refresh baseline artifacts
+    runs-on: ubuntu-latest
+    env:
+      GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('**/Cargo.toml') }}
+          cache-on-failure: false
+
+      - name: Run write benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: sequential_write
+          TONBO_BENCH_NUM_RECORDS: "3000"
+
+      - name: Run mixed benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: mixed
+          TONBO_BENCH_NUM_RECORDS: "1200"
+          TONBO_BENCH_VALUE_SIZE: "128"
+          TONBO_BENCH_READ_RATIO: "0.7"
+          TONBO_BENCH_WRITE_RATIO: "0.3"
+
+      - name: Run compaction benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: compaction
+          TONBO_BENCH_NUM_RECORDS: "80000"
+
+      - name: Run component benchmarks (disk)
+        run: cargo run -p tonbo-bench-runner -- --mode component --profile ci
+
+      - name: Stage refreshed baselines
+        run: |
+          set -euo pipefail
+          mkdir -p benchmarks/baselines/scenarios
+          latest() { find target/bench-results -name "$1" -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-; }
+          cp "$(latest sequential_write.json)" benchmarks/baselines/scenarios/sequential_write.json
+          cp "$(latest mixed.json)" benchmarks/baselines/scenarios/mixed.json
+          cp "$(latest compaction.json)" benchmarks/baselines/scenarios/compaction.json
+          cp "$(latest memtable_insert.json)" benchmarks/baselines/scenarios/memtable_insert.json
+          cp "$(latest wal_append.json)" benchmarks/baselines/scenarios/wal_append.json
+          cp "$(latest sst_encode.json)" benchmarks/baselines/scenarios/sst_encode.json
+          cp "$(latest iterator_scan.json)" benchmarks/baselines/scenarios/iterator_scan.json
+
+      - name: Upload baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tonbo-benchmark-baseline
+          path: benchmarks/baselines/scenarios/*.json
+          if-no-files-found: error

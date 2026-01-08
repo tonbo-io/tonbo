@@ -639,6 +639,7 @@ where
             bytes_flushed: bytes_written,
             elapsed: enqueued_at.elapsed(),
         };
+        self.record_append_latency(ack.elapsed).await;
         let sync_performed = rotation.sync_performed || sync_outcome.performed;
         let timer_directive = if rotation.performed {
             TimerDirective::Cancel
@@ -878,6 +879,11 @@ where
     async fn record_sync(&self) {
         let mut guard = self.metrics.write().await;
         guard.record_sync();
+    }
+
+    async fn record_append_latency(&self, latency: Duration) {
+        let mut guard = self.metrics.write().await;
+        guard.record_append_latency(latency);
     }
 
     fn touch_active_segment(&mut self, seq: u64) {

@@ -1,0 +1,18 @@
+backend:
+  type: disk
+  path: target/bench-tmp
+workload:
+  type: sequential_write
+  num_records: 200000
+  value_size_bytes: 512
+  read_ratio: 0.0
+  write_ratio: 1.0
+  warmup_records: 1000
+runtime:
+  concurrency: 1
+diagnostics:
+  enabled: true
+  level: basic
+  skip_physical_bytes: true
+  sample_interval_ms: 1000
+  max_samples: 120

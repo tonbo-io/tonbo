@@ -1,0 +1,10 @@
+# CI benchmark config - workload can be overridden via TONBO_BENCH_WORKLOAD env var
+backend:
+  type: disk
+  path: target/bench-tmp
+workload:
+  type: sequential_write
+  num_records: 3000
+  value_size_bytes: 256
+runtime:
+  concurrency: 1

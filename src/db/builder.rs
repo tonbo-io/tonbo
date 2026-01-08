@@ -23,6 +23,7 @@ use crate::{
         ManifestError, ManifestFs, TableMeta, TonboManifest,
         bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
     },
+    metrics::ObjectStoreMetrics,
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
     transaction::CommitAckMode,
@@ -779,6 +780,29 @@ impl DbBuilder<Unconfigured> {
         }
     }
 
+    /// Configure minor compaction before selecting a storage backend.
+    #[must_use]
+    pub fn with_minor_compaction(
+        mut self,
+        segment_threshold: usize,
+        target_level: usize,
+        start_id: u64,
+    ) -> Self {
+        self.minor_compaction = Some(MinorCompactionOptions {
+            segment_threshold,
+            target_level,
+            start_id: Some(start_id),
+        });
+        self
+    }
+
+    /// Disable automatic minor compaction entirely.
+    #[must_use]
+    pub fn disable_minor_compaction(mut self) -> Self {
+        self.minor_compaction = None;
+        self
+    }
+
     /// Select the in-memory storage backend, labelling the namespace with the
     /// provided identifier.
     pub fn in_memory(
@@ -914,7 +938,8 @@ where
     }
 
     /// Configure minor compaction (immutable flush) with a simple segment-count trigger.
-    #[cfg(test)]
+    /// Bench/test builds rely on this to drive compaction scenarios; this is intentionally
+    /// a low-level hook and not part of the stable surface yet.
     #[must_use]
     pub fn with_minor_compaction(
         mut self,
@@ -944,6 +969,7 @@ where
         start_id: u64,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<MinorCompactionState, DbBuildError>
     where
         FS: DynFs + FusioCas + 'static,
@@ -952,7 +978,8 @@ where
         let config = Arc::new(
             SsTableConfig::new(schema, route.fs, route.path.clone())
                 .with_key_extractor(extractor)
-                .with_target_level(cfg.target_level),
+                .with_target_level(cfg.target_level)
+                .with_object_store_metrics(object_store_metrics),
         );
         let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, start_id);
         Ok(MinorCompactionState::new(compactor, config))
@@ -1030,6 +1057,7 @@ where
         } = self;
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
+        let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
         let table_name = state
             .table_name()
             .cloned()
@@ -1057,6 +1085,7 @@ where
                     &table_meta,
                     sstable_schema,
                     sstable_extractor,
+                    Arc::clone(&object_store_metrics),
                 )
                 .await?,
             )
@@ -1085,6 +1114,7 @@ where
             manifest_table,
             table_meta,
             wal_cfg.clone(),
+            Arc::clone(&object_store_metrics),
             executor,
         );
 
@@ -1241,6 +1271,7 @@ where
         table_meta: &TableMeta,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<MinorCompactionState, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
@@ -1252,7 +1283,14 @@ where
             .await
             .map_err(DbBuildError::Manifest)?;
         let start_id = cfg.start_id.unwrap_or_else(|| next_sstable_id(&snapshot));
-        Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
+        Self::build_minor_compaction_state(
+            layout,
+            cfg,
+            start_id,
+            schema,
+            extractor,
+            object_store_metrics,
+        )
     }
 
     /// Internal: recover from WAL state if present, otherwise build fresh.
@@ -1275,6 +1313,7 @@ where
         } = self;
         state.prepare().await?;
         let layout = state.layout()?;
+        let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
         let mut wal_cfg = RuntimeWalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
         if let Some(overrides) = state.wal_config() {
@@ -1309,6 +1348,7 @@ where
                         &table_meta,
                         sstable_schema,
                         sstable_extractor,
+                        Arc::clone(&object_store_metrics),
                     )
                     .await?,
                 )
@@ -1323,6 +1363,7 @@ where
                 manifest,
                 manifest_table,
                 table_meta,
+                Arc::clone(&object_store_metrics),
             )
             .await
             .map_err(DbBuildError::Mode)?;

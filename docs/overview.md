@@ -59,6 +59,14 @@ Tonbo’s I/O layer, powered by **Fusio**, is *fully asynchronous from end to en
 
 This design removes runtime awareness from Tonbo’s core: the database can run on a thread-pool executor, an edge worker, or even a WASM environment with OPFS, all while maintaining non-blocking behavior and consistent durability semantics.
 
+## Metrics & Benchmarks
+
+Tonbo exposes a stable metrics snapshot API (`DB::metrics_snapshot()`) that powers both
+benchmarks and production monitoring. The benchmark harness relies on public APIs only and
+currently covers scenario runs (write-only, read-only, mixed, compaction) plus component
+benches (memtable, WAL, SST encode, iterator). Cache metrics are reserved until a cache
+implementation lands, so the snapshot leaves that section empty for now.
+
 ## First-class Object Storage
 
 Tonbo treats **object storage as the primary substrate** for durability and coordination—not just as a backup layer.

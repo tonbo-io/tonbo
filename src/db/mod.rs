@@ -10,7 +10,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
 use fusio::{
     DynFs,
-    executor::{Executor, Timer},
+    executor::{Executor, RwLock, Timer},
     mem::fs::InMemoryFs,
 };
 use futures::lock::Mutex as AsyncMutex;
@@ -41,6 +41,10 @@ use crate::{
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TableMeta, TonboManifest, VersionEdit,
         WalSegmentRef,
+    },
+    metrics::{
+        CacheMetricsSnapshot, CompactionMetrics, DbMetricsSnapshot, FlushMetrics, LatencySnapshot,
+        MemtableMetricsSnapshot, ObjectStoreMetrics, ReadPathMetrics, WalMetricsSnapshot,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
@@ -171,30 +175,42 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a DB from an inner handle.
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(feature = "test"))]
     pub(crate) fn from_inner(inner: Arc<DbInner<FS, E>>) -> Self {
         Self { inner }
     }
 
     /// Access the inner handle (for internal/testing use).
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn inner(&self) -> &Arc<DbInner<FS, E>> {
+        &self.inner
+    }
+
+    /// Access the inner handle (for unit tests).
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn inner(&self) -> &Arc<DbInner<FS, E>> {
         &self.inner
     }
 
     /// Consume the DB and return the inner handle (for testing).
     ///
     /// Panics if there are other references to the inner handle.
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn into_inner(self) -> DbInner<FS, E> {
+        Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
+    }
+
+    /// Consume the DB and return the inner handle (for unit tests).
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn into_inner(self) -> DbInner<FS, E> {
         Arc::try_unwrap(self.inner).unwrap_or_else(|_| panic!("DB has multiple references"))
     }
 
@@ -306,6 +322,11 @@ where
     pub async fn list_versions(&self, limit: usize) -> Result<Vec<Version>, ManifestError> {
         self.inner.list_versions(limit).await
     }
+
+    /// Snapshot metrics for observability and benchmark reporting.
+    pub async fn metrics_snapshot(&self) -> DbMetricsSnapshot {
+        self.inner.metrics_snapshot().await
+    }
 }
 
 impl<E> DB<InMemoryFs, E>
@@ -347,8 +368,8 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-/// This type is exposed for testing purposes via the `test-helpers` feature.
-#[cfg(test)]
+/// This type is exposed for testing purposes via the `test` feature.
+#[cfg(feature = "test")]
 #[doc(hidden)]
 pub struct DbInner<FS, E>
 where
@@ -391,12 +412,20 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Aggregated flush metrics for observability.
+    flush_metrics: FlushMetrics,
+    /// Compaction metrics (major compaction).
+    compaction_metrics: Arc<CompactionMetrics>,
+    /// Read-path metrics aggregated across scans.
+    read_metrics: Arc<ReadPathMetrics>,
+    /// Object-store metrics for Tonbo-managed I/O.
+    object_store_metrics: Arc<ObjectStoreMetrics>,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
 ///
 /// Users should interact with [`DB`] instead, which wraps this in an `Arc`.
-#[cfg(not(test))]
+#[cfg(not(feature = "test"))]
 pub(crate) struct DbInner<FS, E>
 where
     FS: ManifestFs<E>,
@@ -438,6 +467,14 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
+    /// Aggregated flush metrics for observability.
+    flush_metrics: FlushMetrics,
+    /// Compaction metrics (major compaction).
+    compaction_metrics: Arc<CompactionMetrics>,
+    /// Read-path metrics aggregated across scans.
+    read_metrics: Arc<ReadPathMetrics>,
+    /// Object-store metrics for Tonbo-managed I/O.
+    object_store_metrics: Arc<ObjectStoreMetrics>,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -520,6 +557,7 @@ where
         manifest_table: TableId,
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
         executor: Arc<E>,
     ) -> Self {
         Self {
@@ -542,6 +580,10 @@ where
             compaction_worker: None,
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
+            flush_metrics: FlushMetrics::default(),
+            compaction_metrics: Arc::new(CompactionMetrics::default()),
+            read_metrics: Arc::new(ReadPathMetrics::default()),
+            object_store_metrics,
         }
     }
 
@@ -554,6 +596,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(
             config,
@@ -563,6 +606,7 @@ where
             manifest,
             manifest_table,
             table_meta,
+            object_store_metrics,
         )
         .await
     }
@@ -576,6 +620,7 @@ where
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         table_meta: TableMeta,
+        object_store_metrics: Arc<ObjectStoreMetrics>,
     ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
@@ -596,6 +641,7 @@ where
             manifest_table,
             table_meta,
             Some(wal_cfg.clone()),
+            Arc::clone(&object_store_metrics),
             executor,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
@@ -677,8 +723,13 @@ where
     }
 
     /// Table ID registered in the manifest for this DB.
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn table_id(&self) -> TableId {
+        self.manifest_table
+    }
+
+    #[cfg(all(test, not(feature = "test")))]
+    pub(crate) fn table_id(&self) -> TableId {
         self.manifest_table
     }
 
@@ -779,6 +830,76 @@ where
             .collect())
     }
 
+    /// Snapshot metrics for observability and benchmark reporting.
+    pub async fn metrics_snapshot(&self) -> DbMetricsSnapshot {
+        let wal_snapshot = if let Some(handle) = self.wal_handle() {
+            let metrics = handle.metrics();
+            let guard = metrics.read().await;
+            let append_latency = if guard.append_events > 0 {
+                Some(LatencySnapshot {
+                    count: guard.append_events,
+                    total_us: guard.append_latency_total_us,
+                    max_us: guard.append_latency_max_us,
+                    min_us: guard.append_latency_min_us,
+                })
+            } else {
+                None
+            };
+            Some(WalMetricsSnapshot {
+                queue_depth: guard.queue_depth,
+                max_queue_depth: Some(guard.max_queue_depth),
+                bytes_written: guard.bytes_written,
+                sync_operations: guard.sync_operations,
+                wal_floor_advancements: guard.wal_floor_advancements,
+                wal_segments_pruned: guard.wal_segments_pruned,
+                wal_prune_dry_runs: guard.wal_prune_dry_runs,
+                wal_prune_failures: guard.wal_prune_failures,
+                append_latency,
+            })
+        } else {
+            None
+        };
+
+        let flush_snapshot = self.flush_metrics.snapshot();
+        let flush = if flush_snapshot.flush_count == 0 {
+            None
+        } else {
+            Some(flush_snapshot)
+        };
+        let memtable = Some(MemtableMetricsSnapshot::from(self.mem.metrics_snapshot()));
+        let compaction = Some(self.compaction_metrics.snapshot());
+        let read_path = Some(self.read_metrics.snapshot());
+        let object_store = Some(self.object_store_metrics.snapshot());
+        let cache = None::<CacheMetricsSnapshot>;
+
+        DbMetricsSnapshot {
+            wal: wal_snapshot,
+            flush,
+            memtable,
+            compaction,
+            read_path,
+            cache,
+            object_store,
+        }
+    }
+
+    pub(crate) fn read_metrics(&self) -> Arc<ReadPathMetrics> {
+        Arc::clone(&self.read_metrics)
+    }
+
+    pub(crate) fn object_store_metrics(&self) -> &ObjectStoreMetrics {
+        self.object_store_metrics.as_ref()
+    }
+
+    /// Clone the object-store metrics handle for wiring into helpers.
+    pub(crate) fn object_store_metrics_arc(&self) -> Arc<ObjectStoreMetrics> {
+        Arc::clone(&self.object_store_metrics)
+    }
+
+    pub(crate) fn compaction_metrics(&self) -> Arc<CompactionMetrics> {
+        Arc::clone(&self.compaction_metrics)
+    }
+
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&self) -> Timestamp {
         self.commit_clock.alloc()
@@ -804,6 +925,7 @@ where
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
+        let flush_started = self.executor.now();
         let _guard = self.flush_lock.lock().await;
         let (immutables_snapshot, flush_count) = {
             let seal_read = self.seal_state_lock();
@@ -901,6 +1023,10 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
+                let duration = flush_started.elapsed();
+                let bytes = descriptor_ref.stats().map(|s| s.bytes as u64).unwrap_or(0);
+                self.flush_metrics.record(bytes, duration);
+                self.object_store_metrics.record_write(bytes);
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -954,6 +1080,7 @@ where
             .map_err(manifest_error_as_key_extract)?;
         let manifest_table = table_meta.table_id;
         let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let object_store_metrics = Arc::new(ObjectStoreMetrics::default());
         Ok(Self::from_components(
             schema,
             delete_schema,
@@ -964,6 +1091,7 @@ where
             manifest_table,
             table_meta,
             None,
+            object_store_metrics,
             executor,
         ))
     }

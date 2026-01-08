@@ -9,8 +9,11 @@ repository = "https://github.com/tonbo-io/tonbo"
 readme = "README.md"
 
 [workspace]
-members = [".", "predicate"]
-
+members = [
+    ".",
+    "predicate",
+    "tools/tonbo-bench-runner",
+]
 
 [features]
 default = ["tokio", "typed-arrow"]
@@ -35,6 +38,8 @@ web = [
 web-opfs = ["fusio/opfs", "web"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
+# Enable test-only helpers for integration and e2e tests outside the crate.
+test = []
 
 [dependencies]
 anyhow = "1"
@@ -92,6 +97,11 @@ clap = { version = "4.5.4", features = ["derive"] }
 futures = "0.3"
 tempfile = "3"
 typed-arrow = { version = "0.5.1", features = ["ext-hooks"] }
+serde_yaml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-credential-types = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", default-features = false, features = [
@@ -117,6 +127,14 @@ required-features = ["tokio"]
 name = "s3_smoke"
 path = "tests/s3_smoke.rs"
 required-features = ["tokio"]
+
+[[bench]]
+name = "tonbo_scenarios"
+harness = false
+
+[[bench]]
+name = "tonbo_components"
+harness = false
 
 [[example]]
 name = "10a_dynamic_basic"

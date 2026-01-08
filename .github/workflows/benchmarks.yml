@@ -1,0 +1,83 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  scenarios:
+    name: scenario benchmarks (gated)
+    runs-on: ubuntu-latest
+    env:
+      GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('**/Cargo.toml') }}
+          cache-on-failure: false
+
+      - name: Run write benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: sequential_write
+          TONBO_BENCH_NUM_RECORDS: "3000"
+
+      - name: Run mixed benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: mixed
+          TONBO_BENCH_NUM_RECORDS: "1200"
+          TONBO_BENCH_VALUE_SIZE: "128"
+          TONBO_BENCH_READ_RATIO: "0.7"
+          TONBO_BENCH_WRITE_RATIO: "0.3"
+
+      - name: Run compaction benchmark
+        run: cargo run -p tonbo-bench-runner -- --mode scenario --config benches/harness/configs/ci.yaml
+        env:
+          TONBO_BENCH_WORKLOAD: compaction
+          TONBO_BENCH_NUM_RECORDS: "80000"
+
+      - name: Run component benchmarks (disk)
+        run: cargo run -p tonbo-bench-runner -- --mode component --profile ci
+
+      - name: Compare against baseline
+        id: compare
+        continue-on-error: true
+        run: |
+          cargo run -p tonbo-bench-runner -- compare \
+            --current target/bench-results \
+            --baseline benchmarks/baselines/scenarios \
+            --thresholds benches/harness/configs/regression-thresholds.yaml \
+            --missing-baseline warn \
+            --report target/bench-results/regression-report.json
+
+      - name: Generate performance report
+        if: ${{ always() }}
+        run: |
+          cargo run -p tonbo-bench-runner -- report \
+            --results-dir target/bench-results \
+            --limit 10 \
+            --output-md target/bench-reports/perf-report.md \
+            --output-json target/bench-reports/perf-report.json
+
+      - name: Upload benchmark artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tonbo-benchmarks
+          path: |
+            target/bench-results/**/*.json
+            target/bench-results/regression-report.json
+            target/bench-reports/perf-report.md
+            target/bench-reports/perf-report.json
+          if-no-files-found: ignore
+
+      - name: Fail on regression
+        if: ${{ steps.compare.outcome == 'failure' }}
+        run: exit 1

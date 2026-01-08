@@ -4,15 +4,14 @@
 
 use fusio::executor::{Executor, Timer};
 
-use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
-#[cfg(all(test, feature = "tokio"))]
-use crate::{
-    compaction::{
-        executor::{CompactionError, CompactionExecutor, CompactionOutcome},
-        planner::CompactionPlanner,
-    },
-    manifest::ManifestResult,
+#[cfg(all(any(test, feature = "test"), feature = "tokio"))]
+use crate::compaction::{
+    executor::{CompactionError, CompactionExecutor, CompactionOutcome},
+    planner::CompactionPlanner,
 };
+#[cfg(all(test, feature = "tokio"))]
+use crate::manifest::ManifestResult;
+use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
 
 impl<FS, E> DbInner<FS, E>
 where
@@ -35,6 +34,7 @@ where
             self.manifest_table,
             self.wal_config.clone(),
             self.wal_handle().cloned(),
+            self.compaction_metrics(),
         )
     }
 
@@ -62,7 +62,7 @@ where
     }
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
-    #[cfg(all(test, feature = "tokio"))]
+    #[cfg(all(any(test, feature = "test"), feature = "tokio"))]
     pub(crate) async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,

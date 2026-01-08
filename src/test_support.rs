@@ -1,7 +1,7 @@
-//! Test-only utilities (compiled under `cfg(test)` only).
+//! Test-only utilities (compiled under `cfg(test)` or the `test` feature).
 //!
-//! These helpers are not part of the public API surface for consumers. They exist solely
-//! to support integration/e2e tests without requiring a "test-helpers" feature.
+//! These helpers are not part of the public API surface for consumers. They exist to support
+//! integration/e2e tests when `--features test` is enabled.
 
 #![allow(dead_code)]
 
@@ -20,14 +20,14 @@ use crate::{
         },
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot, CompactionTask},
     },
-    db::{DBError, DbInner},
+    db::DbInner,
     manifest::ManifestFs,
     mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
-    query::Predicate,
     schema::SchemaBuilder,
-    transaction::Snapshot as TxSnapshot,
 };
+#[cfg(test)]
+use crate::{db::DBError, query::Predicate, transaction::Snapshot as TxSnapshot};
 
 /// Trait for types that can be converted into a `DynRow`.
 pub(crate) trait IntoDynRow {
@@ -61,8 +61,7 @@ pub(crate) fn build_batch<R: IntoDynRow>(
     builders.try_finish_into_batch()
 }
 
-/// Convenience helper that builds a DynMode configuration with embedded PK metadata.
-pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {
+fn config_with_pk_impl(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {
     assert!(
         !primary_key.is_empty(),
         "schema builder requires at least one primary-key column",
@@ -82,8 +81,20 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
         .expect("schema builder configuration should succeed")
 }
 
+/// Convenience helper that builds a DynMode configuration with embedded PK metadata.
+#[cfg(feature = "test")]
+pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {
+    config_with_pk_impl(fields, primary_key)
+}
+
+/// Convenience helper that builds a DynMode configuration with embedded PK metadata.
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {
+    config_with_pk_impl(fields, primary_key)
+}
+
 /// Test-only helper to flush immutables using a provided descriptor.
-pub fn flush_immutables<'a, FS, E>(
+fn flush_immutables_impl<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     config: Arc<SsTableConfig>,
     descriptor: SsTableDescriptor,
@@ -100,8 +111,38 @@ where
     })
 }
 
+/// Test-only helper to flush immutables using a provided descriptor.
+#[cfg(feature = "test")]
+pub fn flush_immutables<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+    config: Arc<SsTableConfig>,
+    descriptor: SsTableDescriptor,
+) -> Pin<Box<dyn Future<Output = Result<(), SsTableError>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    flush_immutables_impl(db, config, descriptor)
+}
+
+/// Test-only helper to flush immutables using a provided descriptor.
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) fn flush_immutables<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+    config: Arc<SsTableConfig>,
+    descriptor: SsTableDescriptor,
+) -> Pin<Box<dyn Future<Output = Result<(), SsTableError>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    flush_immutables_impl(db, config, descriptor)
+}
+
 /// Test-only helper to trigger WAL pruning below the manifest floor.
-pub fn prune_wal_segments_below_floor<'a, FS, E>(
+fn prune_wal_segments_below_floor_impl<'a, FS, E>(
     db: &'a DbInner<FS, E>,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>>
 where
@@ -112,9 +153,34 @@ where
     Box::pin(async move { db.prune_wal_segments_below_floor().await })
 }
 
+/// Test-only helper to trigger WAL pruning below the manifest floor.
+#[cfg(feature = "test")]
+pub fn prune_wal_segments_below_floor<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    prune_wal_segments_below_floor_impl(db)
+}
+
+/// Test-only helper to trigger WAL pruning below the manifest floor.
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) fn prune_wal_segments_below_floor<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    prune_wal_segments_below_floor_impl(db)
+}
+
 /// Test-only wrapper to run a compaction task and surface the outcome.
-#[allow(private_bounds, private_interfaces)]
-pub fn run_compaction_task<'a, FS, E, P>(
+fn run_compaction_task_impl<'a, FS, E, P>(
     db: &'a DbInner<FS, E>,
     planner: &'a P,
     executor: &'a impl CompactionExecutor,
@@ -128,8 +194,41 @@ where
     Box::pin(async move { db.run_compaction_task(planner, executor).await })
 }
 
+/// Test-only wrapper to run a compaction task and surface the outcome.
+#[cfg(feature = "test")]
+#[allow(private_bounds, private_interfaces)]
+pub fn run_compaction_task<'a, FS, E, P>(
+    db: &'a DbInner<FS, E>,
+    planner: &'a P,
+    executor: &'a impl CompactionExecutor,
+) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    P: CompactionPlanner + Sync,
+{
+    run_compaction_task_impl(db, planner, executor)
+}
+
+/// Test-only wrapper to run a compaction task and surface the outcome.
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) fn run_compaction_task<'a, FS, E, P>(
+    db: &'a DbInner<FS, E>,
+    planner: &'a P,
+    executor: &'a impl CompactionExecutor,
+) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    P: CompactionPlanner + Sync,
+{
+    run_compaction_task_impl(db, planner, executor)
+}
+
 /// Helper to merge specific L0 SST ids into a target level using the local executor.
-pub fn compact_merge_l0<'a, FS, E>(
+fn compact_merge_l0_impl<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     sst_ids: Vec<u64>,
     target_level: u32,
@@ -170,7 +269,42 @@ where
     })
 }
 
+/// Helper to merge specific L0 SST ids into a target level using the local executor.
+#[cfg(feature = "test")]
+pub fn compact_merge_l0<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+    sst_ids: Vec<u64>,
+    target_level: u32,
+    sst_cfg: Arc<SsTableConfig>,
+    start_id: u64,
+) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    compact_merge_l0_impl(db, sst_ids, target_level, sst_cfg, start_id)
+}
+
+/// Helper to merge specific L0 SST ids into a target level using the local executor.
+#[cfg(all(test, not(feature = "test")))]
+pub(crate) fn compact_merge_l0<'a, FS, E>(
+    db: &'a DbInner<FS, E>,
+    sst_ids: Vec<u64>,
+    target_level: u32,
+    sst_cfg: Arc<SsTableConfig>,
+    start_id: u64,
+) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>
+where
+    FS: ManifestFs<E> + 'a,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    compact_merge_l0_impl(db, sst_ids, target_level, sst_cfg, start_id)
+}
+
 /// Plan a scan using a snapshot.
+#[cfg(test)]
 pub(crate) fn plan_scan_snapshot<'a, FS, E>(
     snapshot: &'a TxSnapshot,
     db: &'a DbInner<FS, E>,
@@ -191,6 +325,7 @@ where
 }
 
 /// Execute a prepared scan plan and stream `RecordBatch` results.
+#[cfg(test)]
 pub(crate) fn execute_scan_plan<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     plan: crate::query::scan::ScanPlan,
@@ -213,6 +348,7 @@ where
 }
 
 // Re-export test-only types to make internal tests more concise.
+#[allow(unused_imports)]
 pub(crate) use crate::{
     ondisk::sstable::{
         SsTableConfig as TestSsTableConfig, SsTableDescriptor as TestSsTableDescriptor,

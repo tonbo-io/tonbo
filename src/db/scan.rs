@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, pin::Pin, sync::Arc, time::Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -48,6 +48,7 @@ impl TxSnapshot {
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
+        let started = Instant::now();
         let projected_schema = projected_schema.cloned();
         let residual_predicate = Some(predicate.clone());
         let scan_schema = if let Some(projection) = projected_schema.as_ref() {
@@ -60,7 +61,7 @@ impl TxSnapshot {
             seal.immutables.iter().map(|arc| arc.as_ref()).collect();
         let immutable_indexes = immutable::prune_segments(&prune_input);
         let read_ts = self.read_view().read_ts();
-        Ok(ScanPlan {
+        let plan = ScanPlan {
             _predicate: predicate.clone(),
             immutable_indexes,
             residual_predicate,
@@ -69,7 +70,9 @@ impl TxSnapshot {
             limit,
             read_ts,
             _snapshot: self.table_snapshot().clone(),
-        })
+        };
+        db.read_metrics().record_plan(started.elapsed());
+        Ok(plan)
     }
 }
 
@@ -117,6 +120,7 @@ where
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
             residual_predicate,
+            Some(self.read_metrics()),
             limit,
         )
         .map_err(crate::db::DBError::from)?;
@@ -165,10 +169,15 @@ where
         for sst_entry in plan.sst_entries() {
             let data_path = sst_entry.data_path().clone();
             let executor: E = (**self.executor()).clone();
-            let data_stream =
-                open_parquet_stream(Arc::clone(&self.fs), data_path, None, executor.clone())
-                    .await
-                    .map_err(crate::db::DBError::SsTable)?;
+            let data_stream = open_parquet_stream(
+                Arc::clone(&self.fs),
+                data_path,
+                None,
+                executor.clone(),
+                Some(self.object_store_metrics()),
+            )
+            .await
+            .map_err(crate::db::DBError::SsTable)?;
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
             let delete_stream_with_extractor = if let Some(delete_path) = sst_entry.delete_path() {
@@ -177,6 +186,7 @@ where
                     delete_path.clone(),
                     None,
                     executor.clone(),
+                    Some(self.object_store_metrics()),
                 )
                 .await
                 .map_err(crate::db::DBError::SsTable)?;
@@ -558,6 +568,7 @@ where
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
         residual_predicate,
+        Some(db.read_metrics()),
         limit,
     )
     .map_err(crate::db::DBError::from)?;

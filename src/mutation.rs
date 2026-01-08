@@ -17,3 +17,17 @@ impl<U, D> fmt::Debug for DynMutation<U, D> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DynMutation;
+
+    #[test]
+    fn debug_labels_variants() {
+        let upsert: DynMutation<i32, i32> = DynMutation::Upsert(1);
+        assert_eq!(format!("{upsert:?}"), "DynMutation::Upsert");
+
+        let delete: DynMutation<i32, i32> = DynMutation::Delete(2);
+        assert_eq!(format!("{delete:?}"), "DynMutation::Delete");
+    }
+}

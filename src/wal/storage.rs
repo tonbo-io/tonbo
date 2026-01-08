@@ -11,10 +11,13 @@ use fusio::{
 };
 use futures::StreamExt;
 
-use crate::wal::{
-    WalError, WalResult,
-    frame::{FRAME_HEADER_SIZE, FrameHeader},
-    state::{WalStateHandle, WalStateStore},
+use crate::{
+    metrics::ObjectStoreMetrics,
+    wal::{
+        WalError, WalResult,
+        frame::{FRAME_HEADER_SIZE, FrameHeader},
+        state::{WalStateHandle, WalStateStore},
+    },
 };
 
 /// Shared storage facade for WAL segments backed by fusio.
@@ -24,12 +27,24 @@ pub(crate) struct WalStorage {
     fs: Arc<dyn DynFs>,
     /// Root directory under which WAL segments are stored.
     root: Path,
+    /// Optional metrics sink for storage operations.
+    metrics: Option<Arc<ObjectStoreMetrics>>,
 }
 
 impl WalStorage {
     /// Create a new storage facade over the provided filesystem.
     pub(crate) fn new(fs: Arc<dyn DynFs>, root: Path) -> Self {
-        Self { fs, root }
+        Self {
+            fs,
+            root,
+            metrics: None,
+        }
+    }
+
+    /// Attach object-store metrics for recording storage operations.
+    pub(crate) fn with_metrics(mut self, metrics: Arc<ObjectStoreMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Access the underlying filesystem.
@@ -65,9 +80,23 @@ impl WalStorage {
 
     /// Remove an existing WAL segment by path.
     pub(crate) async fn remove_segment(&self, path: &Path) -> WalResult<()> {
-        self.fs.remove(path).await.map_err(|err| {
-            WalError::Storage(format!("failed to remove wal segment {}: {}", path, err))
-        })
+        match self.fs.remove(path).await {
+            Ok(()) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_delete();
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
+                Err(WalError::Storage(format!(
+                    "failed to remove wal segment {}: {}",
+                    path, err
+                )))
+            }
+        }
     }
 
     /// Expose convenience to create the WAL directory structure.
@@ -114,11 +143,19 @@ impl WalStorage {
     ) -> WalResult<Vec<SegmentDescriptor>> {
         let mut entries = Vec::new();
         let mut stream = match self.fs.list(&self.root).await {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_list();
+                }
+                stream
+            }
             Err(FusioError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
                 return Ok(entries);
             }
             Err(err) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
                 return Err(WalError::Storage(format!(
                     "failed to list wal dir {}: {}",
                     self.root.as_ref(),
@@ -129,6 +166,9 @@ impl WalStorage {
 
         while let Some(meta_result) = stream.next().await {
             let meta = meta_result.map_err(|err| {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
                 WalError::Storage(format!(
                     "failed to read wal metadata under {}: {}",
                     self.root.as_ref(),
@@ -228,16 +268,30 @@ impl WalStorage {
     async fn list_segments_from_root(&self) -> WalResult<Vec<SegmentDescriptor>> {
         let mut entries = Vec::new();
         let root_prefix = Path::default();
-        let mut fallback_stream = self.fs.list(&root_prefix).await.map_err(|err| {
-            WalError::Storage(format!(
-                "failed fallback listing for wal dir {}: {}",
-                self.root.as_ref(),
-                err
-            ))
-        })?;
+        let mut fallback_stream = match self.fs.list(&root_prefix).await {
+            Ok(stream) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_list();
+                }
+                stream
+            }
+            Err(err) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
+                return Err(WalError::Storage(format!(
+                    "failed fallback listing for wal dir {}: {}",
+                    self.root.as_ref(),
+                    err
+                )));
+            }
+        };
 
         while let Some(meta_result) = fallback_stream.next().await {
             let meta = meta_result.map_err(|err| {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
                 WalError::Storage(format!(
                     "failed to read wal metadata under {} during fallback: {}",
                     self.root.as_ref(),
@@ -440,16 +494,23 @@ impl WalStorage {
             .open_options(&path, Self::read_options())
             .await
             .map_err(|err| {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_error();
+                }
                 WalError::Storage(format!(
                     "failed to open wal segment {} for size: {}",
                     path, err
                 ))
             })?;
-        let size = file
-            .size()
-            .await
-            .map_err(|err| backend_err("determine wal segment size", err))?
-            as usize;
+        let size = file.size().await.map_err(|err| {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.record_error();
+            }
+            backend_err("determine wal segment size", err)
+        })? as usize;
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics.record_head();
+        }
         Ok(Some(SegmentDescriptor {
             seq,
             path,

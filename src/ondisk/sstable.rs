@@ -46,6 +46,7 @@ use crate::{
     },
     key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
+    metrics::ObjectStoreMetrics,
     mvcc::Timestamp,
     ondisk::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
@@ -82,6 +83,7 @@ pub struct SsTableConfig {
     compression: SsTableCompression,
     fs: Arc<dyn DynFs>,
     root: Path,
+    object_store_metrics: Option<Arc<ObjectStoreMetrics>>,
     key_extractor: Option<Arc<dyn KeyProjection>>,
     merge_iteration_budget: usize,
 }
@@ -95,6 +97,7 @@ impl SsTableConfig {
             compression: SsTableCompression::default(),
             fs,
             root,
+            object_store_metrics: None,
             key_extractor: None,
             merge_iteration_budget: DEFAULT_MERGE_ITERATION_BUDGET,
         }
@@ -109,6 +112,12 @@ impl SsTableConfig {
     /// Choose the compression strategy applied to persisted pages.
     pub fn with_compression(mut self, compression: SsTableCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Attach object-store metrics for SST-level operations.
+    pub(crate) fn with_object_store_metrics(mut self, metrics: Arc<ObjectStoreMetrics>) -> Self {
+        self.object_store_metrics = Some(metrics);
         self
     }
 
@@ -130,6 +139,11 @@ impl SsTableConfig {
     /// Access the Parquet-backed store used to create or read tables.
     pub fn fs(&self) -> &Arc<dyn DynFs> {
         &self.fs
+    }
+
+    /// Access the object-store metrics sink, if configured.
+    pub(crate) fn object_store_metrics(&self) -> Option<&ObjectStoreMetrics> {
+        self.object_store_metrics.as_deref()
     }
 
     /// Root directory prefix for all SSTable files.
@@ -912,9 +926,9 @@ impl SsTableReader {
             })?;
         // ParquetStream<E> is Unpin, so we can use it directly without Box::pin
         let data_stream =
-            open_parquet_stream(fs.clone(), data_path, None, executor.clone()).await?;
+            open_parquet_stream(fs.clone(), data_path, None, executor.clone(), None).await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(open_parquet_stream(fs, path.clone(), None, executor).await?)
+            Some(open_parquet_stream(fs, path.clone(), None, executor, None).await?)
         } else {
             None
         };
@@ -972,11 +986,13 @@ pub(crate) async fn open_parquet_stream<E>(
     path: Path,
     projection: Option<ProjectionMask>,
     executor: E,
+    metrics: Option<&ObjectStoreMetrics>,
 ) -> Result<ParquetStream<E>, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection, executor).await?;
+    let (stream, _schema) =
+        open_parquet_stream_with_schema(fs, path, projection, executor, metrics).await?;
     Ok(stream)
 }
 
@@ -987,12 +1003,33 @@ pub(crate) async fn open_parquet_stream_with_schema<E>(
     path: Path,
     projection: Option<ProjectionMask>,
     executor: E,
+    metrics: Option<&ObjectStoreMetrics>,
 ) -> Result<(ParquetStream<E>, SchemaRef), SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(&path).await?;
-    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let file = match fs.open(&path).await {
+        Ok(file) => file,
+        Err(err) => {
+            if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
+            return Err(err.into());
+        }
+    };
+    let size = match file.size().await {
+        Ok(size) => size,
+        Err(err) => {
+            if let Some(metrics) = metrics {
+                metrics.record_error();
+            }
+            return Err(SsTableError::Fs(err));
+        }
+    };
+    if let Some(metrics) = metrics {
+        metrics.record_head();
+        metrics.record_read(size);
+    }
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
