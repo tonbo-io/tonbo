@@ -1915,6 +1915,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
         );
+        let expected_path = path.to_string();
         let file = fs
             .open_options(
                 &path,
@@ -1950,6 +1951,16 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(SsTableError::MissingPageIndex { .. })));
+        let err = result.expect_err("expected missing page index error");
+        match err {
+            SsTableError::MissingPageIndex { path, reason } => {
+                assert_eq!(path, expected_path);
+                assert!(
+                    reason.contains("column index"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
