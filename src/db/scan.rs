@@ -408,10 +408,22 @@ where
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
             let delete_stream_with_extractor = if let Some(delete_path) = sst.entry.delete_path() {
+                let delete_path = delete_path.clone();
+                let SstProjectionPlan {
+                    projection: delete_projection,
+                    ..
+                } = build_sst_projection_plan(
+                    Arc::clone(&self.fs),
+                    &delete_path,
+                    &key_schema,
+                    &key_schema,
+                    executor.clone(),
+                )
+                .await?;
                 let stream = open_parquet_stream(
                     Arc::clone(&self.fs),
-                    delete_path.clone(),
-                    None,
+                    delete_path,
+                    Some(delete_projection),
                     None,
                     None,
                     None,
@@ -419,7 +431,6 @@ where
                 )
                 .await
                 .map_err(crate::db::DBError::SsTable)?;
-                // Delete sidecar uses key-only schema
                 Some(DeleteStreamWithExtractor {
                     stream,
                     extractor: Arc::clone(self.delete_extractor()),
