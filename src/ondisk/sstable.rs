@@ -11,7 +11,7 @@
 //! projection and page/index pruning, and are safe for both local disk and
 //! S3-compatible backends.
 
-use std::{convert::TryFrom, fmt, sync::Arc};
+use std::{collections::BTreeSet, convert::TryFrom, fmt, sync::Arc};
 
 use aisle::RowFilter as AisleRowFilter;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
@@ -61,6 +61,8 @@ use crate::{
     },
     query::{Expr, ScalarValue},
 };
+
+const MVCC_SEQUENCE_COL: &str = "_sequence";
 
 /// Identifier for an SSTable stored on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -937,7 +939,37 @@ impl SsTableReader {
         )
         .await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(open_parquet_stream(fs, path.clone(), None, None, None, None, executor).await?)
+            let delete_path = path.clone();
+            let delete_projection = if let Some(extractor) = self.config.key_extractor() {
+                let mut required = BTreeSet::new();
+                for field in extractor.key_schema().fields() {
+                    required.insert(field.name().to_string());
+                }
+                required.insert(MVCC_COMMIT_COL.to_string());
+                Some(
+                    build_projection_mask_for_names(
+                        Arc::clone(&fs),
+                        &delete_path,
+                        &required,
+                        executor.clone(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            Some(
+                open_parquet_stream(
+                    fs,
+                    delete_path,
+                    delete_projection,
+                    None,
+                    None,
+                    None,
+                    executor,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -1062,6 +1094,56 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
         Expr::Not(child) => row_filter_expr(child, schema).map(|expr| Expr::Not(Box::new(expr))),
         _ => None,
     }
+}
+
+async fn build_projection_mask_for_names<E>(
+    fs: Arc<dyn DynFs>,
+    path: &Path,
+    required: &BTreeSet<String>,
+    executor: E,
+) -> Result<ProjectionMask, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let file = fs.open(path).await.map_err(SsTableError::Fs)?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let metadata = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Optional)
+        .load_and_finish(&mut reader, size)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
+    let file_schema = arrow_metadata.schema();
+    let parquet_schema = arrow_metadata.parquet_schema();
+
+    let mut remaining = required.clone();
+    if file_schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == MVCC_SEQUENCE_COL)
+    {
+        remaining.insert(MVCC_SEQUENCE_COL.to_string());
+    }
+
+    let mut root_indices = Vec::new();
+    for (idx, field) in file_schema.fields().iter().enumerate() {
+        if remaining.remove(field.name()) {
+            root_indices.push(idx);
+        }
+    }
+
+    if let Some(missing) = remaining.iter().next() {
+        return Err(SsTableError::KeyExtract(KeyExtractError::NoSuchField {
+            name: missing.to_string(),
+        }));
+    }
+
+    Ok(ProjectionMask::roots(parquet_schema, root_indices))
 }
 
 fn column_type<'a>(schema: &'a SchemaRef, column: &str) -> Option<&'a DataType> {
