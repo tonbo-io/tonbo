@@ -38,7 +38,7 @@ s3-smoke = []
 
 [dependencies]
 anyhow = "1"
-aisle = { git = "https://github.com/tonbo-io/aisle", branch = "main", default-features = false }
+aisle = { git = "https://github.com/tonbo-io/aisle", branch = "main", default-features = false, features = ["row_filter"] }
 arrow-array = "57.1.0"
 arrow-buffer = "57.1.0"
 arrow-ipc = "57.1.0"

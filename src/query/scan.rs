@@ -14,8 +14,8 @@ use crate::{
 /// Selection information for a single SSTable scan.
 #[derive(Clone, Debug)]
 pub(crate) struct SstSelection {
-    /// Row groups to include. Empty means all row groups.
-    pub(crate) row_groups: Vec<usize>,
+    /// Row groups to include. None means all row groups.
+    pub(crate) row_groups: Option<Vec<usize>>,
     /// Optional row-level selection within chosen row groups.
     pub(crate) row_selection: Option<RowSelection>,
 }
@@ -23,7 +23,7 @@ pub(crate) struct SstSelection {
 impl SstSelection {
     pub(crate) fn all() -> Self {
         Self {
-            row_groups: Vec::new(),
+            row_groups: None,
             row_selection: None,
         }
     }

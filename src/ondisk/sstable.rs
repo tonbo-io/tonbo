@@ -13,6 +13,7 @@
 
 use std::{convert::TryFrom, fmt, sync::Arc};
 
+use aisle::RowFilter as AisleRowFilter;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take as arrow_take;
@@ -27,7 +28,9 @@ use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
 use futures::stream::{self, BoxStream, StreamExt};
 use parquet::{
     arrow::{
-        ProjectionMask, async_reader::ParquetRecordBatchStreamBuilder,
+        ProjectionMask,
+        arrow_reader::{ArrowReaderOptions, RowFilter as ParquetRowFilter, RowSelection},
+        async_reader::ParquetRecordBatchStreamBuilder,
         async_writer::AsyncArrowWriter,
     },
     basic::{Compression, ZstdLevel},
@@ -51,7 +54,7 @@ use crate::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
         scan::{ParquetStream, UnpinExec},
     },
-    query::Expr,
+    query::{Expr, ScalarValue},
 };
 
 /// Identifier for an SSTable stored on disk.
@@ -899,7 +902,7 @@ impl SsTableReader {
     pub(crate) async fn into_stream<E>(
         self,
         _ts: Timestamp,
-        _predicate: Option<&Expr>,
+        predicate: Option<&Expr>,
         executor: E,
     ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError>
     where
@@ -911,10 +914,18 @@ impl SsTableReader {
                 SsTableError::InvalidPath("missing data path on descriptor".into())
             })?;
         // ParquetStream<E> is Unpin, so we can use it directly without Box::pin
-        let data_stream =
-            open_parquet_stream(fs.clone(), data_path, None, executor.clone()).await?;
+        let data_stream = open_parquet_stream(
+            fs.clone(),
+            data_path,
+            None,
+            None,
+            None,
+            predicate,
+            executor.clone(),
+        )
+        .await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(open_parquet_stream(fs, path.clone(), None, executor).await?)
+            Some(open_parquet_stream(fs, path.clone(), None, None, None, None, executor).await?)
         } else {
             None
         };
@@ -967,16 +978,146 @@ impl SsTableReader {
     }
 }
 
+fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
+    match predicate {
+        Expr::True => None,
+        Expr::False => Some(Expr::False),
+        Expr::Cmp { column, value, .. } => {
+            if scalar_matches_column(schema, column, value) {
+                Some(predicate.clone())
+            } else {
+                None
+            }
+        }
+        Expr::Between {
+            column, low, high, ..
+        } => {
+            if scalar_matches_column(schema, column, low)
+                && scalar_matches_column(schema, column, high)
+            {
+                Some(predicate.clone())
+            } else {
+                None
+            }
+        }
+        Expr::InList { column, values } => {
+            if scalars_match_column(schema, column, values) {
+                Some(predicate.clone())
+            } else {
+                None
+            }
+        }
+        Expr::StartsWith { column, .. } => {
+            if is_string_column(schema, column) {
+                Some(predicate.clone())
+            } else {
+                None
+            }
+        }
+        Expr::IsNull { column, .. } => {
+            if column_type(schema, column).is_some() {
+                Some(predicate.clone())
+            } else {
+                None
+            }
+        }
+        Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => None,
+        Expr::And(children) => {
+            let mut supported = Vec::new();
+            for child in children {
+                if let Some(expr) = row_filter_expr(child, schema) {
+                    supported.push(expr);
+                }
+            }
+            match supported.len() {
+                0 => None,
+                1 => Some(supported.remove(0)),
+                _ => Some(Expr::And(supported)),
+            }
+        }
+        Expr::Or(children) => {
+            let mut supported = Vec::new();
+            for child in children {
+                let expr = row_filter_expr(child, schema)?;
+                supported.push(expr);
+            }
+            match supported.len() {
+                0 => None,
+                1 => Some(supported.remove(0)),
+                _ => Some(Expr::Or(supported)),
+            }
+        }
+        Expr::Not(child) => row_filter_expr(child, schema).map(|expr| Expr::Not(Box::new(expr))),
+        _ => None,
+    }
+}
+
+fn column_type<'a>(schema: &'a SchemaRef, column: &str) -> Option<&'a DataType> {
+    schema
+        .fields()
+        .iter()
+        .find(|field| field.name() == column)
+        .map(|field| field.data_type())
+}
+
+fn scalar_matches_type(value: &ScalarValue, data_type: &DataType) -> bool {
+    if matches!(value, ScalarValue::Null) {
+        return false;
+    }
+    value.data_type() == *data_type
+}
+
+fn scalar_matches_column(schema: &SchemaRef, column: &str, value: &ScalarValue) -> bool {
+    let Some(data_type) = column_type(schema, column) else {
+        return false;
+    };
+    scalar_matches_type(value, data_type)
+}
+
+fn scalars_match_column(schema: &SchemaRef, column: &str, values: &[ScalarValue]) -> bool {
+    let Some(data_type) = column_type(schema, column) else {
+        return false;
+    };
+    values
+        .iter()
+        .all(|value| scalar_matches_type(value, data_type))
+}
+
+fn is_string_column(schema: &SchemaRef, column: &str) -> bool {
+    column_type(schema, column)
+        .map(is_string_type)
+        .unwrap_or(false)
+}
+
+fn is_string_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
+}
+
 pub(crate) async fn open_parquet_stream<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
+    row_groups: Option<Vec<usize>>,
+    row_selection: Option<RowSelection>,
+    row_filter_predicate: Option<&Expr>,
     executor: E,
 ) -> Result<ParquetStream<E>, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection, executor).await?;
+    let (stream, _schema) = open_parquet_stream_with_schema(
+        fs,
+        path,
+        projection,
+        row_groups,
+        row_selection,
+        row_filter_predicate,
+        executor,
+    )
+    .await?;
     Ok(stream)
 }
 
@@ -986,6 +1127,9 @@ pub(crate) async fn open_parquet_stream_with_schema<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
+    row_groups: Option<Vec<usize>>,
+    row_selection: Option<RowSelection>,
+    row_filter_predicate: Option<&Expr>,
     executor: E,
 ) -> Result<(ParquetStream<E>, SchemaRef), SsTableError>
 where
@@ -997,12 +1141,25 @@ where
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
         .map_err(SsTableError::Fs)?;
-    let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
+    let options = ArrowReaderOptions::new()
+        .with_page_index(row_selection.is_some() || row_filter_predicate.is_some());
+    let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(reader, options)
         .await
         .map_err(SsTableError::Parquet)?;
     let schema = builder.schema().clone();
+    if let Some(predicate) = row_filter_predicate.and_then(|pred| row_filter_expr(pred, &schema)) {
+        let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
+        let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
+        builder = builder.with_row_filter(row_filter);
+    }
     let mask = projection.unwrap_or_else(ProjectionMask::all);
     builder = builder.with_projection(mask);
+    if let Some(row_groups) = row_groups {
+        builder = builder.with_row_groups(row_groups);
+    }
+    if let Some(selection) = row_selection {
+        builder = builder.with_row_selection(selection);
+    }
     let stream = builder.build().map_err(SsTableError::Parquet)?;
     Ok((stream, schema))
 }

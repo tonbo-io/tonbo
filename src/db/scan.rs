@@ -1,9 +1,17 @@
 use std::{collections::BTreeMap, pin::Pin, sync::Arc};
 
+use aisle::PruneRequest;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use fusio::executor::{Executor, Timer};
+use fusio::{
+    DynFs,
+    executor::{Executor, Timer},
+};
+use fusio_parquet::reader::AsyncReader;
 use futures::{Stream, StreamExt, TryStreamExt, stream};
+use parquet::arrow::{
+    arrow_reader::ArrowReaderOptions, async_reader::ParquetRecordBatchStreamBuilder,
+};
 use typed_arrow_dyn::DynRow;
 
 use crate::{
@@ -17,12 +25,14 @@ use crate::{
     mutation::DynMutation,
     mvcc::Timestamp,
     ondisk::{
-        scan::{DeleteStreamWithExtractor, SstableScan},
-        sstable::open_parquet_stream,
+        scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
+        sstable::{SsTableError, open_parquet_stream},
     },
     query::{
         Expr,
-        scan::{ScanPlan, ScanSelection, SstScanSelection, projection_with_predicate},
+        scan::{
+            ScanPlan, ScanSelection, SstScanSelection, SstSelection, projection_with_predicate,
+        },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
             package::PackageStream,
@@ -49,17 +59,26 @@ impl TxSnapshot {
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         let projected_schema = projected_schema.cloned();
-        let residual_predicate = Some(predicate.clone());
+        let residual_predicate = if matches!(predicate, Expr::True) {
+            None
+        } else {
+            Some(predicate.clone())
+        };
         let scan_schema = if let Some(projection) = projected_schema.as_ref() {
             projection_with_predicate(&db.schema, projection, residual_predicate.as_ref())?
         } else {
-            Arc::clone(&db.schema)
+            projection_with_predicate(&db.schema, &db.schema, residual_predicate.as_ref())?
         };
-        let seal = db.seal_state_lock();
-        let prune_input: Vec<&ImmutableSegment> =
-            seal.immutables.iter().map(|arc| arc.as_ref()).collect();
-        let immutable_indexes = immutable::prune_segments(&prune_input);
-        let sst_selections = self
+        let immutable_indexes = {
+            let seal = db.seal_state_lock();
+            let prune_input: Vec<&ImmutableSegment> =
+                seal.immutables.iter().map(|arc| arc.as_ref()).collect();
+            immutable::prune_segments(&prune_input)
+        };
+        let fs = Arc::clone(&db.fs);
+        let executor: E = (**db.executor()).clone();
+        let mut sst_selections = Vec::new();
+        for entry in self
             .table_snapshot()
             .latest_version
             .as_ref()
@@ -67,9 +86,19 @@ impl TxSnapshot {
             .unwrap_or(&[])
             .iter()
             .flatten()
-            .cloned()
-            .map(SstScanSelection::all)
-            .collect();
+        {
+            let selection = prune_sst_selection(
+                Arc::clone(&fs),
+                entry.data_path(),
+                predicate,
+                executor.clone(),
+            )
+            .await?;
+            sst_selections.push(SstScanSelection {
+                entry: entry.clone(),
+                selection: ScanSelection::Sst(selection),
+            });
+        }
         let read_ts = self.read_view().read_ts();
         Ok(ScanPlan {
             _predicate: predicate.clone(),
@@ -85,6 +114,48 @@ impl TxSnapshot {
             _snapshot: self.table_snapshot().clone(),
         })
     }
+}
+
+async fn prune_sst_selection<E>(
+    fs: Arc<dyn DynFs>,
+    data_path: &fusio::path::Path,
+    predicate: &Expr,
+    executor: E,
+) -> Result<SstSelection, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let file = fs.open(data_path).await?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let builder = ParquetRecordBatchStreamBuilder::new_with_options(reader, options)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    let metadata = builder.metadata();
+    let schema = builder.schema();
+    let prune_result = PruneRequest::new(metadata.as_ref(), schema.as_ref())
+        .with_predicate(predicate)
+        .enable_page_index(true)
+        .prune();
+    let mut row_groups = prune_result.row_groups().to_vec();
+    // Preserve PK-ascending scan order by keeping row groups in file order.
+    row_groups.sort_unstable();
+    row_groups.dedup();
+    let row_selection = prune_result.row_selection().cloned();
+    let total_row_groups = metadata.num_row_groups();
+    let row_groups = if row_groups.len() == total_row_groups {
+        None
+    } else {
+        Some(row_groups)
+    };
+
+    Ok(SstSelection {
+        row_groups,
+        row_selection,
+    })
 }
 
 impl<FS, E> DbInner<FS, E>
@@ -120,9 +191,18 @@ where
             limit,
             ..
         } = plan;
-        // Don't pass limit to MergeStream - it should be applied after predicate
-        // evaluation in PackageStream.
-        let merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
+        let limit_for_merge = if residual_predicate.is_none() {
+            limit
+        } else {
+            None
+        };
+        let limit_for_package = if residual_predicate.is_some() {
+            limit
+        } else {
+            None
+        };
+        // Only apply limit early when there is no residual predicate to evaluate.
+        let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;
         let package = PackageStream::with_limit(
@@ -131,7 +211,7 @@ where
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
             residual_predicate,
-            limit,
+            limit_for_package,
         )
         .map_err(crate::db::DBError::from)?;
 
@@ -187,26 +267,35 @@ where
 
         // Add SSTable scans for each SST entry in the plan
         for sst in plan.sst_selections() {
-            let (_row_groups, _row_selection) = match &sst.selection {
+            let (row_groups, row_selection) = match &sst.selection {
                 ScanSelection::Sst(selection) => (
-                    selection.row_groups.as_slice(),
-                    selection.row_selection.as_ref(),
+                    selection.row_groups.clone(),
+                    selection.row_selection.clone(),
                 ),
-                ScanSelection::AllRows | ScanSelection::KeyRange(_) => (&[][..], None),
+                ScanSelection::AllRows | ScanSelection::KeyRange(_) => (None, None),
             };
-            // TODO: apply row group / row selection once SST pruning is wired.
             let data_path = sst.entry.data_path().clone();
             let executor: E = (**self.executor()).clone();
-            let data_stream =
-                open_parquet_stream(Arc::clone(&self.fs), data_path, None, executor.clone())
-                    .await
-                    .map_err(crate::db::DBError::SsTable)?;
+            let data_stream = open_parquet_stream(
+                Arc::clone(&self.fs),
+                data_path,
+                None,
+                row_groups,
+                row_selection,
+                Some(&plan._predicate),
+                executor.clone(),
+            )
+            .await
+            .map_err(crate::db::DBError::SsTable)?;
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
             let delete_stream_with_extractor = if let Some(delete_path) = sst.entry.delete_path() {
                 let stream = open_parquet_stream(
                     Arc::clone(&self.fs),
                     delete_path.clone(),
+                    None,
+                    None,
+                    None,
                     None,
                     executor.clone(),
                 )
@@ -579,9 +668,18 @@ where
         limit,
         ..
     } = plan;
-    // Don't pass limit to MergeStream - it should be applied after predicate
-    // evaluation in PackageStream. Otherwise, limit counts rows before filtering.
-    let merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
+    let limit_for_merge = if residual_predicate.is_none() {
+        limit
+    } else {
+        None
+    };
+    let limit_for_package = if residual_predicate.is_some() {
+        limit
+    } else {
+        None
+    };
+    // Only apply limit early when there is no residual predicate to evaluate.
+    let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
         .await
         .map_err(crate::db::DBError::from)?;
     let package = PackageStream::with_limit(
@@ -590,7 +688,7 @@ where
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
         residual_predicate,
-        limit,
+        limit_for_package,
     )
     .map_err(crate::db::DBError::from)?;
 

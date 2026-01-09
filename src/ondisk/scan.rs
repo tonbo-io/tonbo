@@ -874,9 +874,17 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
-            .await
-            .expect("open stream");
+        let data_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            data_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open stream");
 
         let read_ts = Timestamp::new(20);
         let projection_indices = vec![0, 1];
@@ -954,12 +962,28 @@ mod tests {
         .await;
 
         // Open both streams for streaming merge
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
-            .await
-            .expect("open stream");
-        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
-            .await
-            .expect("delete stream");
+        let data_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            data_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open stream");
+        let delete_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            delete_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
@@ -1030,9 +1054,17 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
-            .await
-            .expect("open stream");
+        let data_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            data_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
@@ -1110,12 +1142,28 @@ mod tests {
         .await;
 
         // Open both streams for streaming merge
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
-            .await
-            .expect("open stream");
-        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
-            .await
-            .expect("delete stream");
+        let data_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            data_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open stream");
+        let delete_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            delete_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
