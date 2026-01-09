@@ -271,6 +271,53 @@ async fn scan_row_filter_respects_tombstones() {
     assert!(ids.is_empty(), "tombstoned row should not be visible");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_sst_non_prefix_projection_returns_correct_values() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("a", DataType::Int32, false),
+        Field::new("b", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let rows = vec![
+        DynRow(vec![
+            Some(DynCell::Str("id1".into())),
+            Some(DynCell::I32(1)),
+            Some(DynCell::I32(10)),
+        ]),
+        DynRow(vec![
+            Some(DynCell::Str("id2".into())),
+            Some(DynCell::I32(2)),
+            Some(DynCell::I32(20)),
+        ]),
+    ];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let sst_cfg = Arc::new(SsTableConfig::new(
+        schema.clone(),
+        Arc::clone(&db.fs),
+        Path::from("scan-projection"),
+    ));
+    let descriptor = SsTableDescriptor::new(SsTableId::new(3), 0);
+    db.flush_immutables_with_descriptor(sst_cfg, descriptor)
+        .await
+        .expect("flush");
+
+    let projection = Arc::new(Schema::new(vec![Field::new("b", DataType::Int32, false)]));
+    let predicate = Expr::gt("a", ScalarValue::from(1i32));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, Some(&projection), None)
+        .await
+        .expect("plan");
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let values = collect_i32s(&batches, 0);
+    assert_eq!(values, vec![20]);
+}
+
 async fn db_with_immutable_keys(keys: &[&str]) -> DbInner<InMemoryFs, NoopExecutor> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -361,4 +408,19 @@ fn collect_ids(batches: &[RecordBatch]) -> Vec<String> {
         }
     }
     ids
+}
+
+fn collect_i32s(batches: &[RecordBatch], column_idx: usize) -> Vec<i32> {
+    let mut values = Vec::new();
+    for batch in batches {
+        let col = batch
+            .column(column_idx)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 column");
+        for idx in 0..batch.num_rows() {
+            values.push(col.value(idx));
+        }
+    }
+    values
 }

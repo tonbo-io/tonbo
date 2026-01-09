@@ -158,6 +158,27 @@ where
     })
 }
 
+fn scan_projection_indices(
+    base_schema: &SchemaRef,
+    scan_schema: &SchemaRef,
+) -> Result<Vec<usize>, KeyExtractError> {
+    let mut indices = Vec::with_capacity(scan_schema.fields().len());
+    for field in scan_schema.fields() {
+        let Some((idx, _)) = base_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.name() == field.name())
+        else {
+            return Err(KeyExtractError::NoSuchField {
+                name: field.name().to_string(),
+            });
+        };
+        indices.push(idx);
+    }
+    Ok(indices)
+}
+
 impl<FS, E> DbInner<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
@@ -311,7 +332,7 @@ where
             };
 
             // Calculate projection indices for user columns (exclude _commit_ts)
-            let projection_indices: Vec<usize> = (0..projection_schema.fields().len()).collect();
+            let projection_indices = scan_projection_indices(&self.schema, &projection_schema)?;
 
             let sstable_scan = SstableScan::new(
                 data_stream,
