@@ -187,9 +187,9 @@ struct DeleteEntry {
 }
 
 /// Delete stream with its extractor (key-only schema).
-pub(crate) struct DeleteStreamWithExtractor<'t, E: Executor> {
+pub(crate) struct DeleteStreamWithExtractor<E: Executor> {
     pub stream: ParquetStream<E>,
-    pub extractor: &'t dyn KeyProjection,
+    pub extractor: Arc<dyn KeyProjection>,
 }
 
 // SSTable scan with MVCC visibility filtering using streaming merge.
@@ -200,7 +200,7 @@ pub(crate) struct DeleteStreamWithExtractor<'t, E: Executor> {
 // 3. When keys match, higher timestamp wins; on tie, delete wins
 // 4. Deduplicates by key - emits only the latest visible version per key
 pin_project! {
-    pub(crate) struct SstableScan<'t, E>
+    pub(crate) struct SstableScan<E>
     where
         E: Executor,
     {
@@ -208,14 +208,14 @@ pin_project! {
         data_stream: ParquetStream<E>,
         #[pin]
         delete_stream: Option<ParquetStream<E>>,
-        data_iter: Option<DataBatchIterator<'t>>,
-        delete_iter: Option<DeleteBatchIterator<'t>>,
+        data_iter: Option<DataBatchIterator>,
+        delete_iter: Option<DeleteBatchIterator>,
         // Peeked entries for merge comparison
         peeked_data: Option<DataEntry>,
         peeked_delete: Option<DeleteEntry>,
         projection_indices: Vec<usize>,
-        data_extractor: &'t dyn KeyProjection,
-        delete_extractor: Option<&'t dyn KeyProjection>,
+        data_extractor: Arc<dyn KeyProjection>,
+        delete_extractor: Option<Arc<dyn KeyProjection>>,
         order: Option<Order>,
         read_ts: Timestamp,
         // Current key being processed (for dedup)
@@ -225,7 +225,7 @@ pin_project! {
     }
 }
 
-impl<'t, E> SstableScan<'t, E>
+impl<E> SstableScan<E>
 where
     E: Executor + Clone + 'static,
 {
@@ -242,8 +242,8 @@ where
     /// * `read_ts` - Snapshot timestamp for visibility filtering
     pub fn new(
         data_stream: ParquetStream<E>,
-        delete_stream: Option<DeleteStreamWithExtractor<'t, E>>,
-        data_extractor: &'t dyn KeyProjection,
+        delete_stream: Option<DeleteStreamWithExtractor<E>>,
+        data_extractor: Arc<dyn KeyProjection>,
         projection_indices: Vec<usize>,
         order: Option<Order>,
         read_ts: Timestamp,
@@ -270,7 +270,7 @@ where
     }
 }
 
-impl<'t, E> Stream for SstableScan<'t, E>
+impl<E> Stream for SstableScan<E>
 where
     E: Executor + Clone + 'static,
 {
@@ -286,7 +286,7 @@ where
                 match poll_next_data_entry(
                     this.data_stream.as_mut(),
                     this.data_iter,
-                    *this.data_extractor,
+                    &*this.data_extractor,
                     this.projection_indices,
                     *this.order,
                     *this.read_ts,
@@ -305,6 +305,7 @@ where
             {
                 let delete_extractor = this
                     .delete_extractor
+                    .as_ref()
                     .expect("delete extractor must be set when delete stream exists");
                 match poll_next_delete_entry(
                     delete_stream_pin,
@@ -453,10 +454,10 @@ fn process_delete_entry(
 }
 
 /// Poll for the next visible data entry from the data stream.
-fn poll_next_data_entry<'t, E: Executor + Clone + 'static>(
+fn poll_next_data_entry<E: Executor + Clone + 'static>(
     mut data_stream: Pin<&mut ParquetStream<E>>,
-    data_iter: &mut Option<DataBatchIterator<'t>>,
-    extractor: &'t dyn KeyProjection,
+    data_iter: &mut Option<DataBatchIterator>,
+    extractor: &Arc<dyn KeyProjection>,
     projection_indices: &[usize],
     order: Option<Order>,
     read_ts: Timestamp,
@@ -501,7 +502,7 @@ fn poll_next_data_entry<'t, E: Executor + Clone + 'static>(
         *data_iter = match DataBatchIterator::new(
             batch,
             projection_indices.to_vec(),
-            extractor,
+            Arc::clone(extractor),
             mvcc,
             order,
         ) {
@@ -512,10 +513,10 @@ fn poll_next_data_entry<'t, E: Executor + Clone + 'static>(
 }
 
 /// Poll for the next visible delete entry from the delete stream.
-fn poll_next_delete_entry<'t, E: Executor + Clone + 'static>(
+fn poll_next_delete_entry<E: Executor + Clone + 'static>(
     mut delete_stream: Pin<&mut ParquetStream<E>>,
-    delete_iter: &mut Option<DeleteBatchIterator<'t>>,
-    extractor: &'t dyn KeyProjection,
+    delete_iter: &mut Option<DeleteBatchIterator>,
+    extractor: &Arc<dyn KeyProjection>,
     read_ts: Timestamp,
     cx: &mut Context<'_>,
 ) -> Poll<Option<Result<DeleteEntry, SstableScanError>>> {
@@ -545,7 +546,7 @@ fn poll_next_delete_entry<'t, E: Executor + Clone + 'static>(
             Err(e) => return Poll::Ready(Some(Err(SstableScanError::Parquet(e)))),
         };
 
-        *delete_iter = match DeleteBatchIterator::new(batch, extractor) {
+        *delete_iter = match DeleteBatchIterator::new(batch, Arc::clone(extractor)) {
             Ok(iter) => Some(iter),
             Err(e) => return Poll::Ready(Some(Err(e))),
         };
@@ -553,10 +554,10 @@ fn poll_next_delete_entry<'t, E: Executor + Clone + 'static>(
 }
 
 /// Iterator over data rows in a RecordBatch.
-struct DataBatchIterator<'t> {
+struct DataBatchIterator {
     /// Arc-wrapped batch to allow sharing with yielded entries.
     batch: Arc<RecordBatch>,
-    extractor: &'t dyn KeyProjection,
+    extractor: Arc<dyn KeyProjection>,
     dyn_schema: DynSchema,
     projection: DynProjection,
     mvcc: MvccColumns,
@@ -564,11 +565,11 @@ struct DataBatchIterator<'t> {
     remaining: usize,
 }
 
-impl<'t> DataBatchIterator<'t> {
+impl DataBatchIterator {
     pub(crate) fn new(
         record_batch: RecordBatch,
         projection_indices: Vec<usize>,
-        extractor: &'t dyn KeyProjection,
+        extractor: Arc<dyn KeyProjection>,
         mvcc: MvccColumns,
         _order: Option<Order>,
     ) -> Result<Self, SstableScanError> {
@@ -601,7 +602,7 @@ impl<'t> DataBatchIterator<'t> {
     }
 }
 
-impl<'t> Iterator for DataBatchIterator<'t> {
+impl Iterator for DataBatchIterator {
     /// Yields (Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw, KeyOwned).
     type Item = Result<(Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw, KeyOwned), SstableScanError>;
 
@@ -657,18 +658,18 @@ impl<'t> Iterator for DataBatchIterator<'t> {
 }
 
 /// Iterator over delete entries in a RecordBatch (delete sidecar).
-struct DeleteBatchIterator<'t> {
+struct DeleteBatchIterator {
     batch: RecordBatch,
-    extractor: &'t dyn KeyProjection,
+    extractor: Arc<dyn KeyProjection>,
     commit_col: UInt64Array,
     offset: usize,
     remaining: usize,
 }
 
-impl<'t> DeleteBatchIterator<'t> {
+impl DeleteBatchIterator {
     pub(crate) fn new(
         batch: RecordBatch,
-        extractor: &'t dyn KeyProjection,
+        extractor: Arc<dyn KeyProjection>,
     ) -> Result<Self, SstableScanError> {
         let commit_col = batch
             .column_by_name(MVCC_COMMIT_COL)
@@ -691,7 +692,7 @@ impl<'t> DeleteBatchIterator<'t> {
     }
 }
 
-impl<'t> Iterator for DeleteBatchIterator<'t> {
+impl Iterator for DeleteBatchIterator {
     /// Yields (KeyOwned, Timestamp) for each delete entry.
     type Item = Result<(KeyOwned, Timestamp), SstableScanError>;
 
@@ -761,7 +762,10 @@ mod tests {
     use fusio::{disk::LocalFs, dynamic::DynFs, executor::NoopExecutor, path::Path};
     use fusio_parquet::writer::AsyncWriter;
     use futures::StreamExt;
-    use parquet::arrow::AsyncArrowWriter;
+    use parquet::{
+        arrow::{AsyncArrowWriter, ProjectionMask},
+        file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
+    };
     use tempfile::tempdir;
 
     use super::*;
@@ -790,6 +794,49 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(ids)),
                 Arc::new(Int32Array::from(values)),
+                Arc::new(UInt64Array::from(timestamps)),
+            ],
+        )
+        .expect("batch");
+
+        let file = fs
+            .open_options(
+                &path,
+                fusio::fs::OpenOptions::default().create(true).write(true),
+            )
+            .await
+            .expect("open file");
+        let writer = AsyncWriter::new(file, NoopExecutor);
+        let mut arrow_writer =
+            AsyncArrowWriter::try_new(writer, Arc::clone(&schema), None).expect("arrow writer");
+        arrow_writer.write(&batch).await.expect("write batch");
+        arrow_writer.close().await.expect("close");
+    }
+
+    /// Helper to write a data Parquet file with an extra column for projection tests
+    async fn write_data_parquet_with_extra(
+        fs: Arc<dyn DynFs>,
+        path: Path,
+        rows: Vec<(&str, i32, i32, u64)>, // (key, value, extra, commit_ts)
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+            Field::new("extra", DataType::Int32, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+
+        let ids: Vec<&str> = rows.iter().map(|(k, _, _, _)| *k).collect();
+        let values: Vec<i32> = rows.iter().map(|(_, v, _, _)| *v).collect();
+        let extras: Vec<i32> = rows.iter().map(|(_, _, extra, _)| *extra).collect();
+        let timestamps: Vec<u64> = rows.iter().map(|(_, _, _, ts)| *ts).collect();
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(ids)),
+                Arc::new(Int32Array::from(values)),
+                Arc::new(Int32Array::from(extras)),
                 Arc::new(UInt64Array::from(timestamps)),
             ],
         )
@@ -847,6 +894,56 @@ mod tests {
     }
 
     #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
+    async fn parquet_projection_reads_key_and_commit_ts() {
+        let tmpdir = tempdir().expect("tempdir");
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let root = Path::from(tmpdir.path().to_string_lossy().to_string());
+
+        let data_path = root.child("data.parquet");
+        write_data_parquet_with_extra(Arc::clone(&fs), data_path.clone(), vec![("a", 1, 10, 5)])
+            .await;
+
+        let file = fs.open(&data_path).await.expect("open");
+        let size = file.size().await.expect("size");
+        let mut reader = AsyncReader::new(file, size, UnpinExec(NoopExecutor))
+            .await
+            .expect("reader");
+        let metadata = ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Optional)
+            .load_and_finish(&mut reader, size)
+            .await
+            .expect("metadata");
+        let schema_descr = metadata.file_metadata().schema_descr();
+        let mask = ProjectionMask::roots(schema_descr, vec![0, 1, 3]);
+
+        let mut data_stream = open_parquet_stream(
+            Arc::clone(&fs),
+            data_path,
+            Some(mask),
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open stream");
+
+        let batch = data_stream
+            .next()
+            .await
+            .transpose()
+            .expect("batch result")
+            .expect("batch");
+        let schema = batch.schema();
+        let fields: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(fields, vec!["id", "v", MVCC_COMMIT_COL]);
+    }
+
+    #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
     async fn read_ts_filters_future_data() {
         // Test: rows with commit_ts > read_ts should not be visible
         let tmpdir = tempdir().expect("tempdir");
@@ -858,8 +955,10 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let extractor =
-            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0)
+                .expect("extractor")
+                .into();
 
         // Write data Parquet file with rows at different timestamps
         let data_path = root.child("data.parquet");
@@ -892,7 +991,7 @@ mod tests {
         let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
             None, // no delete sidecar
-            extractor.as_ref(),
+            extractor,
             projection_indices,
             Some(Order::Asc),
             read_ts,
@@ -928,13 +1027,17 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let data_extractor =
-            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
+        let data_extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0)
+                .expect("extractor")
+                .into();
 
         // Key-only schema for delete extractor
         let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
-        let delete_extractor = crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
-            .expect("delete extractor");
+        let delete_extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
+                .expect("delete extractor")
+                .into();
 
         // Write data Parquet file
         let data_path = root.child("data.parquet");
@@ -992,9 +1095,9 @@ mod tests {
             data_stream,
             Some(DeleteStreamWithExtractor {
                 stream: delete_stream,
-                extractor: delete_extractor.as_ref(),
+                extractor: delete_extractor,
             }),
-            data_extractor.as_ref(),
+            data_extractor,
             projection_indices,
             Some(Order::Asc),
             read_ts,
@@ -1037,8 +1140,10 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let extractor =
-            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0)
+                .expect("extractor")
+                .into();
 
         // Write data with multiple versions of same key (sorted by key, then ts desc)
         let data_path = root.child("data.parquet");
@@ -1072,7 +1177,7 @@ mod tests {
         let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
             None, // no delete sidecar
-            extractor.as_ref(),
+            extractor,
             projection_indices,
             Some(Order::Asc),
             read_ts,
@@ -1111,13 +1216,17 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let data_extractor =
-            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
+        let data_extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&user_schema), 0)
+                .expect("extractor")
+                .into();
 
         // Key-only schema for delete extractor
         let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
-        let delete_extractor = crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
-            .expect("delete extractor");
+        let delete_extractor: Arc<dyn KeyProjection> =
+            crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
+                .expect("delete extractor")
+                .into();
 
         // Write data with only 'b'
         let data_path = root.child("data.parquet");
@@ -1172,9 +1281,9 @@ mod tests {
             data_stream,
             Some(DeleteStreamWithExtractor {
                 stream: delete_stream,
-                extractor: delete_extractor.as_ref(),
+                extractor: delete_extractor,
             }),
-            data_extractor.as_ref(),
+            data_extractor,
             projection_indices,
             Some(Order::Asc),
             read_ts,

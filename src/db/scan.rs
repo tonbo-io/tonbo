@@ -1,24 +1,36 @@
-use std::{collections::BTreeMap, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    pin::Pin,
+    sync::Arc,
+};
 
 use aisle::PruneRequest;
 use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
+use arrow_schema::{Schema, SchemaRef};
 use fusio::{
     DynFs,
     executor::{Executor, Timer},
 };
 use fusio_parquet::reader::AsyncReader;
 use futures::{Stream, StreamExt, TryStreamExt, stream};
-use parquet::arrow::{
-    arrow_reader::ArrowReaderOptions, async_reader::ParquetRecordBatchStreamBuilder,
+use parquet::{
+    arrow::{
+        ProjectionMask,
+        arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
+        async_reader::ParquetRecordBatchStreamBuilder,
+    },
+    file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
 };
 use typed_arrow_dyn::DynRow;
 
 use crate::{
     db::DbInner,
-    extractor::KeyExtractError,
+    extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     inmem::{
-        immutable::{self, ImmutableSegment, memtable::ImmutableVisibleEntry},
+        immutable::{
+            self, ImmutableSegment,
+            memtable::{ImmutableVisibleEntry, MVCC_COMMIT_COL},
+        },
         mutable::memtable::DynRowScanEntry,
     },
     key::{KeyOwned, KeyRow},
@@ -125,7 +137,7 @@ async fn prune_sst_selection<E>(
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(data_path).await?;
+    let file = fs.open(data_path).await.map_err(SsTableError::Fs)?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
@@ -158,12 +170,12 @@ where
     })
 }
 
-fn scan_projection_indices(
+fn schema_projection_indices(
     base_schema: &SchemaRef,
-    scan_schema: &SchemaRef,
+    target_schema: &SchemaRef,
 ) -> Result<Vec<usize>, KeyExtractError> {
-    let mut indices = Vec::with_capacity(scan_schema.fields().len());
-    for field in scan_schema.fields() {
+    let mut indices = Vec::with_capacity(target_schema.fields().len());
+    for field in target_schema.fields() {
         let Some((idx, _)) = base_schema
             .fields()
             .iter()
@@ -177,6 +189,78 @@ fn scan_projection_indices(
         indices.push(idx);
     }
     Ok(indices)
+}
+
+struct SstProjectionPlan {
+    projection: ProjectionMask,
+    projection_indices: Vec<usize>,
+    data_extractor: Arc<dyn KeyProjection>,
+}
+
+async fn build_sst_projection_plan<E>(
+    fs: Arc<dyn DynFs>,
+    data_path: &fusio::path::Path,
+    scan_schema: &SchemaRef,
+    key_schema: &SchemaRef,
+    executor: E,
+) -> Result<SstProjectionPlan, crate::db::DBError>
+where
+    E: Executor + Clone + 'static,
+{
+    let file = fs.open(data_path).await.map_err(SsTableError::Fs)?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let metadata = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Optional)
+        .load_and_finish(&mut reader, size)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
+    let file_schema = arrow_metadata.schema();
+    let parquet_schema = arrow_metadata.parquet_schema();
+
+    let mut required = BTreeSet::new();
+    for field in scan_schema.fields() {
+        required.insert(field.name().to_string());
+    }
+    for field in key_schema.fields() {
+        required.insert(field.name().to_string());
+    }
+    required.insert(MVCC_COMMIT_COL.to_string());
+
+    let mut remaining = required;
+    let mut projected_fields = Vec::new();
+    let mut root_indices = Vec::new();
+    for (idx, field) in file_schema.fields().iter().enumerate() {
+        if remaining.remove(field.name()) {
+            projected_fields.push(field.clone());
+            root_indices.push(idx);
+        }
+    }
+
+    if let Some(missing) = remaining.iter().next() {
+        return Err(KeyExtractError::NoSuchField {
+            name: missing.to_string(),
+        }
+        .into());
+    }
+
+    let projected_schema = Arc::new(Schema::new(projected_fields));
+    let projection = ProjectionMask::roots(parquet_schema, root_indices);
+    let projection_indices = schema_projection_indices(&projected_schema, scan_schema)?;
+    let key_indices = schema_projection_indices(&projected_schema, key_schema)?;
+    let data_extractor: Arc<dyn KeyProjection> =
+        projection_for_columns(projected_schema, key_indices)?.into();
+
+    Ok(SstProjectionPlan {
+        projection,
+        projection_indices,
+        data_extractor,
+    })
 }
 
 impl<FS, E> DbInner<FS, E>
@@ -252,13 +336,14 @@ where
         if let Some(txn_scan) = txn_scan {
             streams.push(ScanStream::from(txn_scan));
         }
-        let projection_schema = Arc::clone(&plan.scan_schema);
+        let scan_schema = Arc::clone(&plan.scan_schema);
+        let key_schema = self.extractor().key_schema();
         let mutable_scan = match &plan.mutable_selection {
             ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
                 // TODO: apply key-range/memtable pruning once selection is wired.
                 OwnedMutableScan::from_guard(
                     self.mem.read(),
-                    Some(Arc::clone(&projection_schema)),
+                    Some(Arc::clone(&scan_schema)),
                     plan.read_ts,
                 )?
             }
@@ -278,7 +363,7 @@ where
                     // TODO: apply key-range/immutable pruning once selection is wired.
                     OwnedImmutableScan::from_arc(
                         Arc::clone(&segment),
-                        Some(Arc::clone(&projection_schema)),
+                        Some(Arc::clone(&scan_schema)),
                         plan.read_ts,
                     )?
                 }
@@ -297,10 +382,22 @@ where
             };
             let data_path = sst.entry.data_path().clone();
             let executor: E = (**self.executor()).clone();
+            let SstProjectionPlan {
+                projection,
+                projection_indices,
+                data_extractor,
+            } = build_sst_projection_plan(
+                Arc::clone(&self.fs),
+                &data_path,
+                &scan_schema,
+                &key_schema,
+                executor.clone(),
+            )
+            .await?;
             let data_stream = open_parquet_stream(
                 Arc::clone(&self.fs),
                 data_path,
-                None,
+                Some(projection),
                 row_groups,
                 row_selection,
                 Some(&plan._predicate),
@@ -325,19 +422,16 @@ where
                 // Delete sidecar uses key-only schema
                 Some(DeleteStreamWithExtractor {
                     stream,
-                    extractor: self.delete_extractor().as_ref(),
+                    extractor: Arc::clone(self.delete_extractor()),
                 })
             } else {
                 None
             };
 
-            // Calculate projection indices for user columns (exclude _commit_ts)
-            let projection_indices = scan_projection_indices(&self.schema, &projection_schema)?;
-
             let sstable_scan = SstableScan::new(
                 data_stream,
                 delete_stream_with_extractor,
-                self.extractor().as_ref(),
+                data_extractor,
                 projection_indices,
                 Some(Order::Asc),
                 plan.read_ts,

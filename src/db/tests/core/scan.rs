@@ -315,6 +315,10 @@ async fn scan_sst_non_prefix_projection_returns_correct_values() {
     let stream = db.execute_scan(plan).await.expect("execute");
     let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
     let values = collect_i32s(&batches, 0);
+    for batch in &batches {
+        assert_eq!(batch.num_columns(), 1, "projection should drop key columns");
+        assert_eq!(batch.schema().field(0).name(), "b");
+    }
     assert_eq!(values, vec![20]);
 }
 
