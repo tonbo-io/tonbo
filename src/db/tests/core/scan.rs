@@ -17,8 +17,8 @@ use crate::{
     inmem::policy::BatchesThreshold,
     manifest::{SstEntry, VersionEdit},
     mode::DynModeConfig,
-    mvcc::Timestamp,
-    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
+    mvcc::{MVCC_COMMIT_COL, Timestamp},
+    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId, SsTableStats},
     query::scan::ScanSelection,
     test::build_batch,
 };
@@ -197,6 +197,100 @@ async fn plan_scan_prunes_sst_row_groups_and_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_skips_ssts_after_read_ts() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-skip-commit-ts");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    write_parquet_data(
+        Arc::clone(&db.fs),
+        data_path.clone(),
+        rows_with_commit_ts(0, 1, Timestamp::MIN.get()),
+        1,
+        1,
+    )
+    .await;
+    let stats = SsTableStats {
+        min_commit_ts: Some(Timestamp::MAX),
+        max_commit_ts: Some(Timestamp::MAX),
+        ..Default::default()
+    };
+    let sst_entry = SstEntry::new(SsTableId::new(10), Some(stats), None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let predicate = Expr::gt_eq("v", ScalarValue::from(0i32));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert!(
+        plan.sst_selections.is_empty(),
+        "expected SST skipped when min_commit_ts is after read_ts"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_prunes_sst_commit_ts_at_plan_time() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-commit-ts");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    write_parquet_data(
+        Arc::clone(&db.fs),
+        data_path.clone(),
+        rows_with_commit_ts_range(0, 100, 0),
+        100,
+        10,
+    )
+    .await;
+    let sst_entry = SstEntry::new(SsTableId::new(11), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let predicate = Expr::gt_eq("v", ScalarValue::from(0i32));
+    let snapshot = db.snapshot_at(Timestamp::new(49)).await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert_eq!(plan.sst_selections.len(), 1);
+    let selection = plan.sst_selections[0].selection.clone();
+    let ScanSelection::Sst(selection) = selection else {
+        panic!("expected sst selection");
+    };
+    let row_selection = selection.row_selection.as_ref().expect("row selection");
+    assert_eq!(row_selection.row_count(), 50);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn scan_limit_waits_for_residual_predicate() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -365,7 +459,30 @@ fn rows_with_commit_ts(start: i32, count: usize, commit_ts: u64) -> RecordBatch 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
-        Field::new("_commit_ts", DataType::UInt64, false),
+        Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+    ]));
+    let columns = vec![
+        Arc::new(StringArray::from(ids)) as _,
+        Arc::new(Int32Array::from(values)) as _,
+        Arc::new(UInt64Array::from(commits)) as _,
+    ];
+    RecordBatch::try_new(schema, columns).expect("parquet batch")
+}
+
+fn rows_with_commit_ts_range(start: i32, count: usize, commit_ts_start: u64) -> RecordBatch {
+    let mut ids = Vec::with_capacity(count);
+    let mut values = Vec::with_capacity(count);
+    let mut commits = Vec::with_capacity(count);
+    for offset in 0..count {
+        let value = start + offset as i32;
+        ids.push(format!("k{value:06}"));
+        values.push(value);
+        commits.push(commit_ts_start + offset as u64);
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+        Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
     ]));
     let columns = vec![
         Arc::new(StringArray::from(ids)) as _,

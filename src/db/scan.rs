@@ -27,21 +27,18 @@ use crate::{
     db::DbInner,
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     inmem::{
-        immutable::{
-            self, ImmutableSegment,
-            memtable::{ImmutableVisibleEntry, MVCC_COMMIT_COL},
-        },
+        immutable::{self, ImmutableSegment, memtable::ImmutableVisibleEntry},
         mutable::memtable::DynRowScanEntry,
     },
     key::{KeyOwned, KeyRow},
     mutation::DynMutation,
-    mvcc::Timestamp,
+    mvcc::{MVCC_COMMIT_COL, Timestamp},
     ondisk::{
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{SsTableError, open_parquet_stream},
     },
     query::{
-        Expr,
+        Expr, ScalarValue,
         scan::{
             ScanPlan, ScanSelection, SstScanSelection, SstSelection, projection_with_predicate,
         },
@@ -87,6 +84,7 @@ impl TxSnapshot {
                 seal.immutables.iter().map(|arc| arc.as_ref()).collect();
             immutable::prune_segments(&prune_input)
         };
+        let read_ts = self.read_view().read_ts();
         let fs = Arc::clone(&db.fs);
         let executor: E = (**db.executor()).clone();
         let mut sst_selections = Vec::new();
@@ -99,10 +97,16 @@ impl TxSnapshot {
             .iter()
             .flatten()
         {
+            if let Some(min_commit_ts) = entry.stats().and_then(|stats| stats.min_commit_ts)
+                && min_commit_ts > read_ts
+            {
+                continue;
+            }
             let selection = prune_sst_selection(
                 Arc::clone(&fs),
                 entry.data_path(),
                 predicate,
+                read_ts,
                 executor.clone(),
             )
             .await?;
@@ -111,7 +115,6 @@ impl TxSnapshot {
                 selection: ScanSelection::Sst(selection),
             });
         }
-        let read_ts = self.read_view().read_ts();
         Ok(ScanPlan {
             _predicate: predicate.clone(),
             immutable_indexes,
@@ -132,6 +135,7 @@ async fn prune_sst_selection<E>(
     fs: Arc<dyn DynFs>,
     data_path: &fusio::path::Path,
     predicate: &Expr,
+    read_ts: Timestamp,
     executor: E,
 ) -> Result<SstSelection, SsTableError>
 where
@@ -148,8 +152,14 @@ where
         .map_err(SsTableError::Parquet)?;
     let metadata = builder.metadata();
     let schema = builder.schema();
+    let commit_predicate = Expr::lt_eq(MVCC_COMMIT_COL, ScalarValue::UInt64(Some(read_ts.get())));
+    let prune_predicate = if matches!(predicate, Expr::True) {
+        commit_predicate
+    } else {
+        Expr::and(vec![predicate.clone(), commit_predicate])
+    };
     let prune_result = PruneRequest::new(metadata.as_ref(), schema.as_ref())
-        .with_predicate(predicate)
+        .with_predicate(&prune_predicate)
         .enable_page_index(true)
         .prune();
     let mut row_groups = prune_result.row_groups().to_vec();
