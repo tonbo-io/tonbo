@@ -1190,7 +1190,10 @@ fn is_string_type(data_type: &DataType) -> bool {
     )
 }
 
-fn validate_page_indexes(path: &Path, metadata: &ParquetMetaData) -> Result<(), SsTableError> {
+pub(crate) fn validate_page_indexes(
+    path: &Path,
+    metadata: &ParquetMetaData,
+) -> Result<(), SsTableError> {
     let path = path.to_string();
     let column_index = metadata
         .column_index()
@@ -1250,6 +1253,58 @@ fn validate_page_indexes(path: &Path, metadata: &ParquetMetaData) -> Result<(), 
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+pub(crate) struct ParquetStreamOptions<'a> {
+    pub projection: Option<ProjectionMask>,
+    pub row_groups: Option<Vec<usize>>,
+    pub row_selection: Option<RowSelection>,
+    pub row_filter_predicate: Option<&'a Expr>,
+}
+
+pub(crate) async fn open_parquet_stream_with_metadata<E>(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    metadata: Arc<ParquetMetaData>,
+    options: ParquetStreamOptions<'_>,
+    executor: E,
+) -> Result<ParquetStream<E>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let ParquetStreamOptions {
+        projection,
+        row_groups,
+        row_selection,
+        row_filter_predicate,
+    } = options;
+    let file = fs.open(&path).await?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
+    let reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(metadata, options).map_err(SsTableError::Parquet)?;
+    let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, arrow_metadata);
+    let schema = builder.schema().clone();
+    if let Some(predicate) = row_filter_predicate.and_then(|pred| row_filter_expr(pred, &schema)) {
+        let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
+        let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
+        builder = builder.with_row_filter(row_filter);
+    }
+    let mask = projection.unwrap_or_else(ProjectionMask::all);
+    builder = builder.with_projection(mask);
+    if let Some(row_groups) = row_groups {
+        builder = builder.with_row_groups(row_groups);
+    }
+    if let Some(selection) = row_selection {
+        builder = builder.with_row_selection(selection);
+    }
+    let stream = builder.build().map_err(SsTableError::Parquet)?;
+    Ok(stream)
 }
 
 pub(crate) async fn open_parquet_stream<E>(

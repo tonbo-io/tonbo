@@ -1,7 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use arrow_schema::{Schema, SchemaRef};
-use parquet::arrow::arrow_reader::RowSelection;
+use parquet::{
+    arrow::{ProjectionMask, arrow_reader::RowSelection},
+    file::metadata::ParquetMetaData,
+};
 
 use crate::{
     extractor::KeyExtractError,
@@ -18,15 +21,12 @@ pub(crate) struct SstSelection {
     pub(crate) row_groups: Option<Vec<usize>>,
     /// Optional row-level selection within chosen row groups.
     pub(crate) row_selection: Option<RowSelection>,
-}
-
-impl SstSelection {
-    pub(crate) fn all() -> Self {
-        Self {
-            row_groups: None,
-            row_selection: None,
-        }
-    }
+    /// Cached Parquet metadata loaded at plan time.
+    pub(crate) metadata: Arc<ParquetMetaData>,
+    /// Projection mask for required columns.
+    pub(crate) projection: ProjectionMask,
+    /// Arrow schema for the projected data stream.
+    pub(crate) projected_schema: SchemaRef,
 }
 
 /// Placeholder for future key-range selections.
@@ -54,15 +54,6 @@ pub(crate) enum ScanSelection {
 pub(crate) struct SstScanSelection {
     pub(crate) entry: SstEntry,
     pub(crate) selection: ScanSelection,
-}
-
-impl SstScanSelection {
-    pub(crate) fn all(entry: SstEntry) -> Self {
-        Self {
-            entry,
-            selection: ScanSelection::Sst(SstSelection::all()),
-        }
-    }
 }
 
 /// Internal representation of a scan plan. Things included in the plan:

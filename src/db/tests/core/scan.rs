@@ -1,8 +1,23 @@
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use fusio::{executor::NoopExecutor, fs::OpenOptions, mem::fs::InMemoryFs, path::Path};
+use fusio::{
+    DynFs, IoBuf, IoBufMut, Read as FusioRead, Write as FusioWrite,
+    durability::FileCommit,
+    dynamic::{DynFile, MaybeSendFuture, MaybeSendStream},
+    error::Error as FusioError,
+    executor::NoopExecutor,
+    fs::{FileMeta, FileSystemTag, OpenOptions},
+    mem::fs::InMemoryFs,
+    path::Path,
+};
 use fusio_parquet::writer::AsyncWriter;
 use futures::TryStreamExt;
 use parquet::{
@@ -137,6 +152,44 @@ async fn plan_scan_missing_column_is_error() {
     let message = err.to_string();
     assert!(
         message.contains("no such field in schema"),
+        "unexpected error: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_missing_page_indexes_is_error() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-missing-page-index");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    let batch = rows_with_commit_ts(0, 2, Timestamp::MIN.get());
+    write_parquet_data_missing_page_index(Arc::clone(&db.fs), data_path.clone(), batch).await;
+
+    let sst_entry = SstEntry::new(SsTableId::new(9), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let err = match snapshot.plan_scan(&db, &Expr::True, None, None).await {
+        Ok(_) => panic!("missing page indexes should error"),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("missing page indexes"),
         "unexpected error: {message}"
     );
 }
@@ -366,6 +419,55 @@ async fn scan_row_filter_respects_tombstones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_projection_respects_tombstones() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let upsert_rows = vec![DynRow(vec![
+        Some(DynCell::Str("k000001".into())),
+        Some(DynCell::I32(10)),
+    ])];
+    let upsert = build_batch(schema.clone(), upsert_rows).expect("upsert");
+    db.ingest_with_tombstones(upsert, vec![false])
+        .await
+        .expect("upsert ingest");
+
+    let delete_rows = vec![DynRow(vec![
+        Some(DynCell::Str("k000001".into())),
+        Some(DynCell::I32(10)),
+    ])];
+    let delete = build_batch(schema.clone(), delete_rows).expect("delete");
+    db.ingest_with_tombstones(delete, vec![true])
+        .await
+        .expect("delete ingest");
+
+    let sst_cfg = Arc::new(SsTableConfig::new(
+        schema.clone(),
+        Arc::clone(&db.fs),
+        Path::from("scan-projection-tombstones"),
+    ));
+    let descriptor = SsTableDescriptor::new(SsTableId::new(4), 0);
+    db.flush_immutables_with_descriptor(sst_cfg, descriptor)
+        .await
+        .expect("flush");
+
+    let projection = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+    let predicate = Expr::gt_eq("v", ScalarValue::from(0i32));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, Some(&projection), None)
+        .await
+        .expect("plan");
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let values = collect_i32s(&batches, 0);
+    assert!(values.is_empty(), "tombstoned row should be filtered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn scan_sst_non_prefix_projection_returns_correct_values() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -414,6 +516,67 @@ async fn scan_sst_non_prefix_projection_returns_correct_values() {
         assert_eq!(batch.schema().field(0).name(), "b");
     }
     assert_eq!(values, vec![20]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_plan_reuses_cached_sst_metadata() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mut db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-metadata-reuse");
+    let data_path = sst_root.child("000.parquet");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let base_fs = Arc::clone(&db.fs);
+    db.fs = Arc::new(CountingFs::new(
+        base_fs,
+        data_path.clone(),
+        Arc::clone(&reads),
+    ));
+
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    write_parquet_data(
+        Arc::clone(&db.fs),
+        data_path.clone(),
+        rows_with_commit_ts_range(0, 8, Timestamp::MIN.get()),
+        4,
+        2,
+    )
+    .await;
+    let sst_entry = SstEntry::new(SsTableId::new(5), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &Expr::True, None, None)
+        .await
+        .expect("plan");
+    let reads_after_plan = reads.load(Ordering::SeqCst);
+    assert!(
+        reads_after_plan > 0,
+        "expected metadata read during planning"
+    );
+
+    let _streams = db
+        .build_scan_streams(&plan, None)
+        .await
+        .expect("open streams");
+    let reads_after_open = reads.load(Ordering::SeqCst);
+    assert_eq!(
+        reads_after_open, reads_after_plan,
+        "stream open should reuse cached metadata"
+    );
 }
 
 async fn db_with_immutable_keys(keys: &[&str]) -> DbInner<InMemoryFs, NoopExecutor> {
@@ -516,6 +679,32 @@ async fn write_parquet_data(
     arrow_writer.close().await.expect("close parquet");
 }
 
+async fn write_parquet_data_missing_page_index(
+    fs: Arc<dyn fusio::DynFs>,
+    path: Path,
+    batch: RecordBatch,
+) {
+    let file = fs
+        .open_options(
+            &path,
+            OpenOptions::default()
+                .create(true)
+                .write(true)
+                .truncate(true),
+        )
+        .await
+        .expect("open parquet file");
+    let props = WriterProperties::builder()
+        .set_statistics_enabled(EnabledStatistics::None)
+        .set_offset_index_disabled(true)
+        .build();
+    let writer = AsyncWriter::new(file, NoopExecutor);
+    let mut arrow_writer =
+        AsyncArrowWriter::try_new(writer, batch.schema(), Some(props)).expect("arrow writer");
+    arrow_writer.write(&batch).await.expect("write batch");
+    arrow_writer.close().await.expect("close parquet");
+}
+
 fn collect_ids(batches: &[RecordBatch]) -> Vec<String> {
     let mut ids = Vec::new();
     for batch in batches {
@@ -544,4 +733,143 @@ fn collect_i32s(batches: &[RecordBatch], column_idx: usize) -> Vec<i32> {
         }
     }
     values
+}
+
+struct CountingFs {
+    inner: Arc<dyn DynFs>,
+    target: Path,
+    reads: Arc<AtomicUsize>,
+}
+
+impl CountingFs {
+    fn new(inner: Arc<dyn DynFs>, target: Path, reads: Arc<AtomicUsize>) -> Self {
+        Self {
+            inner,
+            target,
+            reads,
+        }
+    }
+}
+
+struct CountingFile {
+    inner: Box<dyn DynFile>,
+    track_reads: bool,
+    reads: Arc<AtomicUsize>,
+}
+
+impl FusioRead for CountingFile {
+    async fn read_exact_at<B: IoBufMut>(
+        &mut self,
+        buf: B,
+        pos: u64,
+    ) -> (Result<(), FusioError>, B) {
+        let (result, buf) = self.inner.read_exact_at(buf, pos).await;
+        if self.track_reads {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        (result, buf)
+    }
+
+    async fn read_to_end_at(
+        &mut self,
+        buf: Vec<u8>,
+        pos: u64,
+    ) -> (Result<(), FusioError>, Vec<u8>) {
+        self.inner.read_to_end_at(buf, pos).await
+    }
+
+    async fn size(&self) -> Result<u64, FusioError> {
+        self.inner.size().await
+    }
+}
+
+impl FusioWrite for CountingFile {
+    async fn write_all<B: IoBuf>(&mut self, buf: B) -> (Result<(), FusioError>, B) {
+        self.inner.write_all(buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), FusioError> {
+        self.inner.flush().await
+    }
+
+    async fn close(&mut self) -> Result<(), FusioError> {
+        self.inner.close().await
+    }
+}
+
+impl FileCommit for CountingFile {
+    async fn commit(&mut self) -> Result<(), FusioError> {
+        self.inner.commit().await
+    }
+}
+
+impl DynFs for CountingFs {
+    fn file_system(&self) -> FileSystemTag {
+        self.inner.file_system()
+    }
+
+    fn open_options<'s, 'path: 's>(
+        &'s self,
+        path: &'path Path,
+        options: OpenOptions,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, FusioError>> + 's>> {
+        let inner = Arc::clone(&self.inner);
+        let target = self.target.clone();
+        let reads = Arc::clone(&self.reads);
+        Box::pin(async move {
+            let file = inner.open_options(path, options).await?;
+            let track_reads = path == &target;
+            Ok(Box::new(CountingFile {
+                inner: file,
+                track_reads,
+                reads,
+            }) as Box<dyn DynFile>)
+        })
+    }
+
+    fn create_dir_all<'s, 'path: 's>(
+        &'s self,
+        path: &'path Path,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list<'s, 'path: 's>(
+        &'s self,
+        path: &'path Path,
+    ) -> Pin<
+        Box<
+            dyn MaybeSendFuture<
+                    Output = Result<
+                        Pin<Box<dyn MaybeSendStream<Item = Result<FileMeta, FusioError>> + 's>>,
+                        FusioError,
+                    >,
+                > + 's,
+        >,
+    > {
+        self.inner.list(path)
+    }
+
+    fn remove<'s, 'path: 's>(
+        &'s self,
+        path: &'path Path,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+        self.inner.remove(path)
+    }
+
+    fn copy<'s, 'path: 's>(
+        &'s self,
+        from: &'path Path,
+        to: &'path Path,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+        self.inner.copy(from, to)
+    }
+
+    fn link<'s, 'path: 's>(
+        &'s self,
+        from: &'path Path,
+        to: &'path Path,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+        self.inner.link(from, to)
+    }
 }
