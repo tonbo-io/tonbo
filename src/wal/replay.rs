@@ -8,6 +8,7 @@ use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::{
     manifest::WalSegmentRef,
+    observability::{log_info, log_warn},
     wal::{
         WalConfig, WalError, WalResult,
         frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
@@ -76,6 +77,14 @@ impl Replayer {
         let floor_seq = floor.map(|f| f.seq());
         let floor_first_frame = floor.map(|f| f.first_frame());
 
+        log_info!(
+            component = "wal",
+            event = "replay_started",
+            segment_count = segments.len(),
+            floor_seq = ?floor_seq,
+            floor_first_frame = ?floor_first_frame,
+        );
+
         let mut events = Vec::new();
         for segment in segments {
             if let Some(seq) = floor_seq
@@ -124,6 +133,13 @@ impl Replayer {
                         // recovery returns the events observed before the partial frame. Any
                         // other corruption surfaces as an error to avoid silently skipping valid
                         // transactions further in the log.
+                        log_warn!(
+                            component = "wal",
+                            event = "replay_truncated_tail",
+                            segment_path = %path_display,
+                            offset = offset,
+                            reason = reason,
+                        );
                         return Ok(events);
                     }
                     Err(err) => return Err(err),
@@ -148,6 +164,12 @@ impl Replayer {
                 offset = payload_end;
             }
         }
+
+        log_info!(
+            component = "wal",
+            event = "replay_completed",
+            events_recovered = events.len(),
+        );
 
         Ok(events)
     }

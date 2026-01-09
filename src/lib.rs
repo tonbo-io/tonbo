@@ -242,6 +242,8 @@ mod inmem;
 pub(crate) mod key;
 pub(crate) mod mode;
 pub(crate) mod mutation;
+/// Tracing infrastructure for Tonbo observability.
+mod observability;
 /// Convenience re-exports for common usage.
 pub mod prelude;
 pub mod schema;

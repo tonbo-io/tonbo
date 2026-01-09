@@ -34,7 +34,26 @@ The `log` facade satisfies basic requirements but lacks native spans, making asy
 - Tonbo will not initialize any global subscriber or logger
 - Tonbo will not provide subscriber configuration helpers (docs-only guidance)
 - Tonbo will not implement custom tracing backends
-- Metrics collection is out of scope (separate concern)
+- Metrics collection is out of scope (see below)
+
+## Why Metrics Are Not Addressed Here
+
+Metrics (counters, gauges, histograms) are orthogonal to logging and tracing:
+
+| Concern | Data Model | Consumer | Crate |
+|---------|------------|----------|-------|
+| Logs/Events | Discrete records | Debuggers, audit | `tracing` |
+| Spans/Traces | Hierarchical context | Request flow analysis | `tracing` |
+| Metrics | Aggregated time-series | Dashboards, alerts | `metrics` |
+
+The Rust ecosystem treats these as separate facades with independent recorders/subscribers. Major projects in our reference set maintain this separation:
+
+- **hyper**: `tracing` only; no metrics dependency
+- **axum**: `tracing` for spans; `metrics` via separate middleware on dedicated port
+- **tokio**: `tracing` for instrumentation; pull-based `RuntimeMetrics` struct for metrics
+- **RocksDB**: pluggable `Logger` for logs; separate `Statistics` object for metrics
+
+Tonbo already follows the pull-based struct pattern (`WalMetrics`, `MutableMemTableMetrics`). Whether to add a `metrics` facade is a separate decision with distinct trade-offs and will be addressed in a future RFC.
 
 ## Design
 

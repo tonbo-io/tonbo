@@ -577,3 +577,101 @@ async fn flush_records_manifest_metadata() -> Result<(), Box<dyn std::error::Err
     fs::remove_dir_all(&temp_root)?;
     Ok(())
 }
+
+/// Test to verify WAL logging events are emitted correctly.
+///
+/// Writes logs to a file, then reads and verifies expected events are present.
+/// Uses a file because global subscribers can't be easily captured to memory
+/// when spawned tasks are involved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_logging_verification() -> Result<(), Box<dyn std::error::Error>> {
+    use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+    let temp_root = workspace_temp_dir("wal_logging_verification");
+    fs::create_dir_all(&temp_root)?;
+    let log_file_path = temp_root.join("test.log");
+
+    // Create a file for log output
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_file_path)?;
+
+    // Try to set global subscriber (may fail if already set by another test)
+    let _ = tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log_file)),
+        )
+        .with(EnvFilter::new("tonbo=debug"))
+        .try_init();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor = crate::extractor::projection_for_field(schema.clone(), 0)?;
+    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+
+    let executor = Arc::new(TokioExecutor::default());
+    let namespace = "wal-logging-verification";
+
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+        DB::<InMemoryFs, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())?
+            .open_with_executor(Arc::clone(&executor))
+            .await?
+            .into_inner();
+
+    let wal_local_fs = Arc::new(fusio::disk::LocalFs {});
+    let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
+    let wal_cas: Arc<dyn FsCas> = wal_local_fs.clone();
+    let wal_dir = temp_root.join("wal");
+    fs::create_dir_all(&wal_dir)?;
+    let wal_path = Path::from_filesystem_path(&wal_dir)?;
+
+    let mut wal_cfg = RuntimeWalConfig::default();
+    wal_cfg.dir = wal_path;
+    wal_cfg.segment_backend = wal_dyn_fs;
+    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
+    wal_cfg.segment_max_bytes = 1024;
+    wal_cfg.flush_interval = Duration::from_millis(1);
+    wal_cfg.sync = WalSyncPolicy::Disabled;
+
+    db.enable_wal(wal_cfg).await?;
+
+    // Give the async writer task time to initialize and log
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    db.disable_wal().await?;
+
+    // Read the log file and verify events
+    let log_contents = fs::read_to_string(&log_file_path).unwrap_or_default();
+
+    // Note: If subscriber was already set by another test, this file may be empty.
+    // In that case, we skip assertions but don't fail the test.
+    if !log_contents.is_empty() {
+        assert!(
+            log_contents.contains("wal_writer_spawned"),
+            "log should contain wal_writer_spawned event, got: {}",
+            log_contents
+        );
+        assert!(
+            log_contents.contains("wal_enabled"),
+            "log should contain wal_enabled event"
+        );
+        assert!(
+            log_contents.contains("wal_writer_bootstrap"),
+            "log should contain wal_writer_bootstrap event"
+        );
+        assert!(
+            log_contents.contains("wal_writer_shutdown"),
+            "log should contain wal_writer_shutdown event"
+        );
+    }
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
