@@ -478,14 +478,134 @@ fn compare_scalar_values(lhs: &ScalarValue, rhs: &ScalarValue) -> Option<std::cm
 }
 
 fn numeric_compare(lhs: &ScalarValue, rhs: &ScalarValue) -> Option<std::cmp::Ordering> {
-    if is_float_scalar(lhs) || is_float_scalar(rhs) {
-        let lhs_val = scalar_to_f64(lhs)?;
-        let rhs_val = scalar_to_f64(rhs)?;
-        return lhs_val.partial_cmp(&rhs_val);
+    let lhs_is_float = is_float_scalar(lhs);
+    let rhs_is_float = is_float_scalar(rhs);
+    match (lhs_is_float, rhs_is_float) {
+        (true, true) => {
+            let lhs_val = scalar_to_f64(lhs)?;
+            let rhs_val = scalar_to_f64(rhs)?;
+            lhs_val.partial_cmp(&rhs_val)
+        }
+        (false, false) => {
+            let lhs_val = scalar_to_i128(lhs)?;
+            let rhs_val = scalar_to_i128(rhs)?;
+            Some(lhs_val.cmp(&rhs_val))
+        }
+        (true, false) => {
+            let lhs_val = scalar_to_f64(lhs)?;
+            let rhs_val = scalar_to_i128(rhs)?;
+            compare_i128_f64(rhs_val, lhs_val).map(std::cmp::Ordering::reverse)
+        }
+        (false, true) => {
+            let lhs_val = scalar_to_i128(lhs)?;
+            let rhs_val = scalar_to_f64(rhs)?;
+            compare_i128_f64(lhs_val, rhs_val)
+        }
     }
-    let lhs_val = scalar_to_i128(lhs)?;
-    let rhs_val = scalar_to_i128(rhs)?;
-    Some(lhs_val.cmp(&rhs_val))
+}
+
+// Compare an integer to a float without converting the integer to f64.
+fn compare_i128_f64(int_val: i128, float_val: f64) -> Option<std::cmp::Ordering> {
+    if float_val.is_nan() {
+        return None;
+    }
+    if float_val.is_infinite() {
+        return Some(if float_val.is_sign_positive() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    if float_val == 0.0 {
+        return Some(int_val.cmp(&0));
+    }
+    if int_val == 0 {
+        return Some(if float_val.is_sign_positive() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    let int_neg = int_val.is_negative();
+    let float_neg = float_val.is_sign_negative();
+    if int_neg != float_neg {
+        return Some(if int_neg {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    let int_abs = i128_abs_to_u128(int_val);
+    let (mantissa, exp2) = decompose_f64(float_val.abs());
+    let ordering = compare_u128_f64(int_abs, mantissa, exp2);
+    Some(if int_neg {
+        ordering.reverse()
+    } else {
+        ordering
+    })
+}
+
+fn compare_u128_f64(int_abs: u128, mantissa: u64, exp2: i32) -> std::cmp::Ordering {
+    let int_bits = bit_length_u128(int_abs);
+    let mantissa_bits = bit_length_u64(mantissa);
+    if exp2 >= 0 {
+        let float_bits = mantissa_bits + exp2;
+        if float_bits > int_bits {
+            return std::cmp::Ordering::Less;
+        }
+        if float_bits < int_bits {
+            return std::cmp::Ordering::Greater;
+        }
+        let float_int = (mantissa as u128) << (exp2 as u32);
+        return int_abs.cmp(&float_int);
+    }
+    let shift = -exp2;
+    let scaled_int_bits = int_bits + shift;
+    if scaled_int_bits > mantissa_bits {
+        return std::cmp::Ordering::Greater;
+    }
+    if scaled_int_bits < mantissa_bits {
+        return std::cmp::Ordering::Less;
+    }
+    let scaled_int = int_abs << (shift as u32);
+    scaled_int.cmp(&(mantissa as u128))
+}
+
+fn decompose_f64(value: f64) -> (u64, i32) {
+    let bits = value.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp_bits == 0 {
+        (frac, -1074)
+    } else {
+        let mantissa = (1u64 << 52) | frac;
+        (mantissa, exp_bits - 1023 - 52)
+    }
+}
+
+fn i128_abs_to_u128(value: i128) -> u128 {
+    if value >= 0 {
+        value as u128
+    } else {
+        let value_u = value as u128;
+        (!value_u).wrapping_add(1)
+    }
+}
+
+fn bit_length_u128(value: u128) -> i32 {
+    if value == 0 {
+        0
+    } else {
+        128 - value.leading_zeros() as i32
+    }
+}
+
+fn bit_length_u64(value: u64) -> i32 {
+    if value == 0 {
+        0
+    } else {
+        64 - value.leading_zeros() as i32
+    }
 }
 
 fn is_float_scalar(value: &ScalarValue) -> bool {
@@ -767,5 +887,51 @@ mod tests {
             }
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[test]
+    fn residual_numeric_compare_large_uint64_vs_float64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+        let row = DynRow(vec![Some(DynCell::U64(9_007_199_254_740_993))]);
+        let float_value = ScalarValue::Float64(Some(9_007_199_254_740_992.0));
+
+        let gt_predicate = Expr::gt("v", float_value.clone());
+        let eq_predicate = Expr::eq("v", float_value);
+
+        assert!(
+            evaluator
+                .matches_owned(&gt_predicate, &row)
+                .expect("gt predicate")
+        );
+        assert!(
+            !evaluator
+                .matches_owned(&eq_predicate, &row)
+                .expect("eq predicate")
+        );
+    }
+
+    #[test]
+    fn residual_numeric_compare_u64_near_max_vs_float64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+        // This value rounds down to the float bucket at this magnitude.
+        let row_value = 18_446_744_073_709_548_616_u64;
+        let row = DynRow(vec![Some(DynCell::U64(row_value))]);
+        let float_value = ScalarValue::Float64(Some(18_446_744_073_709_547_520.0));
+
+        let gt_predicate = Expr::gt("v", float_value.clone());
+        let eq_predicate = Expr::eq("v", float_value);
+
+        assert!(
+            evaluator
+                .matches_owned(&gt_predicate, &row)
+                .expect("gt predicate")
+        );
+        assert!(
+            !evaluator
+                .matches_owned(&eq_predicate, &row)
+                .expect("eq predicate")
+        );
     }
 }
