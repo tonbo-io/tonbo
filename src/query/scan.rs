@@ -27,6 +27,17 @@ pub(crate) struct SstSelection {
     pub(crate) projection: ProjectionMask,
     /// Arrow schema for the projected data stream.
     pub(crate) projected_schema: SchemaRef,
+    /// Optional delete sidecar metadata and projection info.
+    pub(crate) delete_selection: Option<DeleteSelection>,
+}
+
+/// Selection information for a delete sidecar scan.
+#[derive(Clone, Debug)]
+pub(crate) struct DeleteSelection {
+    /// Cached Parquet metadata loaded at plan time.
+    pub(crate) metadata: Arc<ParquetMetaData>,
+    /// Projection mask for required columns.
+    pub(crate) projection: ProjectionMask,
 }
 
 /// Placeholder for future key-range selections.

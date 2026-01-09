@@ -35,14 +35,15 @@ use crate::{
     ondisk::{
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{
-            ParquetStreamOptions, SsTableError, open_parquet_stream,
-            open_parquet_stream_with_metadata, validate_page_indexes,
+            ParquetStreamOptions, SsTableError, open_parquet_stream_with_metadata,
+            validate_page_indexes,
         },
     },
     query::{
         Expr, ScalarValue,
         scan::{
-            ScanPlan, ScanSelection, SstScanSelection, SstSelection, projection_with_predicate,
+            DeleteSelection, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
+            projection_with_predicate,
         },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
@@ -115,6 +116,17 @@ impl TxSnapshot {
                 executor.clone(),
             )
             .await?;
+            let mut selection = selection;
+            if let Some(delete_path) = entry.delete_path() {
+                let delete_selection = plan_delete_sidecar_selection(
+                    Arc::clone(&fs),
+                    delete_path,
+                    &key_schema,
+                    executor.clone(),
+                )
+                .await?;
+                selection.delete_selection = Some(delete_selection);
+            }
             sst_selections.push(SstScanSelection {
                 entry: entry.clone(),
                 selection: ScanSelection::Sst(selection),
@@ -221,6 +233,7 @@ where
         metadata,
         projection,
         projected_schema,
+        delete_selection: None,
     })
 }
 
@@ -245,16 +258,16 @@ fn schema_projection_indices(
     Ok(indices)
 }
 
-async fn build_delete_projection_mask<E>(
+async fn plan_delete_sidecar_selection<E>(
     fs: Arc<dyn DynFs>,
-    data_path: &fusio::path::Path,
+    delete_path: &fusio::path::Path,
     key_schema: &SchemaRef,
     executor: E,
-) -> Result<ProjectionMask, crate::db::DBError>
+) -> Result<DeleteSelection, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(data_path).await.map_err(SsTableError::Fs)?;
+    let file = fs.open(delete_path).await.map_err(SsTableError::Fs)?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
@@ -264,9 +277,11 @@ where
         .load_and_finish(&mut reader, size)
         .await
         .map_err(SsTableError::Parquet)?;
+    validate_page_indexes(delete_path, &metadata)?;
     let options = ArrowReaderOptions::new().with_page_index(true);
-    let arrow_metadata =
-        ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
+    let metadata = Arc::new(metadata);
+    let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&metadata), options)
+        .map_err(SsTableError::Parquet)?;
     let file_schema = arrow_metadata.schema();
     let parquet_schema = arrow_metadata.parquet_schema();
 
@@ -292,7 +307,10 @@ where
     }
 
     let projection = ProjectionMask::roots(parquet_schema, root_indices);
-    Ok(projection)
+    Ok(DeleteSelection {
+        metadata,
+        projection,
+    })
 }
 
 impl<FS, E> DbInner<FS, E>
@@ -407,8 +425,19 @@ where
         for sst in plan.sst_selections() {
             let selection = match &sst.selection {
                 ScanSelection::Sst(selection) => selection,
-                ScanSelection::AllRows | ScanSelection::KeyRange(_) => {
-                    continue;
+                ScanSelection::AllRows => {
+                    return Err(crate::db::DBError::SsTable(
+                        SsTableError::InvalidScanSelection {
+                            selection: "AllRows",
+                        },
+                    ));
+                }
+                ScanSelection::KeyRange(_) => {
+                    return Err(crate::db::DBError::SsTable(
+                        SsTableError::InvalidScanSelection {
+                            selection: "KeyRange",
+                        },
+                    ));
                 }
             };
             let data_path = sst.entry.data_path().clone();
@@ -438,21 +467,23 @@ where
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
             let delete_stream_with_extractor = if let Some(delete_path) = sst.entry.delete_path() {
+                let delete_selection = selection.delete_selection.as_ref().ok_or_else(|| {
+                    crate::db::DBError::SsTable(SsTableError::InvalidScanSelection {
+                        selection: "missing delete sidecar selection",
+                    })
+                })?;
                 let delete_path = delete_path.clone();
-                let delete_projection = build_delete_projection_mask(
-                    Arc::clone(&self.fs),
-                    &delete_path,
-                    &key_schema,
-                    executor.clone(),
-                )
-                .await?;
-                let stream = open_parquet_stream(
+                let options = ParquetStreamOptions {
+                    projection: Some(delete_selection.projection.clone()),
+                    row_groups: None,
+                    row_selection: None,
+                    row_filter_predicate: None,
+                };
+                let stream = open_parquet_stream_with_metadata(
                     Arc::clone(&self.fs),
                     delete_path,
-                    Some(delete_projection),
-                    None,
-                    None,
-                    None,
+                    Arc::clone(&delete_selection.metadata),
+                    options,
                     executor.clone(),
                 )
                 .await
@@ -462,6 +493,13 @@ where
                     extractor: Arc::clone(self.delete_extractor()),
                 })
             } else {
+                if selection.delete_selection.is_some() {
+                    return Err(crate::db::DBError::SsTable(
+                        SsTableError::InvalidScanSelection {
+                            selection: "unexpected delete sidecar selection",
+                        },
+                    ));
+                }
                 None
             };
 

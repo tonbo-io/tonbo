@@ -775,7 +775,11 @@ impl FusioRead for CountingFile {
         buf: Vec<u8>,
         pos: u64,
     ) -> (Result<(), FusioError>, Vec<u8>) {
-        self.inner.read_to_end_at(buf, pos).await
+        let (result, buf) = self.inner.read_to_end_at(buf, pos).await;
+        if self.track_reads {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        (result, buf)
     }
 
     async fn size(&self) -> Result<u64, FusioError> {

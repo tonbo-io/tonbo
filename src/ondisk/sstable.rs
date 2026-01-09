@@ -355,6 +355,9 @@ pub enum SsTableError {
     /// Parquet page indexes were missing for an SSTable read.
     #[error("sstable parquet file {path} missing page indexes: {reason}")]
     MissingPageIndex { path: String, reason: String },
+    /// Scan selection is invalid for an SSTable scan.
+    #[error("invalid scan selection for SST: {selection}")]
+    InvalidScanSelection { selection: &'static str },
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
