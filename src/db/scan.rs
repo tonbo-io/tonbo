@@ -346,6 +346,11 @@ where
             limit,
             ..
         } = plan;
+        // Limit placement depends on whether we have a residual predicate:
+        // - Without residual: apply limit in MergeStream for early termination, since all rows
+        //   passing the merge are final results.
+        // - With residual: defer limit to PackageStream, because MergeStream rows still need
+        //   filtering and we can't know how many will pass until evaluation.
         let limit_for_merge = if residual_predicate.is_none() {
             limit
         } else {
@@ -356,7 +361,6 @@ where
         } else {
             None
         };
-        // Only apply limit early when there is no residual predicate to evaluate.
         let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;

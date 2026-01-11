@@ -1033,6 +1033,10 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             if scalar_matches_column(schema, column, value) {
                 Some(predicate.clone())
             } else {
+                eprintln!(
+                    "row_filter: skipping Cmp predicate on column '{column}' (type mismatch or \
+                     missing column)"
+                );
                 None
             }
         }
@@ -1044,6 +1048,10 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             {
                 Some(predicate.clone())
             } else {
+                eprintln!(
+                    "row_filter: skipping Between predicate on column '{column}' (type mismatch \
+                     or missing column)"
+                );
                 None
             }
         }
@@ -1051,6 +1059,10 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             if scalars_match_column(schema, column, values) {
                 Some(predicate.clone())
             } else {
+                eprintln!(
+                    "row_filter: skipping InList predicate on column '{column}' (type mismatch or \
+                     missing column)"
+                );
                 None
             }
         }
@@ -1058,6 +1070,10 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             if is_string_column(schema, column) {
                 Some(predicate.clone())
             } else {
+                eprintln!(
+                    "row_filter: skipping StartsWith predicate on column '{column}' (column is \
+                     not a string type)"
+                );
                 None
             }
         }
@@ -1065,10 +1081,27 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             if column_type(schema, column).is_some() {
                 Some(predicate.clone())
             } else {
+                eprintln!(
+                    "row_filter: skipping IsNull predicate on column '{column}' (column not found \
+                     in schema)"
+                );
                 None
             }
         }
-        Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => None,
+        Expr::BloomFilterEq { column, .. } => {
+            eprintln!(
+                "row_filter: skipping BloomFilterEq predicate on column '{column}' (bloom filter \
+                 predicates not supported for row filtering)"
+            );
+            None
+        }
+        Expr::BloomFilterInList { column, .. } => {
+            eprintln!(
+                "row_filter: skipping BloomFilterInList predicate on column '{column}' (bloom \
+                 filter predicates not supported for row filtering)"
+            );
+            None
+        }
         Expr::And(children) => {
             let mut supported = Vec::new();
             for child in children {
@@ -1095,7 +1128,10 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             }
         }
         Expr::Not(child) => row_filter_expr(child, schema).map(|expr| Expr::Not(Box::new(expr))),
-        _ => None,
+        other => {
+            eprintln!("row_filter: skipping unsupported predicate variant: {other:?}");
+            None
+        }
     }
 }
 
