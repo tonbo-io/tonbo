@@ -92,6 +92,8 @@ Run with `cargo run --example <name>`:
 - `07_streaming`: Process millions of rows without loading into memory
 - `08_nested_types`: Deep struct nesting + Lists stored as Arrow StructArray
 - `09_time_travel`: Query historical snapshots via MVCC timestamps
+- `10_dynamic`: Dynamic schemas without `#[derive(Record)]` (basic, metadata, composite, transactions)
+- `11_observability`: Tracing spans and structured logging with OpenTelemetry
 
 ## Architecture
 
@@ -103,6 +105,44 @@ Tonbo implements a merge-tree optimized for object storage: writes go to WAL →
 
 
 See [docs/overview.md](./docs/overview.md) for the full design.
+
+## Observability
+
+Tonbo uses the [`tracing`](https://docs.rs/tracing) crate for structured logging and distributed tracing. As a library, Tonbo emits spans and events but never initializes a global subscriber - your application controls the observability configuration.
+
+**Quick setup for development:**
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter("info,tonbo=debug")
+    .init();
+```
+
+**Production with JSON output:**
+
+```rust
+tracing_subscriber::fmt()
+    .json()
+    .with_env_filter("info,tonbo=info")
+    .init();
+```
+
+**OpenTelemetry integration:**
+
+```rust
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+let tracer = opentelemetry_otlp::new_pipeline()
+    .tracing()
+    .install_batch(opentelemetry_sdk::runtime::Tokio)?;
+
+tracing_subscriber::registry()
+    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+    .with(tracing_subscriber::fmt::layer())
+    .init();
+```
+
+See [`examples/11_observability.rs`](./examples/11_observability.rs) for complete examples and [docs/rfcs/0012-logs-traces.md](./docs/rfcs/0012-logs-traces.md) for design details.
 
 ## Documentation
 
@@ -169,6 +209,11 @@ We recommend starting with development and non-critical workloads before moving 
 **Integrations**
 - [ ] DataFusion TableProvider
 - [ ] Postgres Foreign Data Wrapper
+
+**Observability**
+- [x] Structured logging via `tracing` crate
+- [x] OpenTelemetry compatible (via `tracing-opentelemetry`)
+- [ ] (in-progress) Async-aware spans for storage operations
 
 ## License
 
