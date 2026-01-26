@@ -1,4 +1,8 @@
-use std::{env, io, sync::Arc, time::Duration};
+use std::{
+    env, io,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use arrow_schema::SchemaRef;
 use fusio::{
@@ -932,7 +936,7 @@ where
     fn build_minor_compaction_state(
         layout: &StorageLayout<FS>,
         cfg: &MinorCompactionOptions,
-        start_id: u64,
+        id_allocator: Arc<AtomicU64>,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
@@ -945,7 +949,11 @@ where
                 .with_key_extractor(extractor)
                 .with_target_level(cfg.target_level),
         );
-        let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, start_id);
+        let compactor = MinorCompactor::with_id_allocator(
+            cfg.segment_threshold,
+            cfg.target_level,
+            id_allocator,
+        );
         Ok(MinorCompactionState::new(compactor, config))
     }
 
@@ -1037,32 +1045,33 @@ where
             .await
             .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
-        let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
-            Some(
-                Self::minor_compaction_state_for_table(
-                    cfg,
-                    &layout,
-                    &manifest,
-                    &table_meta,
-                    Arc::clone(&sstable_schema),
-                    Arc::clone(&sstable_extractor),
-                )
-                .await?,
-            )
+        let sstable_id_allocator = if minor_compaction.is_some() || compaction_options.is_some() {
+            Some(Self::sstable_id_allocator_for_table(&manifest, &table_meta).await?)
         } else {
             None
         };
-        let compaction_state = if compaction_options.is_some() {
-            Some(
-                Self::compaction_worker_state_for_table(
-                    &layout,
-                    &manifest,
-                    &table_meta,
-                    Arc::clone(&sstable_schema),
-                    Arc::clone(&sstable_extractor),
-                )
-                .await?,
-            )
+        let minor_compaction_state = if let (Some(cfg), Some(id_allocator)) =
+            (minor_compaction.as_ref(), sstable_id_allocator.as_ref())
+        {
+            Some(Self::minor_compaction_state_for_table(
+                cfg,
+                &layout,
+                Arc::clone(id_allocator),
+                Arc::clone(&sstable_schema),
+                Arc::clone(&sstable_extractor),
+            )?)
+        } else {
+            None
+        };
+        let compaction_state = if let (Some(_), Some(id_allocator)) =
+            (compaction_options.as_ref(), sstable_id_allocator.as_ref())
+        {
+            Some(Self::compaction_worker_state_for_table(
+                &layout,
+                Arc::clone(id_allocator),
+                Arc::clone(&sstable_schema),
+                Arc::clone(&sstable_extractor),
+            )?)
         } else {
             None
         };
@@ -1097,11 +1106,12 @@ where
             inner.enable_wal(cfg).await?;
         }
 
-        if let (Some(options), Some((sst_config, start_id))) =
+        if let (Some(options), Some((sst_config, id_allocator))) =
             (compaction_options, compaction_state)
         {
             let planner = options.strategy.clone().build();
-            let mut exec = LocalCompactionExecutor::new(Arc::clone(&sst_config), start_id);
+            let mut exec =
+                LocalCompactionExecutor::with_id_allocator(Arc::clone(&sst_config), id_allocator);
             if let Some(max_rows) = options.max_output_rows {
                 exec = exec.with_max_output_rows(max_rows);
             }
@@ -1290,49 +1300,46 @@ where
         self
     }
 
-    async fn minor_compaction_state_for_table<E>(
+    fn minor_compaction_state_for_table(
         cfg: &MinorCompactionOptions,
         layout: &StorageLayout<FS>,
-        manifest: &TonboManifest<FS, E>,
-        table_meta: &TableMeta,
+        id_allocator: Arc<AtomicU64>,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
     where
-        E: Executor + Timer + Clone + 'static,
-        FS: ManifestFs<E>,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: DynFs + FusioCas + 'static,
     {
-        let snapshot = manifest
-            .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
-            .await
-            .map_err(DbBuildError::Manifest)?;
-        let start_id = next_sstable_id(&snapshot);
-        Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
+        Self::build_minor_compaction_state(layout, cfg, id_allocator, schema, extractor)
     }
 
-    async fn compaction_worker_state_for_table<E>(
+    fn compaction_worker_state_for_table(
         layout: &StorageLayout<FS>,
-        manifest: &TonboManifest<FS, E>,
-        table_meta: &TableMeta,
+        id_allocator: Arc<AtomicU64>,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
-    ) -> Result<(Arc<SsTableConfig>, u64), DbBuildError>
+    ) -> Result<(Arc<SsTableConfig>, Arc<AtomicU64>), DbBuildError> {
+        let route = layout.sst_route()?;
+        let config = Arc::new(
+            SsTableConfig::new(schema, route.fs, route.path.clone()).with_key_extractor(extractor),
+        );
+        Ok((config, id_allocator))
+    }
+
+    async fn sstable_id_allocator_for_table<E>(
+        manifest: &TonboManifest<FS, E>,
+        table_meta: &TableMeta,
+    ) -> Result<Arc<AtomicU64>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        let route = layout.sst_route()?;
-        let config = Arc::new(
-            SsTableConfig::new(schema, route.fs, route.path.clone()).with_key_extractor(extractor),
-        );
         let snapshot = manifest
             .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
             .await
             .map_err(DbBuildError::Manifest)?;
-        let start_id = next_sstable_id(&snapshot);
-        Ok((config, start_id))
+        Ok(Arc::new(AtomicU64::new(next_sstable_id(&snapshot))))
     }
 
     /// Internal: recover from WAL state if present, otherwise build fresh.
@@ -1378,32 +1385,34 @@ where
             let fs_dyn = layout.dyn_fs();
             let sstable_schema = mode_config.schema();
             let sstable_extractor = Arc::clone(&mode_config.extractor);
-            let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
-                Some(
-                    Self::minor_compaction_state_for_table(
-                        cfg,
-                        &layout,
-                        &manifest,
-                        &table_meta,
-                        Arc::clone(&sstable_schema),
-                        Arc::clone(&sstable_extractor),
-                    )
-                    .await?,
-                )
+            let sstable_id_allocator = if minor_compaction.is_some() || compaction_options.is_some()
+            {
+                Some(Self::sstable_id_allocator_for_table(&manifest, &table_meta).await?)
             } else {
                 None
             };
-            let compaction_state = if compaction_options.is_some() {
-                Some(
-                    Self::compaction_worker_state_for_table(
-                        &layout,
-                        &manifest,
-                        &table_meta,
-                        Arc::clone(&sstable_schema),
-                        Arc::clone(&sstable_extractor),
-                    )
-                    .await?,
-                )
+            let minor_compaction_state = if let (Some(cfg), Some(id_allocator)) =
+                (minor_compaction.as_ref(), sstable_id_allocator.as_ref())
+            {
+                Some(Self::minor_compaction_state_for_table(
+                    cfg,
+                    &layout,
+                    Arc::clone(id_allocator),
+                    Arc::clone(&sstable_schema),
+                    Arc::clone(&sstable_extractor),
+                )?)
+            } else {
+                None
+            };
+            let compaction_state = if let (Some(_), Some(id_allocator)) =
+                (compaction_options.as_ref(), sstable_id_allocator.as_ref())
+            {
+                Some(Self::compaction_worker_state_for_table(
+                    &layout,
+                    Arc::clone(id_allocator),
+                    Arc::clone(&sstable_schema),
+                    Arc::clone(&sstable_extractor),
+                )?)
             } else {
                 None
             };
@@ -1420,11 +1429,14 @@ where
             .map_err(DbBuildError::Mode)?;
             inner.minor_compaction = minor_compaction_state;
             inner.enable_wal(wal_cfg).await?;
-            if let (Some(options), Some((sst_config, start_id))) =
+            if let (Some(options), Some((sst_config, id_allocator))) =
                 (compaction_options, compaction_state)
             {
                 let planner = options.strategy.clone().build();
-                let mut exec = LocalCompactionExecutor::new(Arc::clone(&sst_config), start_id);
+                let mut exec = LocalCompactionExecutor::with_id_allocator(
+                    Arc::clone(&sst_config),
+                    id_allocator,
+                );
                 if let Some(max_rows) = options.max_output_rows {
                     exec = exec.with_max_output_rows(max_rows);
                 }
