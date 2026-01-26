@@ -13,6 +13,9 @@ use fusio::executor::{Executor, Timer};
 use futures::Future;
 use typed_arrow_dyn::{DynBuilders, DynCell, DynError, DynRow};
 
+#[cfg(any(test, feature = "bench"))]
+#[allow(unused_imports)]
+pub(crate) use crate::pruning::config::{get_pruning_override, set_pruning_override};
 use crate::{
     compaction::{
         executor::{

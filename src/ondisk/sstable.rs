@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::ondisk::merge::{SsTableMerger, SsTableStreamBatch};
 use crate::{
+    db::StorageBackend,
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
     inmem::immutable::{
@@ -51,6 +52,7 @@ use crate::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
         scan::{ParquetStream, UnpinExec},
     },
+    pruning::{PruneInput, prune_or_all},
     query::Predicate,
 };
 
@@ -980,6 +982,40 @@ where
     Ok(stream)
 }
 
+pub(crate) async fn open_parquet_stream_with_pruning<E>(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    projection: Option<ProjectionMask>,
+    predicate: Option<&Predicate>,
+    storage_kind: StorageBackend,
+    executor: E,
+) -> Result<ParquetStream<E>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let mut builder = open_parquet_builder(fs, path, executor).await?;
+    let schema = builder.schema().clone();
+    let metadata = builder.metadata().clone();
+    let prune_output = prune_or_all(PruneInput {
+        metadata: metadata.as_ref(),
+        schema: &schema,
+        predicate,
+        storage_kind,
+        bloom_provider: Some(&mut builder),
+    })
+    .await;
+
+    let mask = projection.unwrap_or_else(ProjectionMask::all);
+    builder = builder.with_projection(mask);
+    builder = builder.with_row_groups(prune_output.row_groups);
+    if let Some(selection) = prune_output.row_selection {
+        builder = builder.with_row_selection(selection);
+    }
+
+    let stream = builder.build().map_err(SsTableError::Parquet)?;
+    Ok(stream)
+}
+
 /// Open a Parquet file as an async record batch stream, returning both the stream and
 /// the Arrow schema derived from the Parquet metadata.
 pub(crate) async fn open_parquet_stream_with_schema<E>(
@@ -991,20 +1027,32 @@ pub(crate) async fn open_parquet_stream_with_schema<E>(
 where
     E: Executor + Clone + 'static,
 {
+    let mut builder = open_parquet_builder(fs, path, executor).await?;
+    let schema = builder.schema().clone();
+    let mask = projection.unwrap_or_else(ProjectionMask::all);
+    builder = builder.with_projection(mask);
+    let stream = builder.build().map_err(SsTableError::Parquet)?;
+    Ok((stream, schema))
+}
+
+async fn open_parquet_builder<E>(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    executor: E,
+) -> Result<ParquetRecordBatchStreamBuilder<AsyncReader<UnpinExec<E>>>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
         .map_err(SsTableError::Fs)?;
-    let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
+    let builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .map_err(SsTableError::Parquet)?;
-    let schema = builder.schema().clone();
-    let mask = projection.unwrap_or_else(ProjectionMask::all);
-    builder = builder.with_projection(mask);
-    let stream = builder.build().map_err(SsTableError::Parquet)?;
-    Ok((stream, schema))
+    Ok(builder)
 }
 
 pub(crate) fn take_record_batch(
@@ -1029,8 +1077,11 @@ mod tests {
         sync::{Arc, atomic::AtomicU64},
     };
 
+    use arrow_array::{Int32Array, Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, executor::NoopExecutor, path::Path};
+    use futures::TryStreamExt;
+    use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -1089,6 +1140,96 @@ mod tests {
         assert_eq!(out1.data.num_rows(), 1);
         assert_eq!(out2.data.num_rows(), 1);
         assert!(out3.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn pruned_and_unpruned_results_match() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = Path::from(
+            tempdir
+                .path()
+                .join("data.parquet")
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 100, 101])) as _,
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40])) as _,
+            ],
+        )
+        .expect("batch");
+
+        let file = fs
+            .open_options(&path, OpenOptions::default().create(true).write(true))
+            .await
+            .expect("open file");
+        let writer = AsyncWriter::new(file, NoopExecutor);
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(2)
+            .build();
+        let mut arrow_writer =
+            AsyncArrowWriter::try_new(writer, Arc::clone(&schema), Some(props)).expect("writer");
+        arrow_writer.write(&batch).await.expect("write");
+        arrow_writer.close().await.expect("close");
+
+        let predicate = Predicate::lt(ColumnRef::new("id"), ScalarValue::from(10_i64));
+
+        let unpruned_stream =
+            open_parquet_stream(Arc::clone(&fs), path.clone(), None, NoopExecutor)
+                .await
+                .expect("unpruned stream");
+        let unpruned_batches = unpruned_stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect unpruned");
+
+        let pruned_stream = open_parquet_stream_with_pruning(
+            Arc::clone(&fs),
+            path.clone(),
+            None,
+            Some(&predicate),
+            StorageBackend::S3,
+            NoopExecutor,
+        )
+        .await
+        .expect("pruned stream");
+        let pruned_batches = pruned_stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect pruned");
+
+        let unpruned_ids = collect_ids(&unpruned_batches);
+        let pruned_ids = collect_ids(&pruned_batches);
+        let unpruned_filtered: Vec<i64> = unpruned_ids.into_iter().filter(|id| *id < 10).collect();
+        let pruned_filtered: Vec<i64> = pruned_ids.into_iter().filter(|id| *id < 10).collect();
+
+        assert_eq!(
+            pruned_filtered, unpruned_filtered,
+            "pruned results should match unpruned results after filtering"
+        );
+    }
+
+    fn collect_ids(batches: &[RecordBatch]) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for batch in batches {
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("id column");
+            for idx in 0..col.len() {
+                ids.push(col.value(idx));
+            }
+        }
+        ids
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

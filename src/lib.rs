@@ -261,6 +261,9 @@ pub mod db;
 
 pub(crate) mod query;
 
+/// Pruning abstraction boundary for the read path.
+pub(crate) mod pruning;
+
 /// Write-ahead log framework (async, fusio-backed).
 pub(crate) mod wal;
 

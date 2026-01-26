@@ -15,6 +15,8 @@ use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, Segment
 use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
+#[cfg(feature = "bench")]
+use crate::pruning::config::BenchmarkPruningConfig;
 use crate::{
     compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
@@ -186,6 +188,16 @@ impl WalConfig {
     }
 }
 
+#[cfg(feature = "bench")]
+/// Benchmark-only tuning bundle for DB construction.
+#[derive(Clone, Debug, Default)]
+pub struct BenchmarkConfig {
+    /// Pruning overrides applied during benchmarks.
+    pub pruning_config: Option<BenchmarkPruningConfig>,
+    /// WAL overrides applied during benchmarks.
+    pub wal_config: Option<WalConfig>,
+}
+
 pub(super) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
 
 /// Durability classification for storage backends.
@@ -219,11 +231,17 @@ pub struct StorageConfig<FS> {
     wal_config: Option<WalConfig>,
     durability: DurabilityClass,
     create_layout: bool,
+    storage_kind: crate::db::StorageBackend,
 }
 
 impl<FS> StorageConfig<FS> {
     /// Create a new storage configuration.
-    pub fn new(fs: Arc<FS>, root: Path, durability: DurabilityClass) -> Self {
+    pub(crate) fn new(
+        fs: Arc<FS>,
+        root: Path,
+        durability: DurabilityClass,
+        storage_kind: crate::db::StorageBackend,
+    ) -> Self {
         let wal_config = if durability.is_durable() {
             Some(WalConfig::default())
         } else {
@@ -236,6 +254,7 @@ impl<FS> StorageConfig<FS> {
             wal_config,
             durability,
             create_layout: false,
+            storage_kind,
         }
     }
 
@@ -292,6 +311,11 @@ impl<FS> StorageConfig<FS> {
     /// Returns whether layout creation is enabled.
     pub fn should_create_layout(&self) -> bool {
         self.create_layout
+    }
+
+    /// Returns the storage kind associated with this configuration.
+    pub(crate) fn storage_kind(&self) -> crate::db::StorageBackend {
+        self.storage_kind
     }
 
     /// Execute layout preparation (creating directories) if enabled.
@@ -793,7 +817,12 @@ impl DbBuilder<Unconfigured> {
         let fs = Arc::new(InMemoryFs::new());
         Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: StorageConfig::new(fs, root, DurabilityClass::Volatile),
+            state: StorageConfig::new(
+                fs,
+                root,
+                DurabilityClass::Volatile,
+                crate::db::StorageBackend::Memory,
+            ),
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
@@ -815,7 +844,13 @@ impl DbBuilder<Unconfigured> {
                 reason: err.to_string(),
             })?;
         let fs = Arc::new(LocalFs {});
-        let state = StorageConfig::new(fs, path, DurabilityClass::Durable).with_create_layout(true);
+        let state = StorageConfig::new(
+            fs,
+            path,
+            DurabilityClass::Durable,
+            crate::db::StorageBackend::Disk,
+        )
+        .with_create_layout(true);
         Ok(DbBuilder {
             mode_config: self.mode_config,
             state,
@@ -837,7 +872,12 @@ impl DbBuilder<Unconfigured> {
         };
         Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: StorageConfig::new(fs, root, DurabilityClass::Durable),
+            state: StorageConfig::new(
+                fs,
+                root,
+                DurabilityClass::Durable,
+                crate::db::StorageBackend::S3,
+            ),
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
@@ -1086,6 +1126,7 @@ where
             table_meta,
             wal_cfg.clone(),
             executor,
+            state.storage_kind(),
         );
 
         inner.minor_compaction = minor_compaction_state;
@@ -1194,6 +1235,22 @@ where
             existing.merge(overrides);
         } else if self.state.durability.is_durable() {
             self.state.wal_config = Some(overrides);
+        }
+        self
+    }
+
+    #[cfg(feature = "bench")]
+    /// Apply benchmark-only configuration overrides.
+    ///
+    /// Note: pruning overrides are applied globally within the process.
+    #[must_use]
+    pub fn with_benchmark_config(mut self, config: BenchmarkConfig) -> Self {
+        if let Some(pruning_config) = config.pruning_config {
+            let override_cfg = pruning_config.to_pruning_config();
+            crate::pruning::config::set_pruning_override(override_cfg);
+        }
+        if let Some(wal_config) = config.wal_config {
+            self = self.wal_config(wal_config);
         }
         self
     }
@@ -1319,6 +1376,7 @@ where
                 mode_config,
                 Arc::clone(&executor),
                 fs_dyn,
+                state.storage_kind(),
                 wal_cfg.clone(),
                 manifest,
                 manifest_table,

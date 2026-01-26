@@ -92,6 +92,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         table_meta.clone(),
         Some(wal_cfg.clone()),
         Arc::clone(&executor),
+        crate::db::StorageBackend::Memory,
     );
     db.enable_wal(wal_cfg.clone()).await.expect("enable wal");
 
@@ -116,6 +117,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         recover_config,
         Arc::clone(&executor),
         recover_fs,
+        crate::db::StorageBackend::Memory,
         wal_cfg.clone(),
         manifest,
         manifest_table,
@@ -232,6 +234,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         config,
         executor.clone(),
         test_fs,
+        crate::db::StorageBackend::Memory,
         cfg,
         manifest,
         manifest_table,

@@ -26,6 +26,8 @@ mod scan;
 mod tests;
 mod wal;
 
+#[cfg(feature = "bench")]
+pub use builder::BenchmarkConfig;
 pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig, wal_tuning,
 };
@@ -33,6 +35,8 @@ pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
+#[cfg(feature = "bench")]
+pub use crate::pruning::config::{BenchmarkPruningConfig, BenchmarkPruningMode};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
@@ -50,6 +54,20 @@ use crate::{
         replay::Replayer, state::WalStateHandle,
     },
 };
+
+/// Storage backend classification for a DB instance.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum StorageBackend {
+    /// Backend type is not known.
+    #[default]
+    Unknown,
+    /// In-memory storage (no I/O).
+    Memory,
+    /// Local filesystem storage.
+    Disk,
+    /// S3-backed object storage.
+    S3,
+}
 pub use crate::{
     inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     mode::DynModeConfig,
@@ -369,6 +387,9 @@ where
     pub(crate) executor: Arc<E>,
     /// Unified filesystem access for SSTable reads, WAL, and other I/O operations.
     fs: Arc<dyn DynFs>,
+    /// Storage classification for pruning decisions.
+    #[allow(dead_code)]
+    storage_kind: StorageBackend,
     // Optional WAL handle when durability is enabled.
     wal: Option<WalHandle<E>>,
     /// Pending WAL configuration captured before the writer is installed.
@@ -416,6 +437,9 @@ where
     pub(crate) executor: Arc<E>,
     /// Unified filesystem access for SSTable reads, WAL, and other I/O operations.
     fs: Arc<dyn DynFs>,
+    /// Storage classification for pruning decisions.
+    #[allow(dead_code)]
+    storage_kind: StorageBackend,
     // Optional WAL handle when durability is enabled.
     wal: Option<WalHandle<E>>,
     /// Pending WAL configuration captured before the writer is installed.
@@ -466,6 +490,12 @@ where
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
+    /// Access the storage kind associated with this DB.
+    #[allow(dead_code)]
+    pub(crate) fn storage_kind(&self) -> StorageBackend {
+        self.storage_kind
+    }
+
     #[inline]
     fn seal_state_lock(&self) -> MutexGuard<'_, SealState> {
         self.seal_state.lock().expect("seal_state mutex poisoned")
@@ -521,6 +551,7 @@ where
         table_meta: TableMeta,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
+        storage_kind: StorageBackend,
     ) -> Self {
         Self {
             schema,
@@ -531,6 +562,7 @@ where
             policy: crate::inmem::policy::default_policy(),
             executor,
             fs,
+            storage_kind,
             wal: None,
             wal_config,
             table_meta,
@@ -550,6 +582,7 @@ where
         config: DynModeConfig,
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
+        storage_kind: StorageBackend,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
@@ -559,6 +592,7 @@ where
             config,
             executor,
             fs,
+            storage_kind,
             wal_cfg,
             manifest,
             manifest_table,
@@ -572,6 +606,7 @@ where
         config: DynModeConfig,
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
+        storage_kind: StorageBackend,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
@@ -597,6 +632,7 @@ where
             table_meta,
             Some(wal_cfg.clone()),
             executor,
+            storage_kind,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -965,6 +1001,7 @@ where
             table_meta,
             None,
             executor,
+            StorageBackend::Memory,
         ))
     }
 }

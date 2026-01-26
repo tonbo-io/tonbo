@@ -19,7 +19,7 @@ use crate::{
     mvcc::Timestamp,
     ondisk::{
         scan::{DeleteStreamWithExtractor, SstableScan},
-        sstable::open_parquet_stream,
+        sstable::{open_parquet_stream, open_parquet_stream_with_pruning},
     },
     query::{
         scan::{ScanPlan, projection_with_predicate},
@@ -138,6 +138,7 @@ where
             streams.push(ScanStream::from(txn_scan));
         }
         let projection_schema = Arc::clone(&plan.scan_schema);
+        let storage_kind = self.storage_kind();
         let mutable_scan = OwnedMutableScan::from_guard(
             self.mem.read(),
             Some(Arc::clone(&projection_schema)),
@@ -165,10 +166,16 @@ where
         for sst_entry in plan.sst_entries() {
             let data_path = sst_entry.data_path().clone();
             let executor: E = (**self.executor()).clone();
-            let data_stream =
-                open_parquet_stream(Arc::clone(&self.fs), data_path, None, executor.clone())
-                    .await
-                    .map_err(crate::db::DBError::SsTable)?;
+            let data_stream = open_parquet_stream_with_pruning(
+                Arc::clone(&self.fs),
+                data_path,
+                None,
+                Some(&plan._predicate),
+                storage_kind,
+                executor.clone(),
+            )
+            .await
+            .map_err(crate::db::DBError::SsTable)?;
 
             // Open delete sidecar stream if present (streaming merge, no eager loading)
             let delete_stream_with_extractor = if let Some(delete_path) = sst_entry.delete_path() {
