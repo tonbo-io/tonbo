@@ -20,8 +20,8 @@ use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
-        ManifestError, ManifestFs, TableMeta, TonboManifest,
-        bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
+        ManifestError, ManifestFs, TableMeta, TonboManifest, VersionState,
+        bootstrap::{ensure_manifest_dirs, init_fs_manifest},
     },
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
@@ -1247,11 +1247,23 @@ where
         FS: ManifestFs<E>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        let snapshot = manifest
-            .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
-            .await
-            .map_err(DbBuildError::Manifest)?;
-        let start_id = cfg.start_id.unwrap_or_else(|| next_sstable_id(&snapshot));
+        let start_id: u64 = {
+            let snapshot = manifest
+                .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
+                .await
+                .map_err(DbBuildError::Manifest)?;
+
+            let versions = match snapshot.latest_version.as_ref() {
+                Some(v) if !v.ssts().is_empty() => std::slice::from_ref(v),
+                _ => &manifest
+                    .list_versions(table_meta.table_id, 0)
+                    .await
+                    .map_err(DbBuildError::Manifest)?,
+            };
+
+            cfg.start_id.unwrap_or_else(|| next_sstable_id(versions))
+        };
+
         Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
     }
 
@@ -1344,16 +1356,16 @@ where
     }
 }
 
-fn next_sstable_id(snapshot: &TableSnapshot) -> u64 {
-    snapshot
-        .latest_version
-        .as_ref()
-        .and_then(|version| {
+fn next_sstable_id(versions: &[VersionState]) -> u64 {
+    let max_id = versions
+        .iter()
+        .flat_map(|version| {
             version
                 .ssts()
                 .iter()
                 .flat_map(|level| level.iter().map(|entry| entry.sst_id().raw()))
-                .max()
         })
-        .map_or(1, |max_id| max_id.saturating_add(1))
+        .max();
+
+    max_id.map_or(1, |max_id| max_id.saturating_add(1))
 }
