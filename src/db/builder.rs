@@ -1249,7 +1249,7 @@ where
     {
         let start_id: u64 = {
             let snapshot = manifest
-                .snapshot_latest(table_meta.table_id)
+                .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
                 .await
                 .map_err(DbBuildError::Manifest)?;
 
