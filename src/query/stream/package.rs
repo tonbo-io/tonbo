@@ -7,15 +7,14 @@ use std::{
     task::{Context, Poll},
 };
 
+use aisle::{CmpOp, Expr};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
+use datafusion_common::ScalarValue;
 use fusio::executor::Executor;
 use futures::Stream;
 use pin_project_lite::pin_project;
 use thiserror::Error;
-use tonbo_predicate::{
-    ComparisonOp, Operand, Predicate, PredicateNode, PredicateVisitor, ScalarValue, VisitOutcome,
-};
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
 use crate::query::stream::{StreamError, merge::MergeStream};
@@ -31,7 +30,7 @@ pin_project! {
         #[pin]
         inner: MergeStream<'t, E>,
         builder: DynRecordBatchBuilder,
-        residual_predicate: Option<Predicate>,
+        residual_predicate: Option<Expr>,
         residual: Option<ResidualEvaluator>,
         scan_schema: SchemaRef,
         scan_dyn_schema: DynSchema,
@@ -53,7 +52,7 @@ where
         merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
-        residual_predicate: Option<Predicate>,
+        residual_predicate: Option<Expr>,
     ) -> Result<Self, StreamError> {
         Self::with_limit(
             batch_size,
@@ -71,7 +70,7 @@ where
         merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
-        residual_predicate: Option<Predicate>,
+        residual_predicate: Option<Expr>,
         limit: Option<usize>,
     ) -> Result<Self, StreamError> {
         assert!(batch_size > 0, "batch size must be greater than zero");
@@ -231,6 +230,50 @@ pub enum ResidualError {
     MissingValue,
     #[error("predicate evaluation produced a residual clause")]
     UnexpectedResidual,
+    /// Predicate contains an unsupported expression variant.
+    #[error("predicate evaluation encountered unsupported predicate")]
+    UnsupportedPredicate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TriState {
+    True,
+    False,
+    Unknown,
+}
+
+impl TriState {
+    fn from_bool(value: bool) -> Self {
+        if value { Self::True } else { Self::False }
+    }
+
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    fn is_true(self) -> bool {
+        matches!(self, Self::True)
+    }
 }
 
 struct ResidualEvaluator {
@@ -248,172 +291,383 @@ impl ResidualEvaluator {
         Self { column_map }
     }
 
-    fn matches_owned(&self, predicate: &Predicate, row: &DynRow) -> Result<bool, ResidualError> {
-        let mut visitor = ResidualOwnedRowVisitor {
-            row,
-            column_map: &self.column_map,
+    fn matches_owned(&self, predicate: &Expr, row: &DynRow) -> Result<bool, ResidualError> {
+        let outcome = self.evaluate_expr(predicate, row)?;
+        Ok(outcome.is_true())
+    }
+
+    fn evaluate_expr(&self, expr: &Expr, row: &DynRow) -> Result<TriState, ResidualError> {
+        match expr {
+            Expr::True => Ok(TriState::True),
+            Expr::False => Ok(TriState::False),
+            Expr::Cmp { column, op, value } => self.evaluate_cmp(column, *op, value, row),
+            Expr::Between {
+                column,
+                low,
+                high,
+                inclusive,
+            } => self.evaluate_between(column, low, high, *inclusive, row),
+            Expr::InList { column, values } => self.evaluate_in_list(column, values, row),
+            Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => {
+                Err(ResidualError::UnsupportedPredicate)
+            }
+            Expr::StartsWith { column, prefix } => self.evaluate_starts_with(column, prefix, row),
+            Expr::IsNull { column, negated } => self.evaluate_is_null(column, *negated, row),
+            Expr::And(children) => {
+                if children.is_empty() {
+                    return Ok(TriState::True);
+                }
+                let mut result = TriState::True;
+                for child in children {
+                    result = result.and(self.evaluate_expr(child, row)?);
+                    if result == TriState::False {
+                        return Ok(result);
+                    }
+                }
+                Ok(result)
+            }
+            Expr::Or(children) => {
+                if children.is_empty() {
+                    return Ok(TriState::False);
+                }
+                let mut result = TriState::False;
+                for child in children {
+                    result = result.or(self.evaluate_expr(child, row)?);
+                    if result == TriState::True {
+                        return Ok(result);
+                    }
+                }
+                Ok(result)
+            }
+            Expr::Not(child) => Ok(self.evaluate_expr(child, row)?.not()),
+            _ => Err(ResidualError::UnexpectedResidual),
+        }
+    }
+
+    fn evaluate_cmp(
+        &self,
+        column: &str,
+        op: CmpOp,
+        value: &ScalarValue,
+        row: &DynRow,
+    ) -> Result<TriState, ResidualError> {
+        let Some(lhs) = self.resolve_column(column, row)? else {
+            return Ok(TriState::Unknown);
         };
-        let outcome = predicate.accept(&mut visitor)?;
-        if outcome.residual.is_some() {
-            return Err(ResidualError::UnexpectedResidual);
+        if lhs.is_null() || value.is_null() {
+            return Ok(TriState::Unknown);
         }
-        outcome.value.ok_or(ResidualError::MissingValue)
-    }
-}
-
-struct ResidualOwnedRowVisitor<'a> {
-    row: &'a DynRow,
-    column_map: &'a HashMap<Arc<str>, usize>,
-}
-
-impl<'a> ResidualOwnedRowVisitor<'a> {
-    fn resolve_operand(&self, operand: &Operand) -> Result<ScalarValue, ResidualError> {
-        match operand {
-            Operand::Literal(literal) => Ok(literal.clone()),
-            Operand::Column(column) => {
-                let idx = self
-                    .column_map
-                    .get(column.name.as_ref())
-                    .copied()
-                    .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
-                let cell = self
-                    .row
-                    .0
-                    .get(idx)
-                    .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
-                match cell {
-                    None => Ok(ScalarValue::null()),
-                    Some(c) => convert_owned_cell(c),
-                }
-            }
-        }
-    }
-
-    fn require_value(&self, outcome: VisitOutcome<bool>) -> Result<bool, ResidualError> {
-        if outcome.residual.is_some() {
-            return Err(ResidualError::UnexpectedResidual);
-        }
-        outcome.value.ok_or(ResidualError::MissingValue)
-    }
-}
-
-impl<'a> PredicateVisitor for ResidualOwnedRowVisitor<'a> {
-    type Error = ResidualError;
-    type Value = bool;
-
-    fn visit_leaf(
-        &mut self,
-        leaf: &PredicateNode,
-    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
-        let result = match leaf {
-            PredicateNode::True => true,
-            PredicateNode::Compare { left, op, right } => {
-                let lhs = self.resolve_operand(left)?;
-                let rhs = self.resolve_operand(right)?;
-                match op {
-                    ComparisonOp::Equal => lhs == rhs,
-                    ComparisonOp::NotEqual => lhs != rhs,
-                    ComparisonOp::LessThan => lhs
-                        .compare(&rhs)
-                        .map(|ord| ord == std::cmp::Ordering::Less)
-                        .unwrap_or(false),
-                    ComparisonOp::LessThanOrEqual => lhs
-                        .compare(&rhs)
-                        .map(|ord| ord != std::cmp::Ordering::Greater)
-                        .unwrap_or(false),
-                    ComparisonOp::GreaterThan => lhs
-                        .compare(&rhs)
-                        .map(|ord| ord == std::cmp::Ordering::Greater)
-                        .unwrap_or(false),
-                    ComparisonOp::GreaterThanOrEqual => lhs
-                        .compare(&rhs)
-                        .map(|ord| ord != std::cmp::Ordering::Less)
-                        .unwrap_or(false),
-                }
-            }
-            PredicateNode::InList {
-                expr,
-                list,
-                negated,
-            } => {
-                let value = self.resolve_operand(expr)?;
-                if value.is_null() {
-                    *negated
-                } else {
-                    let contains = list.contains(&value);
-                    if *negated { !contains } else { contains }
-                }
-            }
-            PredicateNode::IsNull { expr, negated } => {
-                let value = self.resolve_operand(expr)?;
-                if *negated {
-                    !value.is_null()
-                } else {
-                    value.is_null()
-                }
-            }
-            PredicateNode::Not(_) | PredicateNode::And(_) | PredicateNode::Or(_) => {
-                unreachable!("visit_leaf only handles terminal variants")
-            }
+        let ordering = compare_scalar_values(&lhs, value);
+        let result = match op {
+            CmpOp::Eq => ordering.map(|ord| ord == std::cmp::Ordering::Equal),
+            CmpOp::NotEq => ordering.map(|ord| ord != std::cmp::Ordering::Equal),
+            CmpOp::Lt => ordering.map(|ord| ord == std::cmp::Ordering::Less),
+            CmpOp::LtEq => ordering.map(|ord| ord != std::cmp::Ordering::Greater),
+            CmpOp::Gt => ordering.map(|ord| ord == std::cmp::Ordering::Greater),
+            CmpOp::GtEq => ordering.map(|ord| ord != std::cmp::Ordering::Less),
         };
-        Ok(VisitOutcome::value(result))
+        Ok(result.map_or(TriState::Unknown, TriState::from_bool))
     }
 
-    fn combine_not(
-        &mut self,
-        _original: &Predicate,
-        child: VisitOutcome<Self::Value>,
-    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
-        let value = self.require_value(child)?;
-        Ok(VisitOutcome::value(!value))
+    fn evaluate_between(
+        &self,
+        column: &str,
+        low: &ScalarValue,
+        high: &ScalarValue,
+        inclusive: bool,
+        row: &DynRow,
+    ) -> Result<TriState, ResidualError> {
+        let op_low = if inclusive { CmpOp::GtEq } else { CmpOp::Gt };
+        let op_high = if inclusive { CmpOp::LtEq } else { CmpOp::Lt };
+        let lower = self.evaluate_cmp(column, op_low, low, row)?;
+        let upper = self.evaluate_cmp(column, op_high, high, row)?;
+        Ok(lower.and(upper))
     }
 
-    fn combine_and(
-        &mut self,
-        _original: &Predicate,
-        children: Vec<VisitOutcome<Self::Value>>,
-    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
-        for outcome in children {
-            let value = self.require_value(outcome)?;
-            if !value {
-                return Ok(VisitOutcome::value(false));
+    fn evaluate_in_list(
+        &self,
+        column: &str,
+        values: &[ScalarValue],
+        row: &DynRow,
+    ) -> Result<TriState, ResidualError> {
+        let Some(lhs) = self.resolve_column(column, row)? else {
+            return Ok(TriState::Unknown);
+        };
+        if lhs.is_null() {
+            return Ok(TriState::Unknown);
+        }
+        let mut saw_null = false;
+        for value in values {
+            if value.is_null() {
+                saw_null = true;
+                continue;
+            }
+            if let Some(ordering) = compare_scalar_values(&lhs, value) {
+                if ordering == std::cmp::Ordering::Equal {
+                    return Ok(TriState::True);
+                }
+            } else {
+                saw_null = true;
             }
         }
-        Ok(VisitOutcome::value(true))
+        if saw_null {
+            Ok(TriState::Unknown)
+        } else {
+            Ok(TriState::False)
+        }
     }
 
-    fn combine_or(
-        &mut self,
-        _original: &Predicate,
-        children: Vec<VisitOutcome<Self::Value>>,
-    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
-        for outcome in children {
-            let value = self.require_value(outcome)?;
-            if value {
-                return Ok(VisitOutcome::value(true));
-            }
+    fn evaluate_starts_with(
+        &self,
+        column: &str,
+        prefix: &str,
+        row: &DynRow,
+    ) -> Result<TriState, ResidualError> {
+        let Some(value) = self.resolve_column(column, row)? else {
+            return Ok(TriState::Unknown);
+        };
+        if value.is_null() {
+            return Ok(TriState::Unknown);
         }
-        Ok(VisitOutcome::value(false))
+        match value {
+            ScalarValue::Utf8(Some(value))
+            | ScalarValue::LargeUtf8(Some(value))
+            | ScalarValue::Utf8View(Some(value)) => {
+                Ok(TriState::from_bool(value.starts_with(prefix)))
+            }
+            _ => Err(ResidualError::UnsupportedColumn),
+        }
+    }
+
+    fn evaluate_is_null(
+        &self,
+        column: &str,
+        negated: bool,
+        row: &DynRow,
+    ) -> Result<TriState, ResidualError> {
+        let value = self.resolve_column(column, row)?;
+        let is_null = value.as_ref().is_none_or(ScalarValue::is_null);
+        Ok(TriState::from_bool(if negated {
+            !is_null
+        } else {
+            is_null
+        }))
+    }
+
+    fn resolve_column(
+        &self,
+        column: &str,
+        row: &DynRow,
+    ) -> Result<Option<ScalarValue>, ResidualError> {
+        let idx = self
+            .column_map
+            .get(column)
+            .copied()
+            .ok_or_else(|| ResidualError::MissingColumn(Arc::<str>::from(column)))?;
+        let cell = row
+            .0
+            .get(idx)
+            .ok_or_else(|| ResidualError::MissingColumn(Arc::<str>::from(column)))?;
+        match cell {
+            None => Ok(None),
+            Some(c) => convert_owned_cell(c).map(Some),
+        }
+    }
+}
+
+fn compare_scalar_values(lhs: &ScalarValue, rhs: &ScalarValue) -> Option<std::cmp::Ordering> {
+    if lhs.data_type() == rhs.data_type() {
+        return lhs.partial_cmp(rhs);
+    }
+    numeric_compare(lhs, rhs)
+}
+
+fn numeric_compare(lhs: &ScalarValue, rhs: &ScalarValue) -> Option<std::cmp::Ordering> {
+    let lhs_is_float = is_float_scalar(lhs);
+    let rhs_is_float = is_float_scalar(rhs);
+    match (lhs_is_float, rhs_is_float) {
+        (true, true) => {
+            let lhs_val = scalar_to_f64(lhs)?;
+            let rhs_val = scalar_to_f64(rhs)?;
+            lhs_val.partial_cmp(&rhs_val)
+        }
+        (false, false) => {
+            let lhs_val = scalar_to_i128(lhs)?;
+            let rhs_val = scalar_to_i128(rhs)?;
+            Some(lhs_val.cmp(&rhs_val))
+        }
+        (true, false) => {
+            let lhs_val = scalar_to_f64(lhs)?;
+            let rhs_val = scalar_to_i128(rhs)?;
+            compare_i128_f64(rhs_val, lhs_val).map(std::cmp::Ordering::reverse)
+        }
+        (false, true) => {
+            let lhs_val = scalar_to_i128(lhs)?;
+            let rhs_val = scalar_to_f64(rhs)?;
+            compare_i128_f64(lhs_val, rhs_val)
+        }
+    }
+}
+
+// Compare an integer to a float without converting the integer to f64.
+fn compare_i128_f64(int_val: i128, float_val: f64) -> Option<std::cmp::Ordering> {
+    if float_val.is_nan() {
+        return None;
+    }
+    if float_val.is_infinite() {
+        return Some(if float_val.is_sign_positive() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    if float_val == 0.0 {
+        return Some(int_val.cmp(&0));
+    }
+    if int_val == 0 {
+        return Some(if float_val.is_sign_positive() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    let int_neg = int_val.is_negative();
+    let float_neg = float_val.is_sign_negative();
+    if int_neg != float_neg {
+        return Some(if int_neg {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    let int_abs = i128_abs_to_u128(int_val);
+    let (mantissa, exp2) = decompose_f64(float_val.abs());
+    let ordering = compare_u128_f64(int_abs, mantissa, exp2);
+    Some(if int_neg {
+        ordering.reverse()
+    } else {
+        ordering
+    })
+}
+
+fn compare_u128_f64(int_abs: u128, mantissa: u64, exp2: i32) -> std::cmp::Ordering {
+    let int_bits = bit_length_u128(int_abs);
+    let mantissa_bits = bit_length_u64(mantissa);
+    if exp2 >= 0 {
+        let float_bits = mantissa_bits + exp2;
+        if float_bits > int_bits {
+            return std::cmp::Ordering::Less;
+        }
+        if float_bits < int_bits {
+            return std::cmp::Ordering::Greater;
+        }
+        let float_int = (mantissa as u128) << (exp2 as u32);
+        return int_abs.cmp(&float_int);
+    }
+    let shift = -exp2;
+    let scaled_int_bits = int_bits + shift;
+    if scaled_int_bits > mantissa_bits {
+        return std::cmp::Ordering::Greater;
+    }
+    if scaled_int_bits < mantissa_bits {
+        return std::cmp::Ordering::Less;
+    }
+    let scaled_int = int_abs << (shift as u32);
+    scaled_int.cmp(&(mantissa as u128))
+}
+
+fn decompose_f64(value: f64) -> (u64, i32) {
+    let bits = value.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp_bits == 0 {
+        (frac, -1074)
+    } else {
+        let mantissa = (1u64 << 52) | frac;
+        (mantissa, exp_bits - 1023 - 52)
+    }
+}
+
+fn i128_abs_to_u128(value: i128) -> u128 {
+    if value >= 0 {
+        value as u128
+    } else {
+        let value_u = value as u128;
+        (!value_u).wrapping_add(1)
+    }
+}
+
+fn bit_length_u128(value: u128) -> i32 {
+    if value == 0 {
+        0
+    } else {
+        128 - value.leading_zeros() as i32
+    }
+}
+
+fn bit_length_u64(value: u64) -> i32 {
+    if value == 0 {
+        0
+    } else {
+        64 - value.leading_zeros() as i32
+    }
+}
+
+fn is_float_scalar(value: &ScalarValue) -> bool {
+    matches!(
+        value,
+        ScalarValue::Float16(_) | ScalarValue::Float32(_) | ScalarValue::Float64(_)
+    )
+}
+
+fn scalar_to_i128(value: &ScalarValue) -> Option<i128> {
+    match value {
+        ScalarValue::Int8(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::Int16(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::Int32(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::Int64(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::UInt8(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::UInt16(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::UInt32(Some(v)) => Some(i128::from(*v)),
+        ScalarValue::UInt64(Some(v)) => Some(i128::from(*v)),
+        _ => None,
+    }
+}
+
+fn scalar_to_f64(value: &ScalarValue) -> Option<f64> {
+    match value {
+        ScalarValue::Float16(Some(v)) => Some(f32::from(*v) as f64),
+        ScalarValue::Float32(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::Float64(Some(v)) => Some(*v),
+        ScalarValue::Int8(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::Int16(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::Int32(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::Int64(Some(v)) => Some(*v as f64),
+        ScalarValue::UInt8(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::UInt16(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::UInt32(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::UInt64(Some(v)) => Some(*v as f64),
+        _ => None,
     }
 }
 
 fn convert_owned_cell(cell: &typed_arrow_dyn::DynCell) -> Result<ScalarValue, ResidualError> {
     use typed_arrow_dyn::DynCell;
     match cell {
-        DynCell::Str(s) => Ok(ScalarValue::from(s.to_string())),
-        DynCell::Bin(b) => Ok(ScalarValue::from(b.clone())),
-        DynCell::Bool(v) => Ok(ScalarValue::from(*v)),
-        DynCell::I8(v) => Ok(ScalarValue::from(*v as i64)),
-        DynCell::I16(v) => Ok(ScalarValue::from(*v as i64)),
-        DynCell::I32(v) => Ok(ScalarValue::from(*v as i64)),
-        DynCell::I64(v) => Ok(ScalarValue::from(*v)),
-        DynCell::U8(v) => Ok(ScalarValue::from(*v as u64)),
-        DynCell::U16(v) => Ok(ScalarValue::from(*v as u64)),
-        DynCell::U32(v) => Ok(ScalarValue::from(*v as u64)),
-        DynCell::U64(v) => Ok(ScalarValue::from(*v)),
-        DynCell::F32(v) => Ok(ScalarValue::from(*v as f64)),
-        DynCell::F64(v) => Ok(ScalarValue::from(*v)),
-        DynCell::Null => Ok(ScalarValue::null()),
+        DynCell::Str(s) => Ok(ScalarValue::Utf8(Some(s.to_string()))),
+        DynCell::Bin(b) => Ok(ScalarValue::Binary(Some(b.clone()))),
+        DynCell::Bool(v) => Ok(ScalarValue::Boolean(Some(*v))),
+        DynCell::I8(v) => Ok(ScalarValue::Int8(Some(*v))),
+        DynCell::I16(v) => Ok(ScalarValue::Int16(Some(*v))),
+        DynCell::I32(v) => Ok(ScalarValue::Int32(Some(*v))),
+        DynCell::I64(v) => Ok(ScalarValue::Int64(Some(*v))),
+        DynCell::U8(v) => Ok(ScalarValue::UInt8(Some(*v))),
+        DynCell::U16(v) => Ok(ScalarValue::UInt16(Some(*v))),
+        DynCell::U32(v) => Ok(ScalarValue::UInt32(Some(*v))),
+        DynCell::U64(v) => Ok(ScalarValue::UInt64(Some(*v))),
+        DynCell::F32(v) => Ok(ScalarValue::Float32(Some(*v))),
+        DynCell::F64(v) => Ok(ScalarValue::Float64(Some(*v))),
+        DynCell::Null => Ok(ScalarValue::Null),
         _ => Err(ResidualError::UnsupportedColumn),
     }
 }
@@ -433,7 +687,7 @@ mod tests {
         inmem::mutable::memtable::DynMem,
         mvcc::Timestamp,
         query::{
-            ColumnRef, Predicate, ScalarValue,
+            Expr, ScalarValue,
             stream::{Order, OwnedMutableScan, ScanStream, merge::MergeStream},
         },
         test::build_batch,
@@ -540,7 +794,7 @@ mod tests {
             .insert_batch(batch, Timestamp::new(1))
             .expect("insert batch");
 
-        let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+        let predicate = Expr::gt("v", ScalarValue::from(0i64));
 
         let mutable_guard = mutable.read();
         let mutable_scan =
@@ -601,7 +855,7 @@ mod tests {
             .expect("insert batch");
 
         // Predicate references a missing column.
-        let predicate = Predicate::gt(ColumnRef::new("missing"), ScalarValue::from(0i64));
+        let predicate = Expr::gt("missing", ScalarValue::from(0i64));
 
         let mutable_guard = mutable.read();
         let mutable_scan =
@@ -638,5 +892,51 @@ mod tests {
             }
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[test]
+    fn residual_numeric_compare_large_uint64_vs_float64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+        let row = DynRow(vec![Some(DynCell::U64(9_007_199_254_740_993))]);
+        let float_value = ScalarValue::Float64(Some(9_007_199_254_740_992.0));
+
+        let gt_predicate = Expr::gt("v", float_value.clone());
+        let eq_predicate = Expr::eq("v", float_value);
+
+        assert!(
+            evaluator
+                .matches_owned(&gt_predicate, &row)
+                .expect("gt predicate")
+        );
+        assert!(
+            !evaluator
+                .matches_owned(&eq_predicate, &row)
+                .expect("eq predicate")
+        );
+    }
+
+    #[test]
+    fn residual_numeric_compare_u64_near_max_vs_float64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+        // This value rounds down to the float bucket at this magnitude.
+        let row_value = 18_446_744_073_709_548_616_u64;
+        let row = DynRow(vec![Some(DynCell::U64(row_value))]);
+        let float_value = ScalarValue::Float64(Some(18_446_744_073_709_547_520.0));
+
+        let gt_predicate = Expr::gt("v", float_value.clone());
+        let eq_predicate = Expr::eq("v", float_value);
+
+        assert!(
+            evaluator
+                .matches_owned(&gt_predicate, &row)
+                .expect("gt predicate")
+        );
+        assert!(
+            !evaluator
+                .matches_owned(&eq_predicate, &row)
+                .expect("eq predicate")
+        );
     }
 }

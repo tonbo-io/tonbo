@@ -66,26 +66,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Equality: price == 29
     println!("1. price == 29:");
-    let filter = Predicate::eq(ColumnRef::new("price"), ScalarValue::from(29_i64));
+    let filter = Expr::eq("price", ScalarValue::from(29_i64));
     print_products(&db, filter).await?;
 
     // 2. Comparison: price > 100
     println!("\n2. price > 100:");
-    let filter = Predicate::gt(ColumnRef::new("price"), ScalarValue::from(100_i64));
+    let filter = Expr::gt("price", ScalarValue::from(100_i64));
     print_products(&db, filter).await?;
 
     // 3. Range: 50 <= price <= 300
     println!("\n3. 50 <= price <= 300:");
-    let filter = Predicate::and(vec![
-        Predicate::gte(ColumnRef::new("price"), ScalarValue::from(50_i64)),
-        Predicate::lte(ColumnRef::new("price"), ScalarValue::from(300_i64)),
+    let filter = Expr::and(vec![
+        Expr::gt_eq("price", ScalarValue::from(50_i64)),
+        Expr::lt_eq("price", ScalarValue::from(300_i64)),
     ]);
     print_products(&db, filter).await?;
 
     // 4. IN list: category in ["Electronics", "Office"]
     println!("\n4. category IN ['Electronics', 'Office']:");
-    let filter = Predicate::in_list(
-        ColumnRef::new("category"),
+    let filter = Expr::in_list(
+        "category",
         vec![
             ScalarValue::from("Electronics"),
             ScalarValue::from("Office"),
@@ -95,43 +95,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. IS NULL: category is null
     println!("\n5. category IS NULL:");
-    let filter = Predicate::is_null(ColumnRef::new("category"));
+    let filter = Expr::is_null("category");
     print_products(&db, filter).await?;
 
     // 6. IS NOT NULL: category is not null
     println!("\n6. category IS NOT NULL:");
-    let filter = Predicate::is_not_null(ColumnRef::new("category"));
+    let filter = Expr::is_not_null("category");
     print_products(&db, filter).await?;
 
     // 7. AND: Electronics AND price < 100
     println!("\n7. category == 'Electronics' AND price < 100:");
-    let filter = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("category"), ScalarValue::from("Electronics")),
-        Predicate::lt(ColumnRef::new("price"), ScalarValue::from(100_i64)),
+    let filter = Expr::and(vec![
+        Expr::eq("category", ScalarValue::from("Electronics")),
+        Expr::lt("price", ScalarValue::from(100_i64)),
     ]);
     print_products(&db, filter).await?;
 
     // 8. OR: Furniture OR price < 10
     println!("\n8. category == 'Furniture' OR price < 10:");
-    let filter = Predicate::or(vec![
-        Predicate::eq(ColumnRef::new("category"), ScalarValue::from("Furniture")),
-        Predicate::lt(ColumnRef::new("price"), ScalarValue::from(10_i64)),
+    let filter = Expr::or(vec![
+        Expr::eq("category", ScalarValue::from("Furniture")),
+        Expr::lt("price", ScalarValue::from(10_i64)),
     ]);
     print_products(&db, filter).await?;
 
     // 9. NOT: NOT category == 'Electronics'
     println!("\n9. NOT category == 'Electronics':");
-    let filter = Predicate::eq(ColumnRef::new("category"), ScalarValue::from("Electronics")).not();
+    let filter = Expr::not(Expr::eq("category", ScalarValue::from("Electronics")));
     print_products(&db, filter).await?;
 
     // 10. Complex: (Electronics OR Furniture) AND price > 100
     println!("\n10. (Electronics OR Furniture) AND price > 100:");
-    let filter = Predicate::and(vec![
-        Predicate::or(vec![
-            Predicate::eq(ColumnRef::new("category"), ScalarValue::from("Electronics")),
-            Predicate::eq(ColumnRef::new("category"), ScalarValue::from("Furniture")),
+    let filter = Expr::and(vec![
+        Expr::or(vec![
+            Expr::eq("category", ScalarValue::from("Electronics")),
+            Expr::eq("category", ScalarValue::from("Furniture")),
         ]),
-        Predicate::gt(ColumnRef::new("price"), ScalarValue::from(100_i64)),
+        Expr::gt("price", ScalarValue::from(100_i64)),
     ]);
     print_products(&db, filter).await?;
 
@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn print_products(
     db: &DB<LocalFs, TokioExecutor>,
-    filter: Predicate,
+    filter: Expr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let batches = db.scan().filter(filter).collect().await?;
     let mut found = false;

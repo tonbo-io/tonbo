@@ -6,7 +6,7 @@ use arrow_schema::{DataType, Field};
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::db::{ColumnRef, DB, Predicate};
+use crate::db::{DB, Expr};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -55,7 +55,7 @@ async fn transactional_conflict_detection_blocks_second_writer()
 
     // Confirm final visibility matches either conflict (only first) or overwrite if conflict not
     // detected.
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let batches = db.scan().filter(predicate).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()

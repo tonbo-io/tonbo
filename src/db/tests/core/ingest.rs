@@ -4,11 +4,10 @@ use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use futures::{TryStreamExt, executor::block_on};
-use tonbo_predicate::{ColumnRef, Predicate};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{
-    db::{DB, DbInner, wal::apply_dyn_wal_batch},
+    db::{DB, DbInner, Expr, wal::apply_dyn_wal_batch},
     extractor::{self, KeyExtractError},
     inmem::{
         immutable::memtable::MVCC_TOMBSTONE_COL,
@@ -88,7 +87,7 @@ async fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
     assert_eq!(chain_k2.len(), 1);
     assert!(chain_k2[0].1);
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id"));
+    let pred = Expr::is_not_null("id");
     let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
     let plan = block_on(snapshot.plan_scan(&db, &pred, None, None)).expect("plan");
     let stream = block_on(db.execute_scan(plan)).expect("exec");

@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.ingest(builders.finish().into_record_batch()).await?;
 
     // 3. Query: score > 80
-    let filter = Predicate::gt(ColumnRef::new("score"), ScalarValue::from(80_i64));
+    let filter = Expr::gt("score", ScalarValue::from(80_i64));
     let batches = db.scan().filter(filter).collect().await?;
 
     println!("Users with score > 80:");

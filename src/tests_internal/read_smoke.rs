@@ -5,7 +5,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::db::{ColumnRef, DB, DbBuilder, Predicate, ScalarValue};
+use crate::db::{DB, DbBuilder, Expr, ScalarValue};
 const PACKAGE_ROWS: usize = 1024;
 
 /// Helper to extract (id, value) pairs from scan result batches.
@@ -74,7 +74,7 @@ async fn read_smoke_streams_mutable_and_immutable() {
     let batch = build_batch(schema.clone(), &[("mutable-a", 30), ("mutable-b", 40)]);
     db.ingest(batch).await.expect("ingest second batch");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let batches = db.scan().filter(predicate).collect().await.expect("scan");
 
     let rows = extract_rows_from_batches(&batches);
@@ -118,7 +118,7 @@ async fn read_smoke_snapshot_honors_tombstones() {
     update_tx.delete("user-b").expect("delete user-b");
     update_tx.commit().await.expect("commit updates");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(-1i64));
+    let predicate = Expr::gt("v", ScalarValue::from(-1i64));
 
     let snapshot_batches = txn
         .scan()
@@ -154,7 +154,7 @@ async fn read_smoke_streams_large_packages() {
     let batch = build_batch_owned(schema.clone(), ids, values);
     db.ingest(batch).await.expect("ingest rows");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(-1i64));
+    let predicate = Expr::gt("v", ScalarValue::from(-1i64));
 
     let batches = db.scan().filter(predicate).collect().await.expect("scan");
 
@@ -167,7 +167,7 @@ async fn read_smoke_residual_predicate_filters_rows() {
     let (db, schema) = make_db().await;
     let batch = build_batch(schema.clone(), &[("keep", 10), ("drop", -5)]);
     db.ingest(batch).await.expect("ingest rows");
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let rows = collect_rows_for_predicate(&db, &predicate).await;
     assert_eq!(rows, vec![("keep".to_string(), 10)]);
 }
@@ -181,7 +181,7 @@ async fn read_smoke_projection_retains_predicate_columns() {
     );
     db.ingest(batch).await.expect("ingest rows");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let projected_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
     let batches = db
         .scan()
@@ -249,7 +249,7 @@ async fn read_smoke_transaction_scan() {
     ]))
     .expect("stage insert");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(-1i64));
+    let predicate = Expr::gt("v", ScalarValue::from(-1i64));
     let batches = tx
         .scan()
         .filter(predicate)
@@ -291,7 +291,7 @@ async fn read_smoke_transaction_scan_projection() {
     ]))
     .expect("stage negative insert");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let projected_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
     let batches = tx
         .scan()
@@ -328,7 +328,7 @@ async fn read_smoke_projects_value_column_only() {
     let batch = build_batch(schema.clone(), &[("p1", 10), ("p2", 20)]);
     db.ingest(batch).await.expect("ingest rows");
 
-    let predicate = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("p1"));
+    let predicate = Expr::eq("id", ScalarValue::from("p1"));
     let projection = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
     let batches = db
         .scan()
@@ -366,9 +366,9 @@ async fn read_smoke_key_range_predicate_filters_rows() {
     );
     db.ingest(batch).await.expect("ingest rows");
 
-    let predicate = Predicate::and(vec![
-        Predicate::gte(ColumnRef::new("id"), ScalarValue::from("k2")),
-        Predicate::lt(ColumnRef::new("id"), ScalarValue::from("k4")),
+    let predicate = Expr::and(vec![
+        Expr::gt_eq("id", ScalarValue::from("k2")),
+        Expr::lt("id", ScalarValue::from("k4")),
     ]);
     let rows = collect_rows_for_predicate(&db, &predicate).await;
     assert_eq!(
@@ -384,7 +384,7 @@ async fn read_smoke_plan_scan_applies_limit() {
     let batch = build_batch(schema.clone(), &[("l1", 1), ("l2", 2), ("l3", 3)]);
     db.ingest(batch).await.expect("ingest rows");
 
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(-1i64));
+    let predicate = Expr::gt("v", ScalarValue::from(-1i64));
     let batches = db
         .scan()
         .filter(predicate)
@@ -398,7 +398,7 @@ async fn read_smoke_plan_scan_applies_limit() {
 
 async fn collect_rows_for_predicate(
     db: &DB<InMemoryFs, NoopExecutor>,
-    predicate: &Predicate,
+    predicate: &Expr,
 ) -> Vec<(String, i32)> {
     let batches = db
         .scan()
