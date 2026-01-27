@@ -194,8 +194,6 @@ impl WalConfig {
 pub struct BenchmarkConfig {
     /// Pruning overrides applied during benchmarks.
     pub pruning_config: Option<BenchmarkPruningConfig>,
-    /// WAL overrides applied during benchmarks.
-    pub wal_config: Option<WalConfig>,
 }
 
 pub(super) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
@@ -1248,9 +1246,6 @@ where
         if let Some(pruning_config) = config.pruning_config {
             let override_cfg = pruning_config.to_pruning_config();
             crate::pruning::config::set_pruning_override(override_cfg);
-        }
-        if let Some(wal_config) = config.wal_config {
-            self = self.wal_config(wal_config);
         }
         self
     }

@@ -27,8 +27,8 @@ use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
 use futures::stream::{self, BoxStream, StreamExt};
 use parquet::{
     arrow::{
-        ProjectionMask, async_reader::ParquetRecordBatchStreamBuilder,
-        async_writer::AsyncArrowWriter,
+        ProjectionMask, arrow_reader::ArrowReaderOptions,
+        async_reader::ParquetRecordBatchStreamBuilder, async_writer::AsyncArrowWriter,
     },
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
@@ -52,7 +52,11 @@ use crate::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
         scan::{ParquetStream, UnpinExec},
     },
-    pruning::{PruneInput, prune_or_all},
+    pruning::{
+        PruneInput,
+        config::{PrunerPolicy, PruningConfig},
+        prune_or_all,
+    },
     query::Predicate,
 };
 
@@ -993,7 +997,15 @@ pub(crate) async fn open_parquet_stream_with_pruning<E>(
 where
     E: Executor + Clone + 'static,
 {
-    let mut builder = open_parquet_builder(fs, path, executor).await?;
+    let pruning_config = PruningConfig::default().effective();
+    let enable_page_index = predicate.is_some()
+        && pruning_config.enable_page_index
+        && matches!(
+            pruning_config.resolve_policy(storage_kind),
+            PrunerPolicy::Aisle
+        );
+    let reader_options = ArrowReaderOptions::default().with_page_index(enable_page_index);
+    let mut builder = open_parquet_builder_with_options(fs, path, executor, reader_options).await?;
     let schema = builder.schema().clone();
     let metadata = builder.metadata().clone();
     let prune_output = prune_or_all(PruneInput {
@@ -1043,13 +1055,25 @@ async fn open_parquet_builder<E>(
 where
     E: Executor + Clone + 'static,
 {
+    open_parquet_builder_with_options(fs, path, executor, ArrowReaderOptions::default()).await
+}
+
+async fn open_parquet_builder_with_options<E>(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    executor: E,
+    options: ArrowReaderOptions,
+) -> Result<ParquetRecordBatchStreamBuilder<AsyncReader<UnpinExec<E>>>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
     let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
         .map_err(SsTableError::Fs)?;
-    let builder = ParquetRecordBatchStreamBuilder::new(reader)
+    let builder = ParquetRecordBatchStreamBuilder::new_with_options(reader, options)
         .await
         .map_err(SsTableError::Parquet)?;
     Ok(builder)
