@@ -230,6 +230,9 @@ pub enum ResidualError {
     MissingValue,
     #[error("predicate evaluation produced a residual clause")]
     UnexpectedResidual,
+    /// Predicate contains an unsupported expression variant.
+    #[error("predicate evaluation encountered unsupported predicate")]
+    UnsupportedPredicate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,7 +308,9 @@ impl ResidualEvaluator {
                 inclusive,
             } => self.evaluate_between(column, low, high, *inclusive, row),
             Expr::InList { column, values } => self.evaluate_in_list(column, values, row),
-            Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => Ok(TriState::True),
+            Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => {
+                Err(ResidualError::UnsupportedPredicate)
+            }
             Expr::StartsWith { column, prefix } => self.evaluate_starts_with(column, prefix, row),
             Expr::IsNull { column, negated } => self.evaluate_is_null(column, *negated, row),
             Expr::And(children) => {

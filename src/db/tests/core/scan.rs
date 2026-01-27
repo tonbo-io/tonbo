@@ -157,6 +157,29 @@ async fn plan_scan_missing_column_is_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_bloom_filter_predicate_is_error() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+    let predicate = Expr::BloomFilterEq {
+        column: "id".to_string(),
+        value: ScalarValue::from("k1"),
+    };
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let err = match snapshot.plan_scan(&db, &predicate, None, None).await {
+        Ok(_) => panic!("bloom filter predicate should be rejected at plan time"),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("bloom filter predicates are not supported"),
+        "unexpected error: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_missing_page_indexes_is_error() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),

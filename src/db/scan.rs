@@ -70,6 +70,13 @@ impl TxSnapshot {
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
+        if let Some(column) = find_bloom_filter_column(predicate) {
+            return Err(crate::db::DBError::UnsupportedPredicate {
+                reason: format!(
+                    "bloom filter predicates are not supported yet (column '{column}')"
+                ),
+            });
+        }
         let projected_schema = projected_schema.cloned();
         let residual_predicate = if matches!(predicate, Expr::True) {
             None
@@ -891,4 +898,17 @@ where
         as Pin<
             Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
         >)
+}
+
+fn find_bloom_filter_column(predicate: &Expr) -> Option<&str> {
+    match predicate {
+        Expr::BloomFilterEq { column, .. } | Expr::BloomFilterInList { column, .. } => {
+            Some(column.as_str())
+        }
+        Expr::And(children) | Expr::Or(children) => children
+            .iter()
+            .find_map(|child| find_bloom_filter_column(child)),
+        Expr::Not(child) => find_bloom_filter_column(child.as_ref()),
+        _ => None,
+    }
 }

@@ -336,6 +336,7 @@ impl From<DBError> for TransactionError {
             }
             DBError::Snapshot(snapshot) => TransactionError::Snapshot(snapshot),
             DBError::DynView(view) => TransactionError::DynKey(view),
+            other => TransactionError::Db(other),
         }
     }
 }

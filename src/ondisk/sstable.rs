@@ -358,6 +358,12 @@ pub enum SsTableError {
     /// Scan selection is invalid for an SSTable scan.
     #[error("invalid scan selection for SST: {selection}")]
     InvalidScanSelection { selection: &'static str },
+    /// Row filter predicate could not be applied.
+    #[error("row filter predicate unsupported: {reason}")]
+    RowFilterPredicate {
+        /// Details about why the row filter predicate was rejected.
+        reason: String,
+    },
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
@@ -1025,19 +1031,15 @@ impl SsTableReader {
     }
 }
 
-fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
+fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Result<Option<Expr>, SsTableError> {
     match predicate {
-        Expr::True => None,
-        Expr::False => Some(Expr::False),
+        Expr::True => Ok(None),
+        Expr::False => Ok(Some(Expr::False)),
         Expr::Cmp { column, value, .. } => {
             if scalar_matches_column(schema, column, value) {
-                Some(predicate.clone())
+                Ok(Some(predicate.clone()))
             } else {
-                eprintln!(
-                    "row_filter: skipping Cmp predicate on column '{column}' (type mismatch or \
-                     missing column)"
-                );
-                None
+                Ok(None)
             }
         }
         Expr::Between {
@@ -1046,92 +1048,76 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Option<Expr> {
             if scalar_matches_column(schema, column, low)
                 && scalar_matches_column(schema, column, high)
             {
-                Some(predicate.clone())
+                Ok(Some(predicate.clone()))
             } else {
-                eprintln!(
-                    "row_filter: skipping Between predicate on column '{column}' (type mismatch \
-                     or missing column)"
-                );
-                None
+                Ok(None)
             }
         }
         Expr::InList { column, values } => {
             if scalars_match_column(schema, column, values) {
-                Some(predicate.clone())
+                Ok(Some(predicate.clone()))
             } else {
-                eprintln!(
-                    "row_filter: skipping InList predicate on column '{column}' (type mismatch or \
-                     missing column)"
-                );
-                None
+                Ok(None)
             }
         }
         Expr::StartsWith { column, .. } => {
             if is_string_column(schema, column) {
-                Some(predicate.clone())
+                Ok(Some(predicate.clone()))
             } else {
-                eprintln!(
-                    "row_filter: skipping StartsWith predicate on column '{column}' (column is \
-                     not a string type)"
-                );
-                None
+                Ok(None)
             }
         }
         Expr::IsNull { column, .. } => {
             if column_type(schema, column).is_some() {
-                Some(predicate.clone())
+                Ok(Some(predicate.clone()))
             } else {
-                eprintln!(
-                    "row_filter: skipping IsNull predicate on column '{column}' (column not found \
-                     in schema)"
-                );
-                None
+                Ok(None)
             }
         }
-        Expr::BloomFilterEq { column, .. } => {
-            eprintln!(
-                "row_filter: skipping BloomFilterEq predicate on column '{column}' (bloom filter \
-                 predicates not supported for row filtering)"
-            );
-            None
-        }
-        Expr::BloomFilterInList { column, .. } => {
-            eprintln!(
-                "row_filter: skipping BloomFilterInList predicate on column '{column}' (bloom \
-                 filter predicates not supported for row filtering)"
-            );
-            None
-        }
+        Expr::BloomFilterEq { column, .. } => Err(SsTableError::RowFilterPredicate {
+            reason: format!(
+                "BloomFilterEq predicate on column '{column}' is not supported for row filtering"
+            ),
+        }),
+        Expr::BloomFilterInList { column, .. } => Err(SsTableError::RowFilterPredicate {
+            reason: format!(
+                "BloomFilterInList predicate on column '{column}' is not supported for row \
+                 filtering"
+            ),
+        }),
         Expr::And(children) => {
             let mut supported = Vec::new();
             for child in children {
-                if let Some(expr) = row_filter_expr(child, schema) {
+                if let Some(expr) = row_filter_expr(child, schema)? {
                     supported.push(expr);
                 }
             }
-            match supported.len() {
+            Ok(match supported.len() {
                 0 => None,
                 1 => Some(supported.remove(0)),
                 _ => Some(Expr::And(supported)),
-            }
+            })
         }
         Expr::Or(children) => {
             let mut supported = Vec::new();
             for child in children {
-                let expr = row_filter_expr(child, schema)?;
-                supported.push(expr);
+                match row_filter_expr(child, schema)? {
+                    Some(expr) => supported.push(expr),
+                    None => return Ok(None),
+                }
             }
-            match supported.len() {
+            Ok(match supported.len() {
                 0 => None,
                 1 => Some(supported.remove(0)),
                 _ => Some(Expr::Or(supported)),
-            }
+            })
         }
-        Expr::Not(child) => row_filter_expr(child, schema).map(|expr| Expr::Not(Box::new(expr))),
-        other => {
-            eprintln!("row_filter: skipping unsupported predicate variant: {other:?}");
-            None
+        Expr::Not(child) => {
+            Ok(row_filter_expr(child, schema)?.map(|expr| Expr::Not(Box::new(expr))))
         }
+        other => Err(SsTableError::RowFilterPredicate {
+            reason: format!("unsupported predicate variant: {other:?}"),
+        }),
     }
 }
 
@@ -1329,7 +1315,10 @@ where
         ArrowReaderMetadata::try_new(metadata, options).map_err(SsTableError::Parquet)?;
     let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, arrow_metadata);
     let schema = builder.schema().clone();
-    if let Some(predicate) = row_filter_predicate.and_then(|pred| row_filter_expr(pred, &schema)) {
+    if let Some(predicate) = match row_filter_predicate {
+        Some(pred) => row_filter_expr(pred, &schema)?,
+        None => None,
+    } {
         let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
         let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
         builder = builder.with_row_filter(row_filter);
@@ -1403,7 +1392,10 @@ where
         ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
     let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, arrow_metadata);
     let schema = builder.schema().clone();
-    if let Some(predicate) = row_filter_predicate.and_then(|pred| row_filter_expr(pred, &schema)) {
+    if let Some(predicate) = match row_filter_predicate {
+        Some(pred) => row_filter_expr(pred, &schema)?,
+        None => None,
+    } {
         let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
         let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
         builder = builder.with_row_filter(row_filter);
