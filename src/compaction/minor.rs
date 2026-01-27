@@ -18,16 +18,30 @@ pub(crate) struct MinorCompactor {
     segment_threshold: usize,
     target_level: usize,
 
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
 }
 
 impl MinorCompactor {
     /// Build a compactor that flushes after `segment_threshold` immutable runs.
+    #[cfg(test)]
     pub(crate) fn new(segment_threshold: usize, target_level: usize, start_id: u64) -> Self {
+        Self::with_id_allocator(
+            segment_threshold,
+            target_level,
+            Arc::new(AtomicU64::new(start_id)),
+        )
+    }
+
+    /// Build a compactor that draws SST ids from a shared allocator.
+    pub(crate) fn with_id_allocator(
+        segment_threshold: usize,
+        target_level: usize,
+        next_id: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             segment_threshold: segment_threshold.max(1),
             target_level,
-            next_id: AtomicU64::new(start_id),
+            next_id,
         }
     }
 

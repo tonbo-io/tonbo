@@ -9,23 +9,23 @@ use fusio::{
     dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, RwLock, Timer},
 };
-use futures::future::AbortHandle;
+use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle};
 
 use crate::{
     compaction::{
         executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
-        handle::CompactionHandle,
+        handle::{CompactionHandle, CompactionTrigger},
         orchestrator,
         planner::{CompactionPlanner, CompactionTask},
         scheduler::{CompactionScheduler, ScheduledCompaction},
     },
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
-    ondisk::sstable::SsTableConfig,
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
 
 /// Maximum retries for CAS conflicts when applying compaction edits.
 const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
+const DEFAULT_COMPACTION_LEASE_TTL_MS: u64 = 30_000;
 
 /// Compaction driver that coordinates planning, execution, and manifest updates.
 ///
@@ -311,25 +311,58 @@ where
         runtime: Arc<E>,
         planner: P,
         executor: CE,
-        _gc_sst_config: Option<Arc<SsTableConfig>>,
-        interval: Duration,
-        budget: usize,
+        periodic_interval: Option<Duration>,
+        queue_capacity: usize,
+        max_concurrent_jobs: usize,
     ) -> CompactionHandle<E>
     where
         CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
         P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
     {
-        let (scheduler, mut rx) = CompactionScheduler::new(budget.max(1), budget.max(1));
+        let budget = max_concurrent_jobs.max(1);
+        let queue_capacity = queue_capacity.max(budget).max(1);
+        let (scheduler, mut rx) = CompactionScheduler::new(queue_capacity, budget);
+        let (tick_tx, mut tick_rx) = mpsc::channel::<CompactionTrigger>(1);
         let driver = Arc::clone(self);
         let driver_for_loop = Arc::clone(&driver);
         let executor = Arc::new(executor);
         let runtime_for_loop = Arc::clone(&runtime);
+        let lease_ttl_ms = periodic_interval
+            .map(|interval| interval.as_millis().max(1) as u64)
+            .unwrap_or(DEFAULT_COMPACTION_LEASE_TTL_MS);
         let (abort, reg) = AbortHandle::new_pair();
         let loop_future = async move {
             let runtime = runtime_for_loop;
+            let mut pending_tick = false;
             loop {
-                runtime.sleep(interval).await;
-                for _ in 0..budget.max(1) {
+                if !pending_tick {
+                    let interval = periodic_interval;
+                    if let Some(interval) = interval {
+                        let mut sleep = runtime.sleep(interval).fuse();
+                        futures::select_biased! {
+                            _ = sleep => {
+                                pending_tick = true;
+                            }
+                            msg = tick_rx.next() => {
+                                match msg {
+                                    Some(_) => pending_tick = true,
+                                    None => return,
+                                }
+                            }
+                        }
+                    } else {
+                        match tick_rx.next().await {
+                            Some(_) => pending_tick = true,
+                            None => return,
+                        }
+                    }
+                }
+                if !pending_tick {
+                    continue;
+                }
+                pending_tick = false;
+
+                for _ in 0..budget {
                     match driver_for_loop.plan_compaction_task(&planner).await {
                         Ok(Some(task)) => {
                             let manifest_head = match driver_for_loop
@@ -344,12 +377,7 @@ where
                                 }
                             };
                             if let Err(err) = scheduler
-                                .enqueue(
-                                    task,
-                                    manifest_head,
-                                    "local-compaction",
-                                    interval.as_millis() as u64,
-                                )
+                                .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
                                 .await
                             {
                                 eprintln!("compaction scheduler closed: {err}");
@@ -388,6 +416,6 @@ where
         let handle = runtime.spawn(async move {
             let _ = abortable.await;
         });
-        CompactionHandle::new(abort, Some(handle))
+        CompactionHandle::new(abort, Some(handle), Some(tick_tx))
     }
 }

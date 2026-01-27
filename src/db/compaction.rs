@@ -26,6 +26,13 @@ where
         self.compaction_worker.is_some()
     }
 
+    /// Best-effort signal to the background compaction worker.
+    pub(crate) fn kick_compaction_worker(&self) {
+        if let Some(handle) = &self.compaction_worker {
+            handle.kick();
+        }
+    }
+
     /// Create a compaction driver from this DB's manifest and configuration.
     ///
     /// The driver is created on demand; callers can Arc-wrap it for background workers.

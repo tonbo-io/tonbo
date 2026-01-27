@@ -70,7 +70,7 @@ async fn compaction_gc_prunes_obsolete_wal_and_preserves_visible_rows()
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
         .wal_config(wal_cfg.clone())
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
