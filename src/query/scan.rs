@@ -1,26 +1,87 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use arrow_schema::{Schema, SchemaRef};
-use tonbo_predicate::{Operand, Predicate, PredicateNode};
+use parquet::{
+    arrow::{ProjectionMask, arrow_reader::RowSelection},
+    file::metadata::ParquetMetaData,
+};
 
 use crate::{
     extractor::KeyExtractError,
+    key::KeyOwned,
     manifest::{SstEntry, TableSnapshot},
     mvcc::Timestamp,
+    query::Expr,
 };
+
+/// Selection information for a single SSTable scan.
+#[derive(Clone, Debug)]
+pub(crate) struct SstSelection {
+    /// Row groups to include. None means all row groups.
+    pub(crate) row_groups: Option<Vec<usize>>,
+    /// Optional row-level selection within chosen row groups.
+    pub(crate) row_selection: Option<RowSelection>,
+    /// Cached Parquet metadata loaded at plan time.
+    pub(crate) metadata: Arc<ParquetMetaData>,
+    /// Projection mask for required columns.
+    pub(crate) projection: ProjectionMask,
+    /// Arrow schema for the projected data stream.
+    pub(crate) projected_schema: SchemaRef,
+    /// Optional delete sidecar metadata and projection info.
+    pub(crate) delete_selection: Option<DeleteSelection>,
+}
+
+/// Selection information for a delete sidecar scan.
+#[derive(Clone, Debug)]
+pub(crate) struct DeleteSelection {
+    /// Cached Parquet metadata loaded at plan time.
+    pub(crate) metadata: Arc<ParquetMetaData>,
+    /// Projection mask for required columns.
+    pub(crate) projection: ProjectionMask,
+}
+
+/// Placeholder for future key-range selections.
+#[derive(Clone, Debug)]
+pub(crate) struct KeyRangeSelection {
+    /// Inclusive lower bound.
+    pub(crate) start: Option<KeyOwned>,
+    /// Inclusive upper bound.
+    pub(crate) end: Option<KeyOwned>,
+}
+
+/// Selection details for a scan source.
+#[derive(Clone, Debug)]
+pub(crate) enum ScanSelection {
+    /// Scan all rows in the source.
+    AllRows,
+    /// Scan rows in a key range (not yet wired to pruning).
+    KeyRange(KeyRangeSelection),
+    /// Scan an SSTable with row-group and row selections.
+    Sst(SstSelection),
+}
+
+/// SST entry paired with its scan selection.
+#[derive(Clone, Debug)]
+pub(crate) struct SstScanSelection {
+    pub(crate) entry: SstEntry,
+    pub(crate) selection: ScanSelection,
+}
 
 /// Internal representation of a scan plan. Things included in the plan:
 /// * predicate: the caller-supplied predicate used for pruning and residual evaluation
 /// * range_set: cached primary-key ranges derived from the predicate for pruning
 /// * immutable_memtable_idxes: which immutable memtables need to be scanned in execution phase
-/// * ssts: level-ed sstable where entry contains the identifier and its corresponding pruning row
-///   set result
+/// * selections: per-source row selections (memtables default to all rows in this phase)
+/// * ssts: level-ed sstable where entry contains the identifier and its corresponding selection
 /// * limit: the raw limit
 /// * read_ts: snapshot/read timestamp
 pub(crate) struct ScanPlan {
-    pub(crate) _predicate: Predicate,
+    pub(crate) _predicate: Expr,
     pub(crate) immutable_indexes: Vec<usize>,
-    pub(crate) residual_predicate: Option<Predicate>,
+    pub(crate) mutable_selection: ScanSelection,
+    pub(crate) immutable_selection: ScanSelection,
+    pub(crate) sst_selections: Vec<SstScanSelection>,
+    pub(crate) residual_predicate: Option<Expr>,
     pub(crate) projected_schema: Option<SchemaRef>,
     pub(crate) scan_schema: SchemaRef,
     pub(crate) limit: Option<usize>,
@@ -32,7 +93,7 @@ pub(crate) struct ScanPlan {
 pub(crate) fn projection_with_predicate(
     base_schema: &SchemaRef,
     projection: &SchemaRef,
-    predicate: Option<&Predicate>,
+    predicate: Option<&Expr>,
 ) -> Result<SchemaRef, KeyExtractError> {
     let mut required = BTreeSet::new();
     if let Some(pred) = predicate {
@@ -44,81 +105,73 @@ pub(crate) fn projection_with_predicate(
 fn extend_projection_schema(
     base_schema: &SchemaRef,
     projection: &SchemaRef,
-    required: &BTreeSet<Arc<str>>,
+    required: &BTreeSet<String>,
 ) -> Result<SchemaRef, KeyExtractError> {
     if required.is_empty()
         || required.iter().all(|name| {
             projection
                 .fields()
                 .iter()
-                .any(|field| field.name() == name.as_ref())
+                .any(|field| field.name() == name.as_str())
         })
     {
         return Ok(Arc::clone(projection));
     }
 
-    let mut needed: BTreeSet<Arc<str>> = projection
+    let mut needed: BTreeSet<String> = projection
         .fields()
         .iter()
-        .map(|field| Arc::<str>::from(field.name().as_str()))
+        .map(|field| field.name().to_string())
         .collect();
     needed.extend(required.iter().cloned());
 
     let mut fields = Vec::new();
     for field in base_schema.fields() {
-        if needed.remove(field.name().as_str()) {
+        if needed.remove(field.name()) {
             fields.push(field.clone());
         }
     }
 
     if !needed.is_empty() {
         // TODO: add nested-column support once predicates can address nested fields.
-        let missing = needed.iter().next().expect("missing column present");
-        return Err(KeyExtractError::NoSuchField {
-            name: missing.to_string(),
-        });
+        if let Some(missing) = needed.iter().next() {
+            return Err(KeyExtractError::NoSuchField {
+                name: missing.to_string(),
+            });
+        }
     }
 
     Ok(Arc::new(Schema::new(fields)))
 }
 
-fn collect_predicate_columns(predicate: &Predicate, out: &mut BTreeSet<Arc<str>>) {
-    match predicate.kind() {
-        PredicateNode::True => {}
-        PredicateNode::Compare { left, right, .. } => {
-            collect_operand_column(left, out);
-            collect_operand_column(right, out);
+fn collect_predicate_columns(predicate: &Expr, out: &mut BTreeSet<String>) {
+    match predicate {
+        Expr::True | Expr::False => {}
+        Expr::Cmp { column, .. }
+        | Expr::Between { column, .. }
+        | Expr::InList { column, .. }
+        | Expr::BloomFilterEq { column, .. }
+        | Expr::BloomFilterInList { column, .. }
+        | Expr::StartsWith { column, .. }
+        | Expr::IsNull { column, .. } => {
+            out.insert(column.clone());
         }
-        PredicateNode::InList { expr, .. } | PredicateNode::IsNull { expr, .. } => {
-            collect_operand_column(expr, out);
-        }
-        PredicateNode::Not(child) => collect_predicate_columns(child, out),
-        PredicateNode::And(children) | PredicateNode::Or(children) => {
+        Expr::Not(child) => collect_predicate_columns(child, out),
+        Expr::And(children) | Expr::Or(children) => {
             for child in children {
                 collect_predicate_columns(child, out);
             }
         }
-    }
-}
-
-fn collect_operand_column(operand: &Operand, out: &mut BTreeSet<Arc<str>>) {
-    if let Operand::Column(column) = operand {
-        out.insert(Arc::clone(&column.name));
+        _ => {}
     }
 }
 
 impl ScanPlan {
-    /// Access SST entries from the snapshot, grouped by compaction level.
+    /// Access SST selections from the snapshot, grouped by compaction level.
     ///
     /// Returns all SST entries across all levels that should be scanned.
     /// Pruning based on key ranges or statistics will be added in future iterations.
-    pub(crate) fn sst_entries(&self) -> impl Iterator<Item = &SstEntry> {
-        self._snapshot
-            .latest_version
-            .as_ref()
-            .map(|v| v.ssts())
-            .unwrap_or(&[])
-            .iter()
-            .flatten()
+    pub(crate) fn sst_selections(&self) -> impl Iterator<Item = &SstScanSelection> {
+        self.sst_selections.iter()
     }
 }

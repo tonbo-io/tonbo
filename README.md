@@ -58,7 +58,7 @@ builders.append_rows(users);
 db.ingest(builders.finish().into_record_batch()).await?;
 
 // Query
-let filter = Predicate::gt(ColumnRef::new("score"), ScalarValue::from(80_i64));
+let filter = Expr::gt("score", ScalarValue::from(80_i64));
 let results = db.scan().filter(filter).collect().await?;
 ```
 

@@ -336,6 +336,7 @@ impl From<DBError> for TransactionError {
             }
             DBError::Snapshot(snapshot) => TransactionError::Snapshot(snapshot),
             DBError::DynView(view) => TransactionError::DynKey(view),
+            other => TransactionError::Db(other),
         }
     }
 }
@@ -763,7 +764,7 @@ mod tests {
         inmem::policy::BatchesThreshold,
         mode::DynModeConfig,
         mvcc::Timestamp,
-        query::{ColumnRef, Predicate, ScalarValue},
+        query::{Expr, ScalarValue},
         test::build_batch,
     };
 
@@ -801,8 +802,8 @@ mod tests {
             .expect("ingest");
     }
 
-    fn all_rows_predicate() -> Predicate {
-        Predicate::gt(ColumnRef::new("v"), ScalarValue::from(i64::MIN))
+    fn all_rows_predicate() -> Expr {
+        Expr::gt("v", ScalarValue::from(i64::MIN))
     }
 
     /// Helper to extract (id, value) pairs from scan result batches.
@@ -1065,7 +1066,7 @@ mod tests {
             .await
             .expect("commit should succeed without wal");
 
-        let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+        let predicate = Expr::is_not_null("id");
         let batches = db
             .scan()
             .filter(predicate)
