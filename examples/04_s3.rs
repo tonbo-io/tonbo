@@ -96,10 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Inserted 3 events to S3");
 
     // Query from S3
-    let filter = Predicate::eq(
-        ColumnRef::new("event_type"),
-        ScalarValue::from("user.created"),
-    );
+    let filter = Expr::eq("event_type", ScalarValue::from("user.created"));
     let batches = db.scan().filter(filter).collect().await?;
 
     println!("\nEvents where event_type = 'user.created':");

@@ -70,21 +70,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Filter by first key component: device_id = 'sensor-1'
     println!("\nReadings for sensor-1:");
-    let filter = Predicate::eq(ColumnRef::new("device_id"), ScalarValue::from("sensor-1"));
+    let filter = Expr::eq("device_id", ScalarValue::from("sensor-1"));
     let batches = db.scan().filter(filter).collect().await?;
     print_readings(&batches)?;
 
     // Filter by second key component: timestamp > 2000
     println!("\nReadings after timestamp 2000:");
-    let filter = Predicate::gt(ColumnRef::new("timestamp"), ScalarValue::from(2000_i64));
+    let filter = Expr::gt("timestamp", ScalarValue::from(2000_i64));
     let batches = db.scan().filter(filter).collect().await?;
     print_readings(&batches)?;
 
     // Combined filter on both key components
     println!("\nSensor-1 readings after timestamp 1500:");
-    let filter = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("device_id"), ScalarValue::from("sensor-1")),
-        Predicate::gt(ColumnRef::new("timestamp"), ScalarValue::from(1500_i64)),
+    let filter = Expr::and(vec![
+        Expr::eq("device_id", ScalarValue::from("sensor-1")),
+        Expr::gt("timestamp", ScalarValue::from(1500_i64)),
     ]);
     let batches = db.scan().filter(filter).collect().await?;
     print_readings(&batches)?;

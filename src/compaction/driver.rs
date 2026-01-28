@@ -3,7 +3,13 @@
 //! The driver owns manifest access and WAL configuration, coordinates planning,
 //! execution, and reconciliation without requiring the full DB type.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
@@ -133,6 +139,14 @@ pub(crate) struct CompactionWorkerConfig {
     pub(crate) queue_capacity: usize,
     pub(crate) max_concurrent_jobs: usize,
     pub(crate) cascade: CascadeConfig,
+}
+
+struct DrainContext<'a, P, E> {
+    planner: &'a Arc<P>,
+    cascade_control: &'a Arc<Mutex<CascadeControl>>,
+    runtime: &'a Arc<E>,
+    cascade_trigger: &'a mpsc::Sender<CompactionTrigger>,
+    lease_ttl_ms: u64,
 }
 
 impl CompactionWorkerConfig {
@@ -663,6 +677,207 @@ where
         }
     }
 
+    async fn wait_for_trigger(
+        runtime: &E,
+        periodic_interval: Option<Duration>,
+        tick_rx: &mut mpsc::Receiver<CompactionTrigger>,
+    ) -> Option<CompactionTriggerReason> {
+        if let Some(interval) = periodic_interval {
+            let mut sleep = runtime.sleep(interval).fuse();
+            futures::select_biased! {
+                _ = sleep => Some(CompactionTriggerReason::Periodic),
+                msg = tick_rx.next() => msg.map(|_| CompactionTriggerReason::Kick),
+            }
+        } else {
+            tick_rx.next().await.map(|_| CompactionTriggerReason::Kick)
+        }
+    }
+
+    async fn plan_and_enqueue<P>(
+        &self,
+        planner: &P,
+        scheduler: &CompactionScheduler,
+        budget: usize,
+        lease_ttl_ms: u64,
+    ) -> Result<(), CompactionScheduleError>
+    where
+        P: CompactionPlanner,
+    {
+        let metrics = self.compaction_metrics.as_ref();
+        for _ in 0..budget {
+            match self.plan_compaction_task(planner).await {
+                Ok(Some(task)) => {
+                    let manifest_head = match self.manifest.snapshot_latest(self.table_id).await {
+                        Ok(snapshot) => snapshot.head.last_manifest_txn,
+                        Err(err) => {
+                            eprintln!("compaction snapshot failed: {err}");
+                            continue;
+                        }
+                    };
+                    match scheduler
+                        .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(CompactionScheduleError::Full) => {
+                            if let Some(metrics) = metrics {
+                                metrics.record_queue_drop(
+                                    CompactionQueueDropContext::Planner,
+                                    CompactionQueueDropReason::Full,
+                                );
+                            }
+                            eprintln!("compaction scheduler queue full; dropping task");
+                            break;
+                        }
+                        Err(CompactionScheduleError::Closed) => {
+                            if let Some(metrics) = metrics {
+                                metrics.record_queue_drop(
+                                    CompactionQueueDropContext::Planner,
+                                    CompactionQueueDropReason::Closed,
+                                );
+                            }
+                            return Err(CompactionScheduleError::Closed);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("compaction planner failed: {err}");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn drain_and_execute<CE, P>(
+        driver: &Arc<Self>,
+        scheduler: &CompactionScheduler,
+        rx: &mut mpsc::Receiver<ScheduledCompaction>,
+        executor: &Arc<CE>,
+        ctx: &DrainContext<'_, P, E>,
+    ) -> Result<bool, CompactionScheduleError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        let applied_manifest = Arc::new(AtomicBool::new(false));
+        let metrics = driver.compaction_metrics.clone();
+        scheduler
+            .drain_with_budget(rx, |job| {
+                let driver = Arc::clone(driver);
+                let executor = Arc::clone(executor);
+                let applied_manifest = Arc::clone(&applied_manifest);
+                let metrics = metrics.clone();
+                let planner = Arc::clone(ctx.planner);
+                let scheduler = scheduler.clone();
+                let cascade_control = Arc::clone(ctx.cascade_control);
+                let runtime = Arc::clone(ctx.runtime);
+                let mut cascade_trigger = ctx.cascade_trigger.clone();
+                let lease_ttl_ms = ctx.lease_ttl_ms;
+                async move {
+                    let source_level = job.task.source_level;
+                    let target_level = job.task.target_level;
+                    let result = driver
+                        .run_scheduled_compaction(job, executor.as_ref())
+                        .await;
+                    if let Err(err) = result {
+                        eprintln!("scheduled compaction failed: {err}");
+                        return;
+                    }
+                    let Ok(Some(outcome)) = result else {
+                        return;
+                    };
+                    if !outcome.to_version_edits().is_empty() {
+                        applied_manifest.store(true, Ordering::Release);
+                    }
+
+                    if source_level == 0 && target_level == 1 {
+                        let decision = {
+                            let mut guard = cascade_control.lock().await;
+                            guard.try_acquire(runtime.now())
+                        };
+                        match decision {
+                            CascadeDecision::Allowed => {}
+                            CascadeDecision::BudgetExhausted => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics
+                                        .record_cascade(CompactionCascadeDecision::BlockedBudget);
+                                }
+                                return;
+                            }
+                            CascadeDecision::CooldownActive => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics
+                                        .record_cascade(CompactionCascadeDecision::BlockedCooldown);
+                                }
+                                return;
+                            }
+                        }
+                        let Ok(Some(task)) = driver
+                            .plan_compaction_task_from_level(planner.as_ref(), 1)
+                            .await
+                        else {
+                            return;
+                        };
+                        let manifest_head =
+                            match driver.manifest.snapshot_latest(driver.table_id).await {
+                                Ok(snapshot) => snapshot.head.last_manifest_txn,
+                                Err(err) => {
+                                    eprintln!("cascade snapshot failed: {err}");
+                                    return;
+                                }
+                            };
+                        match scheduler
+                            .enqueue(task, manifest_head, "cascade-compaction", lease_ttl_ms)
+                            .await
+                        {
+                            Ok(()) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_cascade(CompactionCascadeDecision::Scheduled);
+                                }
+                                let _ = cascade_trigger.try_send(CompactionTrigger::Kick);
+                            }
+                            Err(CompactionScheduleError::Full) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_queue_drop(
+                                        CompactionQueueDropContext::Cascade,
+                                        CompactionQueueDropReason::Full,
+                                    );
+                                }
+                                eprintln!("compaction scheduler queue full; dropping cascade");
+                            }
+                            Err(CompactionScheduleError::Closed) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_queue_drop(
+                                        CompactionQueueDropContext::Cascade,
+                                        CompactionQueueDropReason::Closed,
+                                    );
+                                }
+                                eprintln!("compaction scheduler closed");
+                            }
+                        }
+                    }
+                }
+            })
+            .await?;
+        Ok(applied_manifest.load(Ordering::Acquire))
+    }
+
+    async fn should_self_kick<P>(&self, planner: &P) -> bool
+    where
+        P: CompactionPlanner,
+    {
+        match self.plan_compaction_task(planner).await {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                eprintln!("compaction planner failed: {err}");
+                false
+            }
+        }
+    }
+
     /// Spawn a background compaction worker that plans and executes compactions.
     pub(crate) fn spawn_worker<CE, P>(
         self: &Arc<Self>,
@@ -702,42 +917,17 @@ where
         let (abort, reg) = AbortHandle::new_pair();
         let loop_future = async move {
             let runtime = runtime_for_loop;
-            let mut pending_tick = false;
             let mut pending_reason: Option<CompactionTriggerReason> = None;
             loop {
-                if !pending_tick {
-                    let interval = periodic_interval;
-                    if let Some(interval) = interval {
-                        let mut sleep = runtime.sleep(interval).fuse();
-                        futures::select_biased! {
-                            _ = sleep => {
-                                pending_tick = true;
-                                pending_reason = Some(CompactionTriggerReason::Periodic);
-                            }
-                            msg = tick_rx.next() => {
-                                match msg {
-                                    Some(_) => {
-                                        pending_tick = true;
-                                        pending_reason = Some(CompactionTriggerReason::Kick);
-                                    }
-                                    None => return,
-                                }
-                            }
-                        }
-                    } else {
-                        match tick_rx.next().await {
-                            Some(_) => {
-                                pending_tick = true;
-                                pending_reason = Some(CompactionTriggerReason::Kick);
-                            }
-                            None => return,
-                        }
+                if pending_reason.is_none() {
+                    pending_reason =
+                        Self::wait_for_trigger(runtime.as_ref(), periodic_interval, &mut tick_rx)
+                            .await;
+                    if pending_reason.is_none() {
+                        return;
                     }
                 }
-                if !pending_tick {
-                    continue;
-                }
-                pending_tick = false;
+
                 if let Some(reason) = pending_reason.take()
                     && let Some(metrics) = metrics.as_ref()
                 {
@@ -748,161 +938,38 @@ where
                     guard.reset_budget();
                 }
 
-                for _ in 0..budget {
-                    match driver_for_loop.plan_compaction_task(planner.as_ref()).await {
-                        Ok(Some(task)) => {
-                            let manifest_head = match driver_for_loop
-                                .manifest
-                                .snapshot_latest(driver_for_loop.table_id)
-                                .await
-                            {
-                                Ok(snapshot) => snapshot.head.last_manifest_txn,
-                                Err(err) => {
-                                    eprintln!("compaction snapshot failed: {err}");
-                                    continue;
-                                }
-                            };
-                            match scheduler
-                                .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
-                                .await
-                            {
-                                Ok(()) => {}
-                                Err(CompactionScheduleError::Full) => {
-                                    if let Some(metrics) = metrics.as_ref() {
-                                        metrics.record_queue_drop(
-                                            CompactionQueueDropContext::Planner,
-                                            CompactionQueueDropReason::Full,
-                                        );
-                                    }
-                                    eprintln!("compaction scheduler queue full; dropping task");
-                                    break;
-                                }
-                                Err(CompactionScheduleError::Closed) => {
-                                    if let Some(metrics) = metrics.as_ref() {
-                                        metrics.record_queue_drop(
-                                            CompactionQueueDropContext::Planner,
-                                            CompactionQueueDropReason::Closed,
-                                        );
-                                    }
-                                    eprintln!("compaction scheduler closed");
-                                    return;
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(err) => {
-                            eprintln!("compaction planner failed: {err}");
-                            break;
-                        }
-                    }
-                }
-
-                if let Err(err) = scheduler
-                    .drain_with_budget(&mut rx, |job| {
-                        let driver = Arc::clone(&driver);
-                        let executor = Arc::clone(&executor);
-                        let planner = Arc::clone(&planner);
-                        let scheduler = scheduler.clone();
-                        let cascade_control = Arc::clone(&cascade_control);
-                        let runtime = Arc::clone(&runtime);
-                        let mut cascade_trigger = cascade_trigger.clone();
-                        let metrics = metrics.clone();
-                        async move {
-                            let source_level = job.task.source_level;
-                            let target_level = job.task.target_level;
-                            let result = driver
-                                .run_scheduled_compaction(job, executor.as_ref())
-                                .await;
-                            if let Err(err) = result {
-                                eprintln!("scheduled compaction failed: {err}");
-                                return;
-                            }
-                            let Ok(Some(_)) = result else {
-                                return;
-                            };
-                            if source_level == 0 && target_level == 1 {
-                                let decision = {
-                                    let mut guard = cascade_control.lock().await;
-                                    guard.try_acquire(runtime.now())
-                                };
-                                match decision {
-                                    CascadeDecision::Allowed => {}
-                                    CascadeDecision::BudgetExhausted => {
-                                        if let Some(metrics) = metrics.as_ref() {
-                                            metrics.record_cascade(
-                                                CompactionCascadeDecision::BlockedBudget,
-                                            );
-                                        }
-                                        return;
-                                    }
-                                    CascadeDecision::CooldownActive => {
-                                        if let Some(metrics) = metrics.as_ref() {
-                                            metrics.record_cascade(
-                                                CompactionCascadeDecision::BlockedCooldown,
-                                            );
-                                        }
-                                        return;
-                                    }
-                                }
-                                let Ok(Some(task)) = driver
-                                    .plan_compaction_task_from_level(planner.as_ref(), 1)
-                                    .await
-                                else {
-                                    return;
-                                };
-                                let manifest_head =
-                                    match driver.manifest.snapshot_latest(driver.table_id).await {
-                                        Ok(snapshot) => snapshot.head.last_manifest_txn,
-                                        Err(err) => {
-                                            eprintln!("cascade snapshot failed: {err}");
-                                            return;
-                                        }
-                                    };
-                                match scheduler
-                                    .enqueue(
-                                        task,
-                                        manifest_head,
-                                        "cascade-compaction",
-                                        lease_ttl_ms,
-                                    )
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        if let Some(metrics) = metrics.as_ref() {
-                                            metrics.record_cascade(
-                                                CompactionCascadeDecision::Scheduled,
-                                            );
-                                        }
-                                        let _ = cascade_trigger.try_send(CompactionTrigger::Kick);
-                                    }
-                                    Err(CompactionScheduleError::Full) => {
-                                        if let Some(metrics) = metrics.as_ref() {
-                                            metrics.record_queue_drop(
-                                                CompactionQueueDropContext::Cascade,
-                                                CompactionQueueDropReason::Full,
-                                            );
-                                        }
-                                        eprintln!(
-                                            "compaction scheduler queue full; dropping cascade"
-                                        );
-                                    }
-                                    Err(CompactionScheduleError::Closed) => {
-                                        if let Some(metrics) = metrics.as_ref() {
-                                            metrics.record_queue_drop(
-                                                CompactionQueueDropContext::Cascade,
-                                                CompactionQueueDropReason::Closed,
-                                            );
-                                        }
-                                        eprintln!("compaction scheduler closed");
-                                    }
-                                }
-                            }
-                        }
-                    })
+                if let Err(err) = driver_for_loop
+                    .plan_and_enqueue(planner.as_ref(), &scheduler, budget, lease_ttl_ms)
                     .await
                 {
-                    eprintln!("compaction scheduler drain stopped: {err}");
+                    eprintln!("compaction scheduler closed: {err}");
                     return;
+                }
+
+                let drain_ctx = DrainContext {
+                    planner: &planner,
+                    cascade_control: &cascade_control,
+                    runtime: &runtime,
+                    cascade_trigger: &cascade_trigger,
+                    lease_ttl_ms,
+                };
+                let applied_manifest = match Self::drain_and_execute(
+                    &driver, &scheduler, &mut rx, &executor, &drain_ctx,
+                )
+                .await
+                {
+                    Ok(applied_manifest) => applied_manifest,
+                    Err(err) => {
+                        eprintln!("compaction scheduler drain stopped: {err}");
+                        return;
+                    }
+                };
+
+                // Self-kick after manifest edits so we can immediately pick up newly-eligible
+                // compactions (or remaining work beyond the current budget) without waiting
+                // for the next external or periodic trigger.
+                if applied_manifest && driver_for_loop.should_self_kick(planner.as_ref()).await {
+                    pending_reason = Some(CompactionTriggerReason::Kick);
                 }
             }
         };

@@ -14,12 +14,11 @@ use futures::{
     channel::{mpsc, oneshot as futures_oneshot},
 };
 use tokio::sync::{Mutex, oneshot};
-use tonbo_predicate::{ColumnRef, Predicate};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use super::common::workspace_temp_dir;
 use crate::{
-    db::{DB, DbInner},
+    db::{DB, DbInner, Expr},
     inmem::policy::BatchesThreshold,
     mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
@@ -134,7 +133,7 @@ async fn ingest_waits_for_wal_durable_ack() {
     release_ack_tx.send(()).expect("release ack");
     ingest_future.await.expect("ingest after ack");
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id"));
+    let pred = Expr::is_not_null("id");
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &pred, None, None)
