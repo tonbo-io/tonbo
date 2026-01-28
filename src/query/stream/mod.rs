@@ -304,7 +304,7 @@ pin_project! {
         },
         SsTable {
             #[pin]
-            inner: SstableScan<'t, E>,
+            inner: SstableScan<E>,
         },
     }
 }
@@ -333,8 +333,8 @@ impl<'t, E: Executor> From<DynRowScan<'t>> for ScanStream<'t, E> {
     }
 }
 
-impl<'t, E: Executor> From<SstableScan<'t, E>> for ScanStream<'t, E> {
-    fn from(inner: SstableScan<'t, E>) -> Self {
+impl<'t, E: Executor> From<SstableScan<E>> for ScanStream<'t, E> {
+    fn from(inner: SstableScan<E>) -> Self {
         ScanStream::SsTable { inner }
     }
 }

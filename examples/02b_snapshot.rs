@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.ingest(builders.finish().into_record_batch()).await?;
 
     // Snapshot sees only data at snapshot time
-    let filter = Predicate::is_not_null(ColumnRef::new("id"));
+    let filter = Expr::is_not_null("id");
     let snapshot_data = snapshot.scan(&db).filter(filter.clone()).collect().await?;
 
     println!("Snapshot (frozen in time):");

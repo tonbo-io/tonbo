@@ -24,8 +24,8 @@ use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
-        ManifestError, ManifestFs, TableMeta, TonboManifest,
-        bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
+        ManifestError, ManifestFs, TableMeta, TonboManifest, VersionState,
+        bootstrap::{ensure_manifest_dirs, init_fs_manifest},
     },
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
@@ -1339,7 +1339,19 @@ where
             .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
             .await
             .map_err(DbBuildError::Manifest)?;
-        Ok(Arc::new(AtomicU64::new(next_sstable_id(&snapshot))))
+        let next_id = match snapshot.latest_version.as_ref() {
+            Some(version) if !version.ssts().is_empty() => {
+                next_sstable_id(std::slice::from_ref(version))
+            }
+            _ => {
+                let versions = manifest
+                    .list_versions(table_meta.table_id, 0)
+                    .await
+                    .map_err(DbBuildError::Manifest)?;
+                next_sstable_id(&versions)
+            }
+        };
+        Ok(Arc::new(AtomicU64::new(next_id)))
     }
 
     /// Internal: recover from WAL state if present, otherwise build fresh.
@@ -1469,16 +1481,16 @@ where
     }
 }
 
-fn next_sstable_id(snapshot: &TableSnapshot) -> u64 {
-    snapshot
-        .latest_version
-        .as_ref()
-        .and_then(|version| {
+fn next_sstable_id(versions: &[VersionState]) -> u64 {
+    let max_id = versions
+        .iter()
+        .flat_map(|version| {
             version
                 .ssts()
                 .iter()
                 .flat_map(|level| level.iter().map(|entry| entry.sst_id().raw()))
-                .max()
         })
-        .map_or(1, |max_id| max_id.saturating_add(1))
+        .max();
+
+    max_id.map_or(1, |max_id| max_id.saturating_add(1))
 }

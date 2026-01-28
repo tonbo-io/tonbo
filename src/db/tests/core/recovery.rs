@@ -15,11 +15,10 @@ use fusio::{
     path::{Path, PathPart},
 };
 use futures::{TryStreamExt, executor::block_on};
-use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{
-    db::{DbInner, builder},
+    db::{DbInner, Expr, ScalarValue, builder},
     extractor::KeyExtractError,
     id::FileIdGenerator,
     manifest::{init_fs_manifest_in_memory, init_in_memory_manifest},
@@ -127,7 +126,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
 
     assert_eq!(recovered.table_id(), manifest_table);
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id"));
+    let pred = Expr::is_not_null("id");
     let snapshot = block_on(recovered.begin_snapshot()).expect("snapshot");
     let plan = block_on(snapshot.plan_scan(&recovered, &pred, None, None)).expect("plan");
     let stream = block_on(recovered.execute_scan(plan)).expect("execute");
@@ -247,7 +246,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         .expect("chain");
     assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
-    let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k"));
+    let pred = Expr::eq("id", ScalarValue::from("k"));
     let snapshot = db.snapshot_at(Timestamp::new(50)).await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &pred, None, None)

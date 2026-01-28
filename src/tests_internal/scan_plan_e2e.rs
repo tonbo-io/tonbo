@@ -8,7 +8,7 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use futures::TryStreamExt;
 
 use crate::{
-    db::{BatchesThreshold, ColumnRef, DB, NeverSeal, Predicate, ScalarValue},
+    db::{BatchesThreshold, DB, Expr, NeverSeal, ScalarValue},
     test_support::{execute_scan_plan, plan_scan_snapshot},
 };
 
@@ -81,7 +81,7 @@ async fn plan_execute_scan_merges_layers_with_residuals() -> Result<(), Box<dyn 
 
     // Plan/execute through the snapshot API to exercise manifest pinning + merge stream.
     let snapshot = db.begin_snapshot().await?;
-    let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let plan = plan_scan_snapshot(&snapshot, &db, &predicate, None, Some(2)).await?;
     let stream = execute_scan_plan(&db, plan).await?;
     let batches = stream.try_collect::<Vec<_>>().await?;
@@ -169,7 +169,7 @@ async fn plan_execute_applies_limit_after_merge_ordering() -> Result<(), Box<dyn
     db.ingest(mutable_batch).await?;
 
     let snapshot = db.begin_snapshot().await?;
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let plan = plan_scan_snapshot(&snapshot, &db, &predicate, None, Some(100)).await?;
     let stream = execute_scan_plan(&db, plan).await?;
     let batches = stream.try_collect::<Vec<_>>().await?;

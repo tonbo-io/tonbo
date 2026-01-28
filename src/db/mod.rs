@@ -54,7 +54,7 @@ use crate::{
 pub use crate::{
     inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     mode::DynModeConfig,
-    query::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue},
+    query::{Expr, ScalarValue},
     schema::SchemaBuilder,
     transaction::{CommitAckMode, Transaction},
     wal::WalSyncPolicy,

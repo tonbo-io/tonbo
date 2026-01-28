@@ -26,4 +26,10 @@ pub enum DBError {
     /// Dynamic view error.
     #[error("dynamic view error: {0}")]
     DynView(#[from] DynViewError),
+    /// Predicate uses an unsupported expression variant.
+    #[error("unsupported predicate: {reason}")]
+    UnsupportedPredicate {
+        /// Details about the unsupported predicate.
+        reason: String,
+    },
 }
