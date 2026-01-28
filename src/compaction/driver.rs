@@ -468,6 +468,9 @@ where
                         }
                     };
 
+                // Self-kick after manifest edits so we can immediately pick up newly-eligible
+                // compactions (or remaining work beyond the current budget) without waiting
+                // for the next external or periodic trigger.
                 if applied_manifest && driver_for_loop.should_self_kick(&planner).await {
                     pending_trigger = true;
                 }
