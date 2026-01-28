@@ -24,7 +24,7 @@
 //!
 //! use arrow_array::{Int64Array, RecordBatch, StringArray};
 //! use arrow_schema::{DataType, Field, Schema};
-//! use tonbo::db::{ColumnRef, DbBuilder, Predicate, ScalarValue};
+//! use tonbo::db::{DbBuilder, Expr, ScalarValue};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +53,7 @@
 //!     db.ingest(batch).await?;
 //!
 //!     // Query: score > 80
-//!     let filter = Predicate::gt(ColumnRef::new("score"), ScalarValue::from(80_i64));
+//!     let filter = Expr::gt("score", ScalarValue::from(80_i64));
 //!     let results = db.scan().filter(filter).collect().await?;
 //!
 //!     Ok(())
@@ -154,22 +154,22 @@
 //!
 //! ## Predicates
 //!
-//! Build query filters using [`Predicate`](db::Predicate):
+//! Build query filters using [`Expr`](db::Expr):
 //!
 //! ```rust,ignore
-//! use tonbo::db::{ColumnRef, Predicate, ScalarValue};
+//! use tonbo::db::{Expr, ScalarValue};
 //!
 //! // Equality
-//! let filter = Predicate::eq(ColumnRef::new("status"), ScalarValue::from("active"));
+//! let filter = Expr::eq("status", ScalarValue::from("active"));
 //!
 //! // Comparison
-//! let filter = Predicate::gt(ColumnRef::new("age"), ScalarValue::from(18_i64));
+//! let filter = Expr::gt("age", ScalarValue::from(18_i64));
 //!
 //! // Logical operators
-//! let filter = Predicate::and(
-//!     Predicate::gt(ColumnRef::new("age"), ScalarValue::from(18_i64)),
-//!     Predicate::eq(ColumnRef::new("country"), ScalarValue::from("US")),
-//! );
+//! let filter = Expr::and(vec![
+//!     Expr::gt("age", ScalarValue::from(18_i64)),
+//!     Expr::eq("country", ScalarValue::from("US")),
+//! ]);
 //! ```
 //!
 //! # Feature Flags

@@ -130,7 +130,7 @@ async fn minor_compaction_flushes_after_seal() -> Result<(), Box<dyn std::error:
 
     let mut db: DbInner<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(&db_root)?
-        .with_minor_compaction(1, 0, 5)
+        .with_minor_compaction(1, 0)
         .build()
         .await?
         .into_inner();
@@ -149,7 +149,7 @@ async fn minor_compaction_flushes_after_seal() -> Result<(), Box<dyn std::error:
     let sst_path = db_root
         .join("sst")
         .join("L0")
-        .join("00000000000000000005.parquet");
+        .join("00000000000000000001.parquet");
     assert!(
         sst_path.exists(),
         "expected SST at {:?} to be created",

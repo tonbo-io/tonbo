@@ -228,10 +228,16 @@ const DEFAULT_OUTPUT_HARD_CAP_BYTES: usize = 512 * 1024 * 1024; // 512 MiB safet
 impl LocalCompactionExecutor {
     /// Build a local executor that will use `config` for outputs and allocate SST ids starting at
     /// `start_id`.
+    #[cfg(test)]
     pub(crate) fn new(config: Arc<SsTableConfig>, start_id: u64) -> Self {
+        Self::with_id_allocator(config, Arc::new(AtomicU64::new(start_id)))
+    }
+
+    /// Build a local executor that draws SST ids from a shared allocator.
+    pub(crate) fn with_id_allocator(config: Arc<SsTableConfig>, next_id: Arc<AtomicU64>) -> Self {
         Self {
             config,
-            next_id: Arc::new(AtomicU64::new(start_id)),
+            next_id,
             max_output_rows: None,
             max_output_bytes: None,
             #[cfg(test)]
@@ -240,9 +246,14 @@ impl LocalCompactionExecutor {
     }
 
     /// Cap the number of bytes per output SST. Prevents oversized single files when splitting.
-    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
+        self
+    }
+
+    /// Cap the number of rows per output SST. Prevents oversized single files when splitting.
+    pub(crate) fn with_max_output_rows(mut self, max_output_rows: usize) -> Self {
+        self.max_output_rows = Some(max_output_rows.max(1));
         self
     }
 

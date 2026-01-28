@@ -72,7 +72,7 @@ async fn wal_rotation_and_state_persisted() -> Result<(), Box<dyn std::error::Er
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
         .wal_config(wal_cfg.clone())
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();

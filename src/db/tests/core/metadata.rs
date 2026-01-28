@@ -3,10 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use tonbo_predicate::{ColumnRef, Predicate, ScalarValue};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::{db::DB, mode::DynModeConfig, test::build_batch};
+use crate::{
+    db::{DB, Expr, ScalarValue},
+    mode::DynModeConfig,
+    test::build_batch,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn dynamic_new_from_metadata_field_marker() {
@@ -108,11 +111,11 @@ async fn dynamic_composite_from_field_ordinals_and_scan() {
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
     db.ingest(batch).await.expect("insert batch");
 
-    let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
-        Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(5i64)),
-            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
+    let pred = Expr::and(vec![
+        Expr::eq("id", ScalarValue::from("a")),
+        Expr::and(vec![
+            Expr::gt_eq("ts", ScalarValue::from(5i64)),
+            Expr::lt_eq("ts", ScalarValue::from(10i64)),
         ]),
     ]);
     let batches = db.scan().filter(pred).collect().await.expect("collect");
@@ -171,11 +174,11 @@ async fn dynamic_composite_from_schema_list_and_scan() {
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
     db.ingest(batch).await.expect("insert batch");
 
-    let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
-        Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(1i64)),
-            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
+    let pred = Expr::and(vec![
+        Expr::eq("id", ScalarValue::from("a")),
+        Expr::and(vec![
+            Expr::gt_eq("ts", ScalarValue::from(1i64)),
+            Expr::lt_eq("ts", ScalarValue::from(10i64)),
         ]),
     ]);
     let batches = db.scan().filter(pred).collect().await.expect("collect");

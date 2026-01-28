@@ -53,28 +53,25 @@ async fn main() {
         .expect("schema ok");
     db.ingest(batch).await.expect("insert dynamic batch");
 
-    let key_col = ColumnRef::new("id");
+    let key_col = "id";
 
     // Scan for a specific key (id == "carol") using predicate
-    let carol_pred = Predicate::eq(key_col.clone(), ScalarValue::from("carol"));
+    let carol_pred = Expr::eq(key_col, ScalarValue::from("carol"));
     let out = scan_pairs(&db, carol_pred).await;
     println!("dynamic scan rows (carol): {:?}", out);
 
     // Query expression: id == "dave"
-    let expr = Predicate::eq(key_col.clone(), ScalarValue::from("dave"));
+    let expr = Expr::eq(key_col, ScalarValue::from("dave"));
     let out_q = scan_pairs(&db, expr).await;
     println!("dynamic query rows (id == dave): {:?}", out_q);
 
     // Scan all dynamic rows (id is not null)
-    let all_pred = Predicate::is_not_null(key_col.clone());
+    let all_pred = Expr::is_not_null(key_col);
     let all_rows = scan_pairs(&db, all_pred).await;
     println!("dynamic rows (all): {:?}", all_rows);
 }
 
-async fn scan_pairs(
-    db: &DB<InMemoryFs, TokioExecutor>,
-    predicate: Predicate,
-) -> Vec<(String, i32)> {
+async fn scan_pairs(db: &DB<InMemoryFs, TokioExecutor>, predicate: Expr) -> Vec<(String, i32)> {
     let batches = db.scan().filter(predicate).collect().await.expect("scan");
     batches
         .into_iter()

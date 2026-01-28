@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc};
+use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc, stream::FuturesUnordered};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -84,13 +84,17 @@ impl CompactionScheduler {
         F: FnMut(ScheduledCompaction) -> Fut,
         Fut: Future<Output = ()>,
     {
+        let mut running = FuturesUnordered::new();
         for _ in 0..self.budget {
             match rx.next().now_or_never() {
-                Some(Some(job)) => f(job).await,
+                Some(Some(job)) => {
+                    running.push(f(job));
+                }
                 Some(None) => return Err(CompactionScheduleError::Closed),
                 None => break,
             }
         }
+        while running.next().await.is_some() {}
         Ok(())
     }
 }

@@ -81,7 +81,7 @@ async fn wal_interval_bytes_syncs() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(temp_root.to_string_lossy().into_owned())?
         .wal_config(wal_cfg)
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
@@ -131,7 +131,7 @@ async fn wal_interval_time_syncs() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(temp_root.to_string_lossy().into_owned())?
         .wal_config(wal_cfg)
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();

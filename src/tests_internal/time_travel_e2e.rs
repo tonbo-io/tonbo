@@ -6,7 +6,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 
-use crate::db::{BatchesThreshold, ColumnRef, DB, Predicate};
+use crate::db::{BatchesThreshold, DB, Expr};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -66,7 +66,7 @@ async fn snapshot_at_reads_older_manifest_version() -> Result<(), Box<dyn std::e
     let executor = Arc::new(TokioExecutor::default());
     let mut inner = DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
-        .with_minor_compaction(1, 0, 1)
+        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
@@ -99,7 +99,7 @@ async fn snapshot_at_reads_older_manifest_version() -> Result<(), Box<dyn std::e
 
     let earliest = versions.last().expect("earliest version");
     let snapshot_old = db.snapshot_at(earliest.timestamp).await?;
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
 
     let old_rows = extract_rows(
         snapshot_old

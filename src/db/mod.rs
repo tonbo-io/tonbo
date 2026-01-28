@@ -27,7 +27,8 @@ mod tests;
 mod wal;
 
 pub use builder::{
-    AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig, wal_tuning,
+    AwsCreds, AwsCredsError, CompactionOptions, DbBuildError, DbBuilder, ObjectSpec, S3Spec,
+    WalConfig, wal_tuning,
 };
 pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
@@ -53,7 +54,7 @@ use crate::{
 pub use crate::{
     inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     mode::DynModeConfig,
-    query::{ColumnRef, ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue},
+    query::{Expr, ScalarValue},
     schema::SchemaBuilder,
     transaction::{CommitAckMode, Transaction},
     wal::WalSyncPolicy,
@@ -901,6 +902,7 @@ where
                     seal.immutable_wal_ranges.clear();
                 }
                 seal.last_seal_at = Some(self.executor.now());
+                self.kick_compaction_worker();
                 Ok(table)
             }
             Err(err) => Err(err),

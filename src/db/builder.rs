@@ -1,4 +1,8 @@
-use std::{env, io, sync::Arc, time::Duration};
+use std::{
+    env, io,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use arrow_schema::SchemaRef;
 use fusio::{
@@ -20,8 +24,8 @@ use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
-        ManifestError, ManifestFs, TableMeta, TonboManifest,
-        bootstrap::{TableSnapshot, ensure_manifest_dirs, init_fs_manifest},
+        ManifestError, ManifestFs, TableMeta, TonboManifest, VersionState,
+        bootstrap::{ensure_manifest_dirs, init_fs_manifest},
     },
     mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
@@ -435,9 +439,7 @@ where
 pub struct DbBuilder<S = Unconfigured> {
     mode_config: DynModeConfig,
     state: S,
-    compaction_strategy: CompactionStrategy,
-    compaction_interval: Option<Duration>,
-    compaction_loop_cfg: Option<CompactionLoopConfig>,
+    compaction_options: Option<CompactionOptions>,
     minor_compaction: Option<MinorCompactionOptions>,
 }
 
@@ -772,9 +774,7 @@ impl DbBuilder<Unconfigured> {
         Self {
             mode_config,
             state: Unconfigured,
-            compaction_strategy: CompactionStrategy::default(),
-            compaction_interval: None,
-            compaction_loop_cfg: None,
+            compaction_options: None,
             minor_compaction: Some(MinorCompactionOptions::default()),
         }
     }
@@ -794,9 +794,7 @@ impl DbBuilder<Unconfigured> {
         Ok(DbBuilder {
             mode_config: self.mode_config,
             state: StorageConfig::new(fs, root, DurabilityClass::Volatile),
-            compaction_strategy: self.compaction_strategy,
-            compaction_interval: self.compaction_interval,
-            compaction_loop_cfg: self.compaction_loop_cfg,
+            compaction_options: self.compaction_options,
             minor_compaction: self.minor_compaction,
         })
     }
@@ -819,9 +817,7 @@ impl DbBuilder<Unconfigured> {
         Ok(DbBuilder {
             mode_config: self.mode_config,
             state,
-            compaction_strategy: self.compaction_strategy,
-            compaction_interval: self.compaction_interval,
-            compaction_loop_cfg: self.compaction_loop_cfg,
+            compaction_options: self.compaction_options,
             minor_compaction: self.minor_compaction,
         })
     }
@@ -838,9 +834,7 @@ impl DbBuilder<Unconfigured> {
         Ok(DbBuilder {
             mode_config: self.mode_config,
             state: StorageConfig::new(fs, root, DurabilityClass::Durable),
-            compaction_strategy: self.compaction_strategy,
-            compaction_interval: self.compaction_interval,
-            compaction_loop_cfg: self.compaction_loop_cfg,
+            compaction_options: self.compaction_options,
             minor_compaction: self.minor_compaction,
         })
     }
@@ -905,27 +899,28 @@ impl<FS> DbBuilder<StorageConfig<FS>>
 where
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
+    /// Configure the background compaction worker for major compaction.
+    #[must_use]
+    pub fn with_compaction_options(mut self, options: CompactionOptions) -> Self {
+        self.compaction_options = Some(options);
+        self
+    }
+
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
-    #[cfg(test)]
     #[must_use]
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
-        self.compaction_strategy = strategy;
+        let mut options = self.compaction_options.unwrap_or_default();
+        options.strategy = strategy;
+        self.compaction_options = Some(options);
         self
     }
 
     /// Configure minor compaction (immutable flush) with a simple segment-count trigger.
-    #[cfg(test)]
     #[must_use]
-    pub fn with_minor_compaction(
-        mut self,
-        segment_threshold: usize,
-        target_level: usize,
-        start_id: u64,
-    ) -> Self {
+    pub fn with_minor_compaction(mut self, segment_threshold: usize, target_level: usize) -> Self {
         self.minor_compaction = Some(MinorCompactionOptions {
             segment_threshold,
             target_level,
-            start_id: Some(start_id),
         });
         self
     }
@@ -941,7 +936,7 @@ where
     fn build_minor_compaction_state(
         layout: &StorageLayout<FS>,
         cfg: &MinorCompactionOptions,
-        start_id: u64,
+        id_allocator: Arc<AtomicU64>,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
@@ -954,7 +949,11 @@ where
                 .with_key_extractor(extractor)
                 .with_target_level(cfg.target_level),
         );
-        let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, start_id);
+        let compactor = MinorCompactor::with_id_allocator(
+            cfg.segment_threshold,
+            cfg.target_level,
+            id_allocator,
+        );
         Ok(MinorCompactionState::new(compactor, config))
     }
 
@@ -1023,9 +1022,7 @@ where
         let DbBuilder {
             mode_config,
             state,
-            compaction_strategy,
-            compaction_interval: _,
-            compaction_loop_cfg,
+            compaction_options,
             minor_compaction,
         } = self;
         let manifest_init = ManifestBootstrap::new(&layout);
@@ -1048,18 +1045,33 @@ where
             .await
             .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
-        let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
-            Some(
-                Self::minor_compaction_state_for_table(
-                    cfg,
-                    &layout,
-                    &manifest,
-                    &table_meta,
-                    sstable_schema,
-                    sstable_extractor,
-                )
-                .await?,
-            )
+        let sstable_id_allocator = if minor_compaction.is_some() || compaction_options.is_some() {
+            Some(Self::sstable_id_allocator_for_table(&manifest, &table_meta).await?)
+        } else {
+            None
+        };
+        let minor_compaction_state = if let (Some(cfg), Some(id_allocator)) =
+            (minor_compaction.as_ref(), sstable_id_allocator.as_ref())
+        {
+            Some(Self::minor_compaction_state_for_table(
+                cfg,
+                &layout,
+                Arc::clone(id_allocator),
+                Arc::clone(&sstable_schema),
+                Arc::clone(&sstable_extractor),
+            )?)
+        } else {
+            None
+        };
+        let compaction_state = if let (Some(_), Some(id_allocator)) =
+            (compaction_options.as_ref(), sstable_id_allocator.as_ref())
+        {
+            Some(Self::compaction_worker_state_for_table(
+                &layout,
+                Arc::clone(id_allocator),
+                Arc::clone(&sstable_schema),
+                Arc::clone(&sstable_extractor),
+            )?)
         } else {
             None
         };
@@ -1094,23 +1106,29 @@ where
             inner.enable_wal(cfg).await?;
         }
 
-        if let Some(loop_cfg) = compaction_loop_cfg {
-            // Temporary shortcut: spawn a local compaction loop for dyn mode using a
-            // caller-provided SST config. This should be replaced by a real
-            // scheduler/lease + executor selection.
-            let planner = compaction_strategy.clone().build();
-            let exec =
-                LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
+        if let (Some(options), Some((sst_config, id_allocator))) =
+            (compaction_options, compaction_state)
+        {
+            let planner = options.strategy.clone().build();
+            let mut exec =
+                LocalCompactionExecutor::with_id_allocator(Arc::clone(&sst_config), id_allocator);
+            if let Some(max_rows) = options.max_output_rows {
+                exec = exec.with_max_output_rows(max_rows);
+            }
+            if let Some(max_bytes) = options.max_output_bytes {
+                exec = exec.with_max_output_bytes(max_bytes);
+            }
             let driver = Arc::new(inner.compaction_driver());
             let handle = driver.spawn_worker(
                 Arc::clone(&inner.executor),
                 planner,
                 exec,
-                Some(loop_cfg.sst_config),
-                loop_cfg.interval,
-                1,
+                options.effective_tick(),
+                options.effective_queue_capacity(),
+                options.effective_concurrency(),
             );
             inner.compaction_worker = Some(handle);
+            inner.kick_compaction_worker();
         }
 
         Ok(DB::from_inner(Arc::new(inner)))
@@ -1126,51 +1144,100 @@ impl<S> DbBuilder<S> {
     }
 }
 
-impl<FS> DbBuilder<StorageConfig<FS>>
-where
-    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
-{
-    /// Configure an optional background compaction interval (current-thread Tokio only).
-    /// This is a temporary opt-in; a proper scheduler/lease should replace it.
-    #[cfg(test)]
-    #[must_use]
-    pub fn with_compaction_interval(mut self, interval: Duration) -> Self {
-        self.compaction_interval = Some(interval);
-        self
-    }
+/// Configuration surface for major compaction workers.
+#[derive(Clone, Debug)]
+pub struct CompactionOptions {
+    strategy: CompactionStrategy,
+    max_concurrent_jobs: usize,
+    queue_capacity: usize,
+    max_output_rows: Option<usize>,
+    max_output_bytes: Option<usize>,
+    periodic_tick: Option<Duration>,
+}
 
-    /// Enable a background compaction loop on the provided executor. This is a temporary,
-    /// dyn-mode-only helper; a proper scheduler/lease should replace it.
-    #[cfg(test)]
-    #[must_use]
-    pub fn with_compaction_loop(
-        mut self,
-        interval: Duration,
-        sst_config: Arc<SsTableConfig>,
-        start_id: u64,
-    ) -> Self {
-        self.compaction_loop_cfg = Some(CompactionLoopConfig {
-            interval,
-            sst_config,
-            start_id,
-        });
-        self
+impl Default for CompactionOptions {
+    fn default() -> Self {
+        Self {
+            strategy: CompactionStrategy::default(),
+            max_concurrent_jobs: 1,
+            queue_capacity: 1,
+            max_output_rows: None,
+            max_output_bytes: None,
+            periodic_tick: None,
+        }
     }
 }
 
-/// Configures automatic compaction loop spawning for dynamic builds.
-#[derive(Clone)]
-struct CompactionLoopConfig {
-    interval: Duration,
-    sst_config: Arc<SsTableConfig>,
-    start_id: u64,
+impl CompactionOptions {
+    /// Start from the conservative default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Select the compaction strategy used by the planner.
+    #[must_use]
+    pub fn strategy(mut self, strategy: CompactionStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Limit the number of compaction jobs processed per trigger.
+    #[must_use]
+    pub fn max_concurrent_jobs(mut self, jobs: usize) -> Self {
+        self.max_concurrent_jobs = jobs.max(1);
+        self
+    }
+
+    /// Bound the in-process queue used to stage compaction jobs.
+    #[must_use]
+    pub fn queue_capacity(mut self, capacity: usize) -> Self {
+        self.queue_capacity = capacity.max(1);
+        self
+    }
+
+    /// Cap the number of rows per compaction output SST.
+    #[must_use]
+    pub fn max_output_rows(mut self, rows: usize) -> Self {
+        self.max_output_rows = Some(rows.max(1));
+        self
+    }
+
+    /// Cap the number of bytes per compaction output SST.
+    #[must_use]
+    pub fn max_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_output_bytes = Some(bytes.max(1));
+        self
+    }
+
+    /// Enable periodic compaction ticks as a safety net.
+    #[must_use]
+    pub fn periodic_tick(mut self, interval: Duration) -> Self {
+        if interval.is_zero() {
+            self.periodic_tick = None;
+        } else {
+            self.periodic_tick = Some(interval);
+        }
+        self
+    }
+
+    fn effective_concurrency(&self) -> usize {
+        self.max_concurrent_jobs.max(1)
+    }
+
+    fn effective_queue_capacity(&self) -> usize {
+        self.queue_capacity.max(self.effective_concurrency()).max(1)
+    }
+
+    fn effective_tick(&self) -> Option<Duration> {
+        self.periodic_tick.filter(|interval| !interval.is_zero())
+    }
 }
 
 #[derive(Clone, Debug)]
 struct MinorCompactionOptions {
     segment_threshold: usize,
     target_level: usize,
-    start_id: Option<u64>,
 }
 
 impl Default for MinorCompactionOptions {
@@ -1178,7 +1245,6 @@ impl Default for MinorCompactionOptions {
         Self {
             segment_threshold: 4,
             target_level: 0,
-            start_id: None,
         }
     }
 }
@@ -1234,14 +1300,36 @@ where
         self
     }
 
-    async fn minor_compaction_state_for_table<E>(
+    fn minor_compaction_state_for_table(
         cfg: &MinorCompactionOptions,
         layout: &StorageLayout<FS>,
-        manifest: &TonboManifest<FS, E>,
-        table_meta: &TableMeta,
+        id_allocator: Arc<AtomicU64>,
         schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
     ) -> Result<MinorCompactionState, DbBuildError>
+    where
+        FS: DynFs + FusioCas + 'static,
+    {
+        Self::build_minor_compaction_state(layout, cfg, id_allocator, schema, extractor)
+    }
+
+    fn compaction_worker_state_for_table(
+        layout: &StorageLayout<FS>,
+        id_allocator: Arc<AtomicU64>,
+        schema: SchemaRef,
+        extractor: Arc<dyn KeyProjection>,
+    ) -> Result<(Arc<SsTableConfig>, Arc<AtomicU64>), DbBuildError> {
+        let route = layout.sst_route()?;
+        let config = Arc::new(
+            SsTableConfig::new(schema, route.fs, route.path.clone()).with_key_extractor(extractor),
+        );
+        Ok((config, id_allocator))
+    }
+
+    async fn sstable_id_allocator_for_table<E>(
+        manifest: &TonboManifest<FS, E>,
+        table_meta: &TableMeta,
+    ) -> Result<Arc<AtomicU64>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E>,
@@ -1251,8 +1339,19 @@ where
             .snapshot_latest_with_fallback(table_meta.table_id, table_meta)
             .await
             .map_err(DbBuildError::Manifest)?;
-        let start_id = cfg.start_id.unwrap_or_else(|| next_sstable_id(&snapshot));
-        Self::build_minor_compaction_state(layout, cfg, start_id, schema, extractor)
+        let next_id = match snapshot.latest_version.as_ref() {
+            Some(version) if !version.ssts().is_empty() => {
+                next_sstable_id(std::slice::from_ref(version))
+            }
+            _ => {
+                let versions = manifest
+                    .list_versions(table_meta.table_id, 0)
+                    .await
+                    .map_err(DbBuildError::Manifest)?;
+                next_sstable_id(&versions)
+            }
+        };
+        Ok(Arc::new(AtomicU64::new(next_id)))
     }
 
     /// Internal: recover from WAL state if present, otherwise build fresh.
@@ -1268,9 +1367,7 @@ where
         let DbBuilder {
             mode_config,
             state,
-            compaction_strategy,
-            compaction_interval,
-            compaction_loop_cfg,
+            compaction_options,
             minor_compaction,
         } = self;
         state.prepare().await?;
@@ -1300,18 +1397,34 @@ where
             let fs_dyn = layout.dyn_fs();
             let sstable_schema = mode_config.schema();
             let sstable_extractor = Arc::clone(&mode_config.extractor);
-            let minor_compaction_state = if let Some(cfg) = minor_compaction.as_ref() {
-                Some(
-                    Self::minor_compaction_state_for_table(
-                        cfg,
-                        &layout,
-                        &manifest,
-                        &table_meta,
-                        sstable_schema,
-                        sstable_extractor,
-                    )
-                    .await?,
-                )
+            let sstable_id_allocator = if minor_compaction.is_some() || compaction_options.is_some()
+            {
+                Some(Self::sstable_id_allocator_for_table(&manifest, &table_meta).await?)
+            } else {
+                None
+            };
+            let minor_compaction_state = if let (Some(cfg), Some(id_allocator)) =
+                (minor_compaction.as_ref(), sstable_id_allocator.as_ref())
+            {
+                Some(Self::minor_compaction_state_for_table(
+                    cfg,
+                    &layout,
+                    Arc::clone(id_allocator),
+                    Arc::clone(&sstable_schema),
+                    Arc::clone(&sstable_extractor),
+                )?)
+            } else {
+                None
+            };
+            let compaction_state = if let (Some(_), Some(id_allocator)) =
+                (compaction_options.as_ref(), sstable_id_allocator.as_ref())
+            {
+                Some(Self::compaction_worker_state_for_table(
+                    &layout,
+                    Arc::clone(id_allocator),
+                    Arc::clone(&sstable_schema),
+                    Arc::clone(&sstable_extractor),
+                )?)
             } else {
                 None
             };
@@ -1328,14 +1441,38 @@ where
             .map_err(DbBuildError::Mode)?;
             inner.minor_compaction = minor_compaction_state;
             inner.enable_wal(wal_cfg).await?;
+            if let (Some(options), Some((sst_config, id_allocator))) =
+                (compaction_options, compaction_state)
+            {
+                let planner = options.strategy.clone().build();
+                let mut exec = LocalCompactionExecutor::with_id_allocator(
+                    Arc::clone(&sst_config),
+                    id_allocator,
+                );
+                if let Some(max_rows) = options.max_output_rows {
+                    exec = exec.with_max_output_rows(max_rows);
+                }
+                if let Some(max_bytes) = options.max_output_bytes {
+                    exec = exec.with_max_output_bytes(max_bytes);
+                }
+                let driver = Arc::new(inner.compaction_driver());
+                let handle = driver.spawn_worker(
+                    Arc::clone(&inner.executor),
+                    planner,
+                    exec,
+                    options.effective_tick(),
+                    options.effective_queue_capacity(),
+                    options.effective_concurrency(),
+                );
+                inner.compaction_worker = Some(handle);
+                inner.kick_compaction_worker();
+            }
             Ok(DB::from_inner(Arc::new(inner)))
         } else {
             DbBuilder {
                 mode_config,
                 state,
-                compaction_strategy,
-                compaction_interval,
-                compaction_loop_cfg,
+                compaction_options,
                 minor_compaction,
             }
             .build_with_layout(executor, layout)
@@ -1344,16 +1481,16 @@ where
     }
 }
 
-fn next_sstable_id(snapshot: &TableSnapshot) -> u64 {
-    snapshot
-        .latest_version
-        .as_ref()
-        .and_then(|version| {
+fn next_sstable_id(versions: &[VersionState]) -> u64 {
+    let max_id = versions
+        .iter()
+        .flat_map(|version| {
             version
                 .ssts()
                 .iter()
                 .flat_map(|level| level.iter().map(|entry| entry.sst_id().raw()))
-                .max()
         })
-        .map_or(1, |max_id| max_id.saturating_add(1))
+        .max();
+
+    max_id.map_or(1, |max_id| max_id.saturating_add(1))
 }

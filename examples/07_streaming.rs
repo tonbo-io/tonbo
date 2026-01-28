@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Method 1: collect() - loads all matching rows into memory
     // Good for small result sets
     println!("=== Method 1: collect() ===");
-    let filter = Predicate::eq(ColumnRef::new("level"), ScalarValue::from("ERROR"));
+    let filter = Expr::eq("level", ScalarValue::from("ERROR"));
     let batches = db.scan().filter(filter).collect().await?;
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!(
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Method 2: stream() - process batches one at a time
     // Good for large result sets or when you want to stop early
     println!("=== Method 2: stream() ===");
-    let filter = Predicate::eq(ColumnRef::new("level"), ScalarValue::from("WARN"));
+    let filter = Expr::eq("level", ScalarValue::from("WARN"));
     let mut stream = db.scan().filter(filter).stream().await?;
 
     let mut batch_count = 0;
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Method 3: stream() with early termination
     // Process until you find what you need
     println!("=== Method 3: stream() with early exit ===");
-    let filter = Predicate::eq(ColumnRef::new("level"), ScalarValue::from("INFO"));
+    let filter = Expr::eq("level", ScalarValue::from("INFO"));
     let mut stream = db.scan().filter(filter).stream().await?;
 
     let mut found_count = 0;
