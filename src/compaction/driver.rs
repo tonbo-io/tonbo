@@ -3,7 +3,13 @@
 //! The driver owns manifest access and WAL configuration, coordinates planning,
 //! execution, and reconciliation without requiring the full DB type.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
@@ -392,16 +398,26 @@ where
                     }
                 }
 
+                let applied_manifest = Arc::new(AtomicBool::new(false));
                 if let Err(err) = scheduler
                     .drain_with_budget(&mut rx, |job| {
                         let driver = Arc::clone(&driver);
                         let executor = Arc::clone(&executor);
+                        let applied_manifest = Arc::clone(&applied_manifest);
                         async move {
-                            if let Err(err) = driver
+                            match driver
                                 .run_scheduled_compaction(job, executor.as_ref())
                                 .await
                             {
-                                eprintln!("scheduled compaction failed: {err}");
+                                Ok(Some(outcome)) => {
+                                    if !outcome.to_version_edits().is_empty() {
+                                        applied_manifest.store(true, Ordering::Release);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    eprintln!("scheduled compaction failed: {err}");
+                                }
                             }
                         }
                     })
@@ -409,6 +425,16 @@ where
                 {
                     eprintln!("compaction scheduler drain stopped: {err}");
                     return;
+                }
+
+                if applied_manifest.load(Ordering::Acquire) {
+                    match driver_for_loop.plan_compaction_task(&planner).await {
+                        Ok(Some(_)) => pending_tick = true,
+                        Ok(None) => {}
+                        Err(err) => {
+                            eprintln!("compaction planner failed: {err}");
+                        }
+                    }
                 }
             }
         };

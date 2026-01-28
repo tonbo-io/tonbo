@@ -1,4 +1,10 @@
-use std::{collections::HashSet, fs, pin::Pin, sync::Arc};
+use std::{
+    collections::HashSet,
+    fs,
+    pin::Pin,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{
@@ -9,7 +15,10 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::Path,
 };
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, sleep},
+};
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use super::common::workspace_temp_dir;
@@ -735,6 +744,115 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
     );
 
     fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_self_kick_advances_without_periodic_tick()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db_root = workspace_temp_dir("compaction-self-kick");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let config = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .with_metadata()
+        .build()
+        .expect("schema builder");
+
+    let db: DbInner<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(config)
+        .on_disk(&db_root)?
+        .disable_minor_compaction()
+        .build()
+        .await?
+        .into_inner();
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_root = db_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&db.schema), fs, sst_root)
+            .with_key_extractor(Arc::clone(db.extractor())),
+    );
+    let executor = (*db.executor).clone();
+
+    let mut entries = Vec::new();
+    for (id, key, value) in [(1_u64, "a", 1_i32), (2_u64, "b", 2_i32)] {
+        let batch = build_batch(
+            Arc::clone(&db.schema),
+            vec![DynRow(vec![
+                Some(DynCell::Str(key.into())),
+                Some(DynCell::I32(value)),
+            ])],
+        )?;
+        let immutable =
+            crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch, "id")?;
+        let mut builder = SsTableBuilder::new(
+            Arc::clone(&sst_cfg),
+            SsTableDescriptor::new(SsTableId::new(id), 0),
+        );
+        builder.add_immutable(&immutable)?;
+        let sst = builder.finish(executor.clone()).await?;
+        let desc = sst.descriptor().clone();
+        let entry = SstEntry::new(
+            desc.id().clone(),
+            desc.stats().cloned(),
+            desc.wal_ids().map(|ids| ids.to_vec()),
+            desc.data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
+            desc.delete_path().cloned(),
+        );
+        entries.push(entry);
+    }
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts { level: 0, entries }],
+        )
+        .await?;
+
+    let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+        l0_trigger: 1,
+        l0_max_inputs: 2,
+        l0_max_bytes: None,
+        level_thresholds: vec![0],
+        level_max_bytes: Vec::new(),
+        max_inputs_per_task: 2,
+        max_task_bytes: None,
+    });
+    let id_allocator = Arc::new(AtomicU64::new(10));
+    let executor = LocalCompactionExecutor::with_id_allocator(Arc::clone(&sst_cfg), id_allocator);
+    let driver = Arc::new(db.compaction_driver());
+    let handle = driver.spawn_worker(Arc::clone(&db.executor), planner, executor, None, 1, 1);
+
+    handle.kick();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+        if let Some(version) = snapshot.latest_version.as_ref() {
+            if version.ssts().len() > 2 && !version.ssts()[2].is_empty() {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+    let latest = snapshot.latest_version.expect("latest version");
+    assert!(
+        latest.ssts().len() > 2 && !latest.ssts()[2].is_empty(),
+        "expected L2 compaction to complete without new writes"
+    );
+
+    fs::remove_dir_all(&db_root)?;
     Ok(())
 }
 
