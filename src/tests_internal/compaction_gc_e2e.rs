@@ -7,7 +7,7 @@ use arrow_schema::{DataType, Field};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
 
 use crate::{
-    db::{BatchesThreshold, ColumnRef, Predicate},
+    db::{BatchesThreshold, Expr},
     test_support::{
         TestFsWalStateStore as FsWalStateStore, TestSsTableConfig as SsTableConfig,
         TestSsTableDescriptor as SsTableDescriptor, TestSsTableId as SsTableId,
@@ -121,7 +121,7 @@ async fn compaction_gc_prunes_obsolete_wal_and_preserves_visible_rows()
     .open_with_executor(executor)
     .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let batches = recovered.scan().filter(predicate).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()

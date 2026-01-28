@@ -6,8 +6,8 @@ use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as 
 
 use crate::{
     db::{
-        BatchesThreshold, ColumnRef, DB, DbInner, NeverSeal, Predicate,
-        WalConfig as BuilderWalConfig, WalSyncPolicy,
+        BatchesThreshold, DB, DbInner, Expr, NeverSeal, WalConfig as BuilderWalConfig,
+        WalSyncPolicy,
     },
     wal::{WalExt, state::FsWalStateStore},
 };
@@ -54,7 +54,7 @@ fn wal_cfg_with_backend(
 async fn rows_from_db(
     db: &DB<LocalFs, TokioExecutor>,
 ) -> Result<Vec<(String, i32)>, Box<dyn std::error::Error>> {
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let batches = db.scan().filter(predicate).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()
@@ -82,7 +82,7 @@ async fn rows_from_db(
 async fn rows_from_db_inner(
     db: &DbInner<LocalFs, TokioExecutor>,
 ) -> Result<Vec<(String, i32)>, Box<dyn std::error::Error>> {
-    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
+    let predicate = Expr::is_not_null("id");
     let batches = db.scan().filter(predicate).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()

@@ -11,8 +11,9 @@
 //! projection and page/index pruning, and are safe for both local disk and
 //! S3-compatible backends.
 
-use std::{convert::TryFrom, fmt, sync::Arc};
+use std::{collections::BTreeSet, convert::TryFrom, fmt, sync::Arc};
 
+use aisle::RowFilter as AisleRowFilter;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take as arrow_take;
@@ -27,12 +28,19 @@ use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
 use futures::stream::{self, BoxStream, StreamExt};
 use parquet::{
     arrow::{
-        ProjectionMask, async_reader::ParquetRecordBatchStreamBuilder,
+        ProjectionMask,
+        arrow_reader::{
+            ArrowReaderMetadata, ArrowReaderOptions, RowFilter as ParquetRowFilter, RowSelection,
+        },
+        async_reader::ParquetRecordBatchStreamBuilder,
         async_writer::AsyncArrowWriter,
     },
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
-    file::properties::WriterProperties,
+    file::{
+        metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader},
+        properties::{EnabledStatistics, WriterProperties},
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +59,10 @@ use crate::{
         merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
         scan::{ParquetStream, UnpinExec},
     },
-    query::Predicate,
+    query::{Expr, ScalarValue},
 };
+
+const MVCC_SEQUENCE_COL: &str = "_sequence";
 
 /// Identifier for an SSTable stored on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -342,6 +352,18 @@ pub enum SsTableError {
     /// Parquet writer failed while persisting an SSTable.
     #[error("parquet write error: {0}")]
     Parquet(#[from] ParquetError),
+    /// Parquet page indexes were missing for an SSTable read.
+    #[error("sstable parquet file {path} missing page indexes: {reason}")]
+    MissingPageIndex { path: String, reason: String },
+    /// Scan selection is invalid for an SSTable scan.
+    #[error("invalid scan selection for SST: {selection}")]
+    InvalidScanSelection { selection: &'static str },
+    /// Row filter predicate could not be applied.
+    #[error("row filter predicate unsupported: {reason}")]
+    RowFilterPredicate {
+        /// Details about why the row filter predicate was rejected.
+        reason: String,
+    },
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
@@ -642,7 +664,11 @@ fn writer_properties(compression: SsTableCompression) -> WriterProperties {
             WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default()))
         }
     };
-    builder.build()
+    builder
+        // Always emit page indexes for SST reads.
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .set_offset_index_disabled(false)
+        .build()
 }
 
 /// Append the `_commit_ts` column to a record batch for persistence.
@@ -899,7 +925,7 @@ impl SsTableReader {
     pub(crate) async fn into_stream<E>(
         self,
         _ts: Timestamp,
-        _predicate: Option<&Predicate>,
+        predicate: Option<&Expr>,
         executor: E,
     ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError>
     where
@@ -911,10 +937,48 @@ impl SsTableReader {
                 SsTableError::InvalidPath("missing data path on descriptor".into())
             })?;
         // ParquetStream<E> is Unpin, so we can use it directly without Box::pin
-        let data_stream =
-            open_parquet_stream(fs.clone(), data_path, None, executor.clone()).await?;
+        let data_stream = open_parquet_stream(
+            fs.clone(),
+            data_path,
+            None,
+            None,
+            None,
+            predicate,
+            executor.clone(),
+        )
+        .await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(open_parquet_stream(fs, path.clone(), None, executor).await?)
+            let delete_path = path.clone();
+            let delete_projection = if let Some(extractor) = self.config.key_extractor() {
+                let mut required = BTreeSet::new();
+                for field in extractor.key_schema().fields() {
+                    required.insert(field.name().to_string());
+                }
+                required.insert(MVCC_COMMIT_COL.to_string());
+                Some(
+                    build_projection_mask_for_names(
+                        Arc::clone(&fs),
+                        &delete_path,
+                        &required,
+                        executor.clone(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            Some(
+                open_parquet_stream(
+                    fs,
+                    delete_path,
+                    delete_projection,
+                    None,
+                    None,
+                    None,
+                    executor,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -967,16 +1031,332 @@ impl SsTableReader {
     }
 }
 
-pub(crate) async fn open_parquet_stream<E>(
+fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Result<Option<Expr>, SsTableError> {
+    match predicate {
+        Expr::True => Ok(None),
+        Expr::False => Ok(Some(Expr::False)),
+        Expr::Cmp { column, value, .. } => {
+            if scalar_matches_column(schema, column, value) {
+                Ok(Some(predicate.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Expr::Between {
+            column, low, high, ..
+        } => {
+            if scalar_matches_column(schema, column, low)
+                && scalar_matches_column(schema, column, high)
+            {
+                Ok(Some(predicate.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Expr::InList { column, values } => {
+            if scalars_match_column(schema, column, values) {
+                Ok(Some(predicate.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Expr::StartsWith { column, .. } => {
+            if is_string_column(schema, column) {
+                Ok(Some(predicate.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Expr::IsNull { column, .. } => {
+            if column_type(schema, column).is_some() {
+                Ok(Some(predicate.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Expr::BloomFilterEq { column, .. } => Err(SsTableError::RowFilterPredicate {
+            reason: format!(
+                "BloomFilterEq predicate on column '{column}' is not supported for row filtering"
+            ),
+        }),
+        Expr::BloomFilterInList { column, .. } => Err(SsTableError::RowFilterPredicate {
+            reason: format!(
+                "BloomFilterInList predicate on column '{column}' is not supported for row \
+                 filtering"
+            ),
+        }),
+        Expr::And(children) => {
+            let mut supported = Vec::new();
+            for child in children {
+                if let Some(expr) = row_filter_expr(child, schema)? {
+                    supported.push(expr);
+                }
+            }
+            Ok(match supported.len() {
+                0 => None,
+                1 => Some(supported.remove(0)),
+                _ => Some(Expr::And(supported)),
+            })
+        }
+        Expr::Or(children) => {
+            let mut supported = Vec::new();
+            for child in children {
+                match row_filter_expr(child, schema)? {
+                    Some(expr) => supported.push(expr),
+                    None => return Ok(None),
+                }
+            }
+            Ok(match supported.len() {
+                0 => None,
+                1 => Some(supported.remove(0)),
+                _ => Some(Expr::Or(supported)),
+            })
+        }
+        Expr::Not(child) => {
+            Ok(row_filter_expr(child, schema)?.map(|expr| Expr::Not(Box::new(expr))))
+        }
+        other => Err(SsTableError::RowFilterPredicate {
+            reason: format!("unsupported predicate variant: {other:?}"),
+        }),
+    }
+}
+
+async fn build_projection_mask_for_names<E>(
+    fs: Arc<dyn DynFs>,
+    path: &Path,
+    required: &BTreeSet<String>,
+    executor: E,
+) -> Result<ProjectionMask, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let file = fs.open(path).await.map_err(SsTableError::Fs)?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let metadata = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Optional)
+        .load_and_finish(&mut reader, size)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
+    let file_schema = arrow_metadata.schema();
+    let parquet_schema = arrow_metadata.parquet_schema();
+
+    let mut remaining = required.clone();
+    if file_schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == MVCC_SEQUENCE_COL)
+    {
+        remaining.insert(MVCC_SEQUENCE_COL.to_string());
+    }
+
+    let mut root_indices = Vec::new();
+    for (idx, field) in file_schema.fields().iter().enumerate() {
+        if remaining.remove(field.name()) {
+            root_indices.push(idx);
+        }
+    }
+
+    if let Some(missing) = remaining.iter().next() {
+        return Err(SsTableError::KeyExtract(KeyExtractError::NoSuchField {
+            name: missing.to_string(),
+        }));
+    }
+
+    Ok(ProjectionMask::roots(parquet_schema, root_indices))
+}
+
+fn column_type<'a>(schema: &'a SchemaRef, column: &str) -> Option<&'a DataType> {
+    schema
+        .fields()
+        .iter()
+        .find(|field| field.name() == column)
+        .map(|field| field.data_type())
+}
+
+fn scalar_matches_type(value: &ScalarValue, data_type: &DataType) -> bool {
+    if matches!(value, ScalarValue::Null) {
+        return false;
+    }
+    value.data_type() == *data_type
+}
+
+fn scalar_matches_column(schema: &SchemaRef, column: &str, value: &ScalarValue) -> bool {
+    let Some(data_type) = column_type(schema, column) else {
+        return false;
+    };
+    scalar_matches_type(value, data_type)
+}
+
+fn scalars_match_column(schema: &SchemaRef, column: &str, values: &[ScalarValue]) -> bool {
+    let Some(data_type) = column_type(schema, column) else {
+        return false;
+    };
+    values
+        .iter()
+        .all(|value| scalar_matches_type(value, data_type))
+}
+
+fn is_string_column(schema: &SchemaRef, column: &str) -> bool {
+    column_type(schema, column)
+        .map(is_string_type)
+        .unwrap_or(false)
+}
+
+fn is_string_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
+}
+
+pub(crate) fn validate_page_indexes(
+    path: &Path,
+    metadata: &ParquetMetaData,
+) -> Result<(), SsTableError> {
+    let path = path.to_string();
+    let column_index = metadata
+        .column_index()
+        .ok_or_else(|| SsTableError::MissingPageIndex {
+            path: path.clone(),
+            reason: "column index missing".to_string(),
+        })?;
+    let offset_index = metadata
+        .offset_index()
+        .ok_or_else(|| SsTableError::MissingPageIndex {
+            path: path.clone(),
+            reason: "offset index missing".to_string(),
+        })?;
+
+    let row_groups = metadata.num_row_groups();
+    if column_index.len() != row_groups {
+        return Err(SsTableError::MissingPageIndex {
+            path: path.clone(),
+            reason: format!(
+                "column index row group count mismatch: expected {row_groups}, got {}",
+                column_index.len()
+            ),
+        });
+    }
+    if offset_index.len() != row_groups {
+        return Err(SsTableError::MissingPageIndex {
+            path: path.clone(),
+            reason: format!(
+                "offset index row group count mismatch: expected {row_groups}, got {}",
+                offset_index.len()
+            ),
+        });
+    }
+
+    for (row_group_idx, row_group) in metadata.row_groups().iter().enumerate() {
+        let expected_columns = row_group.num_columns();
+        let column_count = column_index[row_group_idx].len();
+        if column_count != expected_columns {
+            return Err(SsTableError::MissingPageIndex {
+                path: path.clone(),
+                reason: format!(
+                    "column index column count mismatch at row group {row_group_idx}: expected \
+                     {expected_columns}, got {column_count}",
+                ),
+            });
+        }
+        let offset_count = offset_index[row_group_idx].len();
+        if offset_count != expected_columns {
+            return Err(SsTableError::MissingPageIndex {
+                path: path.clone(),
+                reason: format!(
+                    "offset index column count mismatch at row group {row_group_idx}: expected \
+                     {expected_columns}, got {offset_count}",
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+pub(crate) struct ParquetStreamOptions<'a> {
+    pub projection: Option<ProjectionMask>,
+    pub row_groups: Option<Vec<usize>>,
+    pub row_selection: Option<RowSelection>,
+    pub row_filter_predicate: Option<&'a Expr>,
+}
+
+pub(crate) async fn open_parquet_stream_with_metadata<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
-    projection: Option<ProjectionMask>,
+    metadata: Arc<ParquetMetaData>,
+    options: ParquetStreamOptions<'_>,
     executor: E,
 ) -> Result<ParquetStream<E>, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection, executor).await?;
+    let ParquetStreamOptions {
+        projection,
+        row_groups,
+        row_selection,
+        row_filter_predicate,
+    } = options;
+    let file = fs.open(&path).await?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
+    let reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(metadata, options).map_err(SsTableError::Parquet)?;
+    let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, arrow_metadata);
+    let schema = builder.schema().clone();
+    if let Some(predicate) = match row_filter_predicate {
+        Some(pred) => row_filter_expr(pred, &schema)?,
+        None => None,
+    } {
+        let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
+        let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
+        builder = builder.with_row_filter(row_filter);
+    }
+    let mask = projection.unwrap_or_else(ProjectionMask::all);
+    builder = builder.with_projection(mask);
+    if let Some(row_groups) = row_groups {
+        builder = builder.with_row_groups(row_groups);
+    }
+    if let Some(selection) = row_selection {
+        builder = builder.with_row_selection(selection);
+    }
+    let stream = builder.build().map_err(SsTableError::Parquet)?;
+    Ok(stream)
+}
+
+pub(crate) async fn open_parquet_stream<E>(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    projection: Option<ProjectionMask>,
+    row_groups: Option<Vec<usize>>,
+    row_selection: Option<RowSelection>,
+    row_filter_predicate: Option<&Expr>,
+    executor: E,
+) -> Result<ParquetStream<E>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let (stream, _schema) = open_parquet_stream_with_schema(
+        fs,
+        path,
+        projection,
+        row_groups,
+        row_selection,
+        row_filter_predicate,
+        executor,
+    )
+    .await?;
     Ok(stream)
 }
 
@@ -986,6 +1366,9 @@ pub(crate) async fn open_parquet_stream_with_schema<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
+    row_groups: Option<Vec<usize>>,
+    row_selection: Option<RowSelection>,
+    row_filter_predicate: Option<&Expr>,
     executor: E,
 ) -> Result<(ParquetStream<E>, SchemaRef), SsTableError>
 where
@@ -994,15 +1377,37 @@ where
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
-    let reader = AsyncReader::new(file, size, UnpinExec(executor))
+    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
         .map_err(SsTableError::Fs)?;
-    let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
+    let metadata = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Optional)
+        .load_and_finish(&mut reader, size)
         .await
         .map_err(SsTableError::Parquet)?;
+    validate_page_indexes(&path, &metadata)?;
+
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata), options).map_err(SsTableError::Parquet)?;
+    let mut builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, arrow_metadata);
     let schema = builder.schema().clone();
+    if let Some(predicate) = match row_filter_predicate {
+        Some(pred) => row_filter_expr(pred, &schema)?,
+        None => None,
+    } {
+        let filter = AisleRowFilter::new(predicate, builder.parquet_schema());
+        let row_filter = ParquetRowFilter::new(vec![Box::new(filter)]);
+        builder = builder.with_row_filter(row_filter);
+    }
     let mask = projection.unwrap_or_else(ProjectionMask::all);
     builder = builder.with_projection(mask);
+    if let Some(row_groups) = row_groups {
+        builder = builder.with_row_groups(row_groups);
+    }
+    if let Some(selection) = row_selection {
+        builder = builder.with_row_selection(selection);
+    }
     let stream = builder.build().map_err(SsTableError::Parquet)?;
     Ok((stream, schema))
 }
@@ -1577,5 +1982,71 @@ mod tests {
         let descriptor = table.descriptor();
         let delete_path = descriptor.delete_path().expect("delete sidecar present");
         assert!(delete_path.as_ref().ends_with(".delete.parquet"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_parquet_missing_page_indexes_errors() {
+        use arrow_array::StringArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let values: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values]).expect("batch");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = Path::from(
+            tempdir
+                .path()
+                .join("no-page-index.parquet")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let expected_path = path.to_string();
+        let file = fs
+            .open_options(
+                &path,
+                OpenOptions::default()
+                    .create(true)
+                    .write(true)
+                    .truncate(true),
+            )
+            .await
+            .expect("open file");
+
+        let properties = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_offset_index_disabled(true)
+            .build();
+        let mut writer = AsyncArrowWriter::try_new(
+            AsyncWriter::new(file, NoopExecutor),
+            Arc::clone(&schema),
+            Some(properties),
+        )
+        .expect("writer");
+        writer.write(&batch).await.expect("write");
+        writer.close().await.expect("close");
+
+        let result = open_parquet_stream_with_schema(
+            Arc::clone(&fs),
+            path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await;
+
+        let err = result.expect_err("expected missing page index error");
+        match err {
+            SsTableError::MissingPageIndex { path, reason } => {
+                assert_eq!(path, expected_path);
+                assert!(
+                    reason.contains("column index"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
