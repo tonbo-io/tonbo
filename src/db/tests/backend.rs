@@ -98,13 +98,6 @@ fn unique_label(base: &str) -> String {
     format!("{base}-{nanos}")
 }
 
-fn prefix_with_env(label: &str) -> String {
-    match env::var("TONBO_S3_PREFIX") {
-        Ok(base) => format!("{base}/{label}"),
-        Err(_) => label.to_string(),
-    }
-}
-
 /// S3/object-store backend harness. Returns None when env is not present.
 pub fn maybe_s3_harness(
     label: &str,
@@ -119,9 +112,13 @@ pub fn maybe_s3_harness(
         None => AwsCreds::new(access, secret),
     };
 
-    let label = prefix_with_env(&unique_label(label));
+    let base_label = unique_label(label);
+    let prefix = match env::var("TONBO_S3_PREFIX") {
+        Ok(base) => format!("{base}/{base_label}"),
+        Err(_) => base_label,
+    };
 
-    let mut s3 = S3Spec::new(bucket.clone(), label, credentials);
+    let mut s3 = S3Spec::new(bucket.clone(), prefix, credentials);
     s3.endpoint = Some(endpoint);
     s3.region = Some(region);
     s3.sign_payload = Some(true);

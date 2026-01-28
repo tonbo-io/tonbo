@@ -108,6 +108,7 @@ jobs:
       TONBO_S3_ENDPOINT: http://localhost:4566
       TONBO_S3_BUCKET: tonbo-e2e
       TONBO_S3_REGION: us-east-1
+      TONBO_S3_PREFIX: tests/public_api/${{ github.run_id }}
       TONBO_S3_ACCESS_KEY: test
       TONBO_S3_SECRET_KEY: test
     steps:
@@ -126,6 +127,10 @@ jobs:
       - name: Run public API e2e (s3 + fs)
         run: |
           cargo test --package tonbo --lib public_api_e2e:: -- --nocapture
+      - name: List S3 artifacts (LocalStack)
+        if: always()
+        run: |
+          aws --endpoint-url="$TONBO_S3_ENDPOINT" s3 ls "s3://$TONBO_S3_BUCKET/$TONBO_S3_PREFIX/" --recursive || true
 
   e2e-s3-real:
     name: e2e (real S3)
@@ -176,11 +181,16 @@ jobs:
           TONBO_S3_BUCKET: ${{ vars.TONBO_S3_BUCKET }}
           TONBO_S3_REGION: ${{ vars.TONBO_S3_REGION }}
           TONBO_S3_ENDPOINT: https://s3.${{ vars.TONBO_S3_REGION }}.amazonaws.com
+          TONBO_S3_PREFIX: tests/public_api/${{ github.run_id }}
           TONBO_S3_ACCESS_KEY: ${{ env.AWS_ACCESS_KEY_ID }}
           TONBO_S3_SECRET_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
           TONBO_S3_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         run: |
           cargo test --package tonbo --lib public_api_e2e:: -- --nocapture
+      - name: List S3 artifacts (real)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        run: |
+          aws s3 ls "s3://${{ vars.TONBO_S3_BUCKET }}/tests/public_api/${{ github.run_id }}/" --recursive --region "${{ vars.TONBO_S3_REGION }}" || true
 
   wasm:
     name: wasm edge worker
