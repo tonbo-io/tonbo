@@ -23,7 +23,7 @@ use crate::{
         handle::{CompactionHandle, CompactionTrigger},
         orchestrator,
         planner::{CompactionPlanner, CompactionTask},
-        scheduler::{CompactionScheduler, ScheduledCompaction},
+        scheduler::{CompactionScheduleError, CompactionScheduler, ScheduledCompaction},
     },
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
@@ -311,6 +311,106 @@ where
         }
     }
 
+    async fn wait_for_trigger(
+        runtime: &E,
+        periodic_interval: Option<Duration>,
+        tick_rx: &mut mpsc::Receiver<CompactionTrigger>,
+    ) -> bool {
+        if let Some(interval) = periodic_interval {
+            let mut sleep = runtime.sleep(interval).fuse();
+            futures::select_biased! {
+                _ = sleep => true,
+                msg = tick_rx.next() => msg.is_some(),
+            }
+        } else {
+            tick_rx.next().await.is_some()
+        }
+    }
+
+    async fn plan_and_enqueue<P>(
+        &self,
+        planner: &P,
+        scheduler: &CompactionScheduler,
+        budget: usize,
+        lease_ttl_ms: u64,
+    ) -> Result<(), CompactionScheduleError>
+    where
+        P: CompactionPlanner,
+    {
+        for _ in 0..budget {
+            match self.plan_compaction_task(planner).await {
+                Ok(Some(task)) => {
+                    let manifest_head = match self.manifest.snapshot_latest(self.table_id).await {
+                        Ok(snapshot) => snapshot.head.last_manifest_txn,
+                        Err(err) => {
+                            eprintln!("compaction snapshot failed: {err}");
+                            continue;
+                        }
+                    };
+                    scheduler
+                        .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
+                        .await?;
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("compaction planner failed: {err}");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn drain_and_execute<CE>(
+        driver: &Arc<Self>,
+        scheduler: &CompactionScheduler,
+        rx: &mut mpsc::Receiver<ScheduledCompaction>,
+        executor: &Arc<CE>,
+    ) -> Result<bool, CompactionScheduleError>
+    where
+        CE: CompactionExecutor,
+    {
+        let applied_manifest = Arc::new(AtomicBool::new(false));
+        scheduler
+            .drain_with_budget(rx, |job| {
+                let driver = Arc::clone(driver);
+                let executor = Arc::clone(executor);
+                let applied_manifest = Arc::clone(&applied_manifest);
+                async move {
+                    match driver
+                        .run_scheduled_compaction(job, executor.as_ref())
+                        .await
+                    {
+                        Ok(Some(outcome)) => {
+                            if !outcome.to_version_edits().is_empty() {
+                                applied_manifest.store(true, Ordering::Release);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            eprintln!("scheduled compaction failed: {err}");
+                        }
+                    }
+                }
+            })
+            .await?;
+        Ok(applied_manifest.load(Ordering::Acquire))
+    }
+
+    async fn should_self_kick<P>(&self, planner: &P) -> bool
+    where
+        P: CompactionPlanner,
+    {
+        match self.plan_compaction_task(planner).await {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                eprintln!("compaction planner failed: {err}");
+                false
+            }
+        }
+    }
+
     /// Spawn a background compaction worker that plans and executes compactions.
     pub(crate) fn spawn_worker<CE, P>(
         self: &Arc<Self>,
@@ -339,102 +439,37 @@ where
         let (abort, reg) = AbortHandle::new_pair();
         let loop_future = async move {
             let runtime = runtime_for_loop;
-            let mut pending_tick = false;
+            let mut pending_trigger = false;
             loop {
-                if !pending_tick {
-                    let interval = periodic_interval;
-                    if let Some(interval) = interval {
-                        let mut sleep = runtime.sleep(interval).fuse();
-                        futures::select_biased! {
-                            _ = sleep => {
-                                pending_tick = true;
-                            }
-                            msg = tick_rx.next() => {
-                                match msg {
-                                    Some(_) => pending_tick = true,
-                                    None => return,
-                                }
-                            }
-                        }
-                    } else {
-                        match tick_rx.next().await {
-                            Some(_) => pending_tick = true,
-                            None => return,
-                        }
+                if !pending_trigger {
+                    let triggered =
+                        Self::wait_for_trigger(runtime.as_ref(), periodic_interval, &mut tick_rx)
+                            .await;
+                    if !triggered {
+                        return;
                     }
                 }
-                if !pending_tick {
-                    continue;
-                }
-                pending_tick = false;
+                pending_trigger = false;
 
-                for _ in 0..budget {
-                    match driver_for_loop.plan_compaction_task(&planner).await {
-                        Ok(Some(task)) => {
-                            let manifest_head = match driver_for_loop
-                                .manifest
-                                .snapshot_latest(driver_for_loop.table_id)
-                                .await
-                            {
-                                Ok(snapshot) => snapshot.head.last_manifest_txn,
-                                Err(err) => {
-                                    eprintln!("compaction snapshot failed: {err}");
-                                    continue;
-                                }
-                            };
-                            if let Err(err) = scheduler
-                                .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
-                                .await
-                            {
-                                eprintln!("compaction scheduler closed: {err}");
-                                return;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(err) => {
-                            eprintln!("compaction planner failed: {err}");
-                            break;
-                        }
-                    }
-                }
-
-                let applied_manifest = Arc::new(AtomicBool::new(false));
-                if let Err(err) = scheduler
-                    .drain_with_budget(&mut rx, |job| {
-                        let driver = Arc::clone(&driver);
-                        let executor = Arc::clone(&executor);
-                        let applied_manifest = Arc::clone(&applied_manifest);
-                        async move {
-                            match driver
-                                .run_scheduled_compaction(job, executor.as_ref())
-                                .await
-                            {
-                                Ok(Some(outcome)) => {
-                                    if !outcome.to_version_edits().is_empty() {
-                                        applied_manifest.store(true, Ordering::Release);
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    eprintln!("scheduled compaction failed: {err}");
-                                }
-                            }
-                        }
-                    })
+                if let Err(err) = driver_for_loop
+                    .plan_and_enqueue(&planner, &scheduler, budget, lease_ttl_ms)
                     .await
                 {
-                    eprintln!("compaction scheduler drain stopped: {err}");
+                    eprintln!("compaction scheduler closed: {err}");
                     return;
                 }
 
-                if applied_manifest.load(Ordering::Acquire) {
-                    match driver_for_loop.plan_compaction_task(&planner).await {
-                        Ok(Some(_)) => pending_tick = true,
-                        Ok(None) => {}
+                let applied_manifest =
+                    match Self::drain_and_execute(&driver, &scheduler, &mut rx, &executor).await {
+                        Ok(applied_manifest) => applied_manifest,
                         Err(err) => {
-                            eprintln!("compaction planner failed: {err}");
+                            eprintln!("compaction scheduler drain stopped: {err}");
+                            return;
                         }
-                    }
+                    };
+
+                if applied_manifest && driver_for_loop.should_self_kick(&planner).await {
+                    pending_trigger = true;
                 }
             }
         };
