@@ -536,15 +536,16 @@ where
                 async move {
                     let source_level = job.task.source_level;
                     let target_level = job.task.target_level;
-                    let result = driver
+                    let outcome = match driver
                         .run_scheduled_compaction(job, executor.as_ref())
-                        .await;
-                    if let Err(err) = result {
-                        eprintln!("scheduled compaction failed: {err}");
-                        return;
-                    }
-                    let Ok(Some(outcome)) = result else {
-                        return;
+                        .await
+                    {
+                        Ok(Some(outcome)) => outcome,
+                        Ok(None) => return,
+                        Err(err) => {
+                            eprintln!("scheduled compaction failed: {err}");
+                            return;
+                        }
                     };
                     if !outcome.to_version_edits().is_empty() {
                         applied_manifest.store(true, Ordering::Release);
