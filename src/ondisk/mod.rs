@@ -13,3 +13,9 @@ pub mod merge;
 
 /// Scan stream for a sstable
 pub mod scan;
+
+/// Bloom filter loading utilities for pruning.
+pub mod bloom;
+
+/// Parquet metadata caching utilities.
+pub mod metadata;

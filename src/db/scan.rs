@@ -9,7 +9,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use fusio::{
     DynFs,
-    executor::{Executor, Timer},
+    executor::{Executor, Mutex, Timer},
 };
 use fusio_parquet::reader::AsyncReader;
 use futures::{Stream, StreamExt, TryStreamExt, stream};
@@ -30,9 +30,12 @@ use crate::{
         mutable::memtable::DynRowScanEntry,
     },
     key::{KeyOwned, KeyRow},
+    mode::fingerprint_schema,
     mutation::DynMutation,
     mvcc::{MVCC_COMMIT_COL, Timestamp},
     ondisk::{
+        bloom::{BatchedAsyncReader, BloomFilterCache, SstBloomFilterProvider},
+        metadata::ParquetMetadataCache,
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{
             ParquetStreamOptions, SsTableError, open_parquet_stream_with_metadata,
@@ -52,6 +55,68 @@ use crate::{
     },
     transaction::{Snapshot as TxSnapshot, TransactionScan},
 };
+
+async fn parquet_metadata_cached<E>(
+    fs: Arc<dyn DynFs>,
+    path: &fusio::path::Path,
+    cache: Arc<E::Mutex<ParquetMetadataCache>>,
+    executor: E,
+) -> Result<Arc<parquet::file::metadata::ParquetMetaData>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    if let Some(cached) = {
+        let guard = cache.lock().await;
+        guard.get(path)
+    } {
+        return Ok(cached);
+    }
+
+    let file = fs.open(path).await.map_err(SsTableError::Fs)?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
+        .await
+        .map_err(SsTableError::Fs)?;
+    let metadata = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Optional)
+        .load_and_finish(&mut reader, size)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    validate_page_indexes(path, &metadata)?;
+    let metadata = Arc::new(metadata);
+
+    let mut guard = cache.lock().await;
+    guard.insert(path, Arc::clone(&metadata));
+    Ok(metadata)
+}
+
+async fn pruner_for_schema<E>(
+    cache: Arc<E::Mutex<crate::db::PrunerCache>>,
+    schema: &SchemaRef,
+) -> Option<Arc<aisle::Pruner>>
+where
+    E: Executor + Clone + 'static,
+{
+    let fingerprint = fingerprint_schema(schema);
+    let mut guard = cache.lock().await;
+    if let Some(pruner) = guard.get(&fingerprint) {
+        return Some(Arc::clone(pruner));
+    }
+    let pruner = Arc::new(aisle::Pruner::try_new(Arc::clone(schema)).ok()?);
+    guard.insert(fingerprint, Arc::clone(&pruner));
+    Some(pruner)
+}
+
+struct PruneContext<E>
+where
+    E: Executor + Clone + 'static,
+{
+    fs: Arc<dyn DynFs>,
+    metadata_cache: Arc<E::Mutex<ParquetMetadataCache>>,
+    bloom_cache: Arc<E::Mutex<BloomFilterCache>>,
+    pruner_cache: Arc<E::Mutex<crate::db::PrunerCache>>,
+    executor: E,
+}
 
 /// Default package size for a scan
 pub const DEFAULT_SCAN_BATCH_ROWS: usize = 1024;
@@ -98,6 +163,13 @@ impl TxSnapshot {
         let key_schema = db.extractor().key_schema();
         let fs = Arc::clone(&db.fs);
         let executor: E = (**db.executor()).clone();
+        let prune_ctx = PruneContext {
+            fs: Arc::clone(&fs),
+            metadata_cache: db.metadata_cache(),
+            bloom_cache: db.bloom_cache(),
+            pruner_cache: db.pruner_cache(),
+            executor: executor.clone(),
+        };
         let mut sst_selections = Vec::new();
         for entry in self
             .table_snapshot()
@@ -114,22 +186,22 @@ impl TxSnapshot {
                 continue;
             }
             let selection = prune_sst_selection(
-                Arc::clone(&fs),
+                &prune_ctx,
                 entry.data_path(),
                 predicate,
                 read_ts,
                 &scan_schema,
                 &key_schema,
-                executor.clone(),
             )
             .await?;
             let mut selection = selection;
             if let Some(delete_path) = entry.delete_path() {
                 let delete_selection = plan_delete_sidecar_selection(
-                    Arc::clone(&fs),
+                    Arc::clone(&prune_ctx.fs),
                     delete_path,
                     &key_schema,
-                    executor.clone(),
+                    Arc::clone(&prune_ctx.metadata_cache),
+                    prune_ctx.executor.clone(),
                 )
                 .await?;
                 selection.delete_selection = Some(delete_selection);
@@ -156,29 +228,23 @@ impl TxSnapshot {
 }
 
 async fn prune_sst_selection<E>(
-    fs: Arc<dyn DynFs>,
+    ctx: &PruneContext<E>,
     data_path: &fusio::path::Path,
     predicate: &Expr,
     read_ts: Timestamp,
     scan_schema: &SchemaRef,
     key_schema: &SchemaRef,
-    executor: E,
 ) -> Result<SstSelection, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(data_path).await.map_err(SsTableError::Fs)?;
-    let size = file.size().await.map_err(SsTableError::Fs)?;
-    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
-        .await
-        .map_err(SsTableError::Fs)?;
-    let metadata = ParquetMetaDataReader::new()
-        .with_page_index_policy(PageIndexPolicy::Optional)
-        .load_and_finish(&mut reader, size)
-        .await
-        .map_err(SsTableError::Parquet)?;
-    let metadata = Arc::new(metadata);
-    validate_page_indexes(data_path, metadata.as_ref())?;
+    let metadata = parquet_metadata_cached(
+        Arc::clone(&ctx.fs),
+        data_path,
+        Arc::clone(&ctx.metadata_cache),
+        ctx.executor.clone(),
+    )
+    .await?;
     let options = ArrowReaderOptions::new().with_page_index(true);
     let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&metadata), options)
         .map_err(SsTableError::Parquet)?;
@@ -189,10 +255,34 @@ where
     } else {
         Expr::and(vec![predicate.clone(), commit_predicate])
     };
-    let prune_result = PruneRequest::new(metadata.as_ref(), schema.as_ref())
-        .with_predicate(&prune_predicate)
-        .enable_page_index(true)
-        .prune();
+    let bloom_file = ctx.fs.open(data_path).await.map_err(SsTableError::Fs)?;
+    let size = bloom_file.size().await.map_err(SsTableError::Fs)?;
+    let reader = BatchedAsyncReader::new(bloom_file, size, ctx.executor.clone())
+        .await
+        .map_err(SsTableError::Fs)?;
+    let mut provider = SstBloomFilterProvider::new(
+        data_path.clone(),
+        Arc::clone(&metadata),
+        reader,
+        Arc::clone(&ctx.bloom_cache),
+    );
+    let prune_result =
+        if let Some(pruner) = pruner_for_schema::<E>(Arc::clone(&ctx.pruner_cache), schema).await {
+            pruner
+                .prune_ir_with_bloom_provider(
+                    metadata.as_ref(),
+                    std::slice::from_ref(&prune_predicate),
+                    &mut provider,
+                )
+                .await
+        } else {
+            PruneRequest::new(metadata.as_ref(), schema.as_ref())
+                .with_predicate(&prune_predicate)
+                .enable_page_index(true)
+                .enable_bloom_filter(true)
+                .prune_async(&mut provider)
+                .await
+        };
     let mut row_groups = prune_result.row_groups().to_vec();
     // Preserve PK-ascending scan order by keeping row groups in file order.
     row_groups.sort_unstable();
@@ -269,24 +359,14 @@ async fn plan_delete_sidecar_selection<E>(
     fs: Arc<dyn DynFs>,
     delete_path: &fusio::path::Path,
     key_schema: &SchemaRef,
+    metadata_cache: Arc<E::Mutex<ParquetMetadataCache>>,
     executor: E,
 ) -> Result<DeleteSelection, SsTableError>
 where
     E: Executor + Clone + 'static,
 {
-    let file = fs.open(delete_path).await.map_err(SsTableError::Fs)?;
-    let size = file.size().await.map_err(SsTableError::Fs)?;
-    let mut reader = AsyncReader::new(file, size, UnpinExec(executor))
-        .await
-        .map_err(SsTableError::Fs)?;
-    let metadata = ParquetMetaDataReader::new()
-        .with_page_index_policy(PageIndexPolicy::Optional)
-        .load_and_finish(&mut reader, size)
-        .await
-        .map_err(SsTableError::Parquet)?;
-    validate_page_indexes(delete_path, &metadata)?;
+    let metadata = parquet_metadata_cached(fs, delete_path, metadata_cache, executor).await?;
     let options = ArrowReaderOptions::new().with_page_index(true);
-    let metadata = Arc::new(metadata);
     let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&metadata), options)
         .map_err(SsTableError::Parquet)?;
     let file_schema = arrow_metadata.schema();
