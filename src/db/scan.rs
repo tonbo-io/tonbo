@@ -18,6 +18,7 @@ use parquet::{
         ProjectionMask,
         arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
     },
+    errors::ParquetError,
     file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
 };
 use typed_arrow_dyn::DynRow;
@@ -42,8 +43,8 @@ use crate::{
     query::{
         Expr, ScalarValue,
         scan::{
-            DeleteSelection, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
-            projection_with_predicate,
+            DeleteSelection, RowSet, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
+            key_bounds_for_predicate, projection_with_predicate,
         },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
@@ -88,14 +89,47 @@ impl TxSnapshot {
         } else {
             projection_with_predicate(&db.schema, &db.schema, residual_predicate.as_ref())?
         };
-        let immutable_indexes = {
+        let read_ts = self.read_view().read_ts();
+        let key_schema = db.extractor().key_schema();
+        let key_bounds = key_bounds_for_predicate(predicate, &key_schema);
+        let (immutable_indexes, immutable_row_sets) = {
             let seal = db.seal_state_lock();
             let prune_input: Vec<&ImmutableSegment> =
                 seal.immutables.iter().map(|arc| arc.as_ref()).collect();
-            immutable::prune_segments(&prune_input)
+            let indexes = immutable::prune_segments(&prune_input, key_bounds.as_ref(), read_ts);
+            let row_sets = indexes
+                .iter()
+                .filter_map(|idx| seal.immutables.get(*idx))
+                .map(|segment| RowSet::all(segment.entry_count()))
+                .collect();
+            (indexes, row_sets)
         };
-        let read_ts = self.read_view().read_ts();
-        let key_schema = db.extractor().key_schema();
+        let mutable_row_set = {
+            let row_count = db.mem.row_count();
+            if row_count == 0 {
+                RowSet::all(0)
+            } else {
+                let (min_key, max_key) = db.mem.key_bounds();
+                let mut keep = true;
+                if let (Some(min_key), Some(max_key)) = (min_key.as_ref(), max_key.as_ref())
+                    && let Some(bounds) = key_bounds.as_ref()
+                    && !bounds.overlaps(min_key, max_key)
+                {
+                    keep = false;
+                }
+                if keep
+                    && let Some((min_commit_ts, _)) = db.mem.commit_ts_bounds()
+                    && min_commit_ts > read_ts
+                {
+                    keep = false;
+                }
+                if keep {
+                    RowSet::all(row_count)
+                } else {
+                    RowSet::none(row_count)
+                }
+            }
+        };
         let fs = Arc::clone(&db.fs);
         let executor: E = (**db.executor()).clone();
         let mut sst_selections = Vec::new();
@@ -108,6 +142,18 @@ impl TxSnapshot {
             .iter()
             .flatten()
         {
+            if let Some(bounds) = key_bounds.as_ref() {
+                if bounds.is_empty() {
+                    continue;
+                }
+                if let Some(stats) = entry.stats()
+                    && let (Some(min_key), Some(max_key)) =
+                        (stats.min_key.as_ref(), stats.max_key.as_ref())
+                    && !bounds.overlaps(min_key, max_key)
+                {
+                    continue;
+                }
+            }
             if let Some(min_commit_ts) = entry.stats().and_then(|stats| stats.min_commit_ts)
                 && min_commit_ts > read_ts
             {
@@ -142,6 +188,8 @@ impl TxSnapshot {
         Ok(ScanPlan {
             _predicate: predicate.clone(),
             immutable_indexes,
+            mutable_row_set,
+            immutable_row_sets,
             mutable_selection: ScanSelection::AllRows,
             immutable_selection: ScanSelection::AllRows,
             sst_selections,
@@ -197,7 +245,49 @@ where
     // Preserve PK-ascending scan order by keeping row groups in file order.
     row_groups.sort_unstable();
     row_groups.dedup();
-    let row_selection = prune_result.row_selection().cloned();
+    let file_total_rows = usize::try_from(metadata.file_metadata().num_rows()).map_err(|_| {
+        SsTableError::Parquet(ParquetError::General(
+            "parquet row count exceeds usize::MAX".to_string(),
+        ))
+    })?;
+    let selected_row_groups_rows = if row_groups.is_empty() {
+        0usize
+    } else {
+        row_groups
+            .iter()
+            .map(|idx| {
+                usize::try_from(metadata.row_group(*idx).num_rows()).map_err(|_| {
+                    SsTableError::Parquet(ParquetError::General(
+                        "parquet row group count exceeds usize::MAX".to_string(),
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>()
+    };
+    let row_set = match prune_result.row_selection().cloned() {
+        Some(selection) => {
+            let total_rows = if row_groups.is_empty() {
+                file_total_rows
+            } else {
+                selected_row_groups_rows
+            };
+            RowSet::from_row_selection(total_rows, selection).map_err(|err| {
+                SsTableError::RowSelection {
+                    reason: err.to_string(),
+                }
+            })?
+        }
+        None => {
+            let total_rows = if row_groups.is_empty() {
+                file_total_rows
+            } else {
+                selected_row_groups_rows
+            };
+            RowSet::all(total_rows)
+        }
+    };
     let total_row_groups = metadata.num_row_groups();
     let row_groups = if row_groups.len() == total_row_groups {
         None
@@ -236,7 +326,7 @@ where
 
     Ok(SstSelection {
         row_groups,
-        row_selection,
+        row_set,
         metadata,
         projection,
         projected_schema,
@@ -399,17 +489,19 @@ where
         }
         let scan_schema = Arc::clone(&plan.scan_schema);
         let key_schema = self.extractor().key_schema();
-        let mutable_scan = match &plan.mutable_selection {
-            ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
-                // TODO: apply key-range/memtable pruning once selection is wired.
-                OwnedMutableScan::from_guard(
-                    self.mem.read(),
-                    Some(Arc::clone(&scan_schema)),
-                    plan.read_ts,
-                )?
-            }
-        };
-        streams.push(ScanStream::from(mutable_scan));
+        if !plan.mutable_row_set.is_empty() {
+            let mutable_scan = match &plan.mutable_selection {
+                ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
+                    // TODO: apply key-range/memtable pruning once selection is wired.
+                    OwnedMutableScan::from_guard(
+                        self.mem.read(),
+                        Some(Arc::clone(&scan_schema)),
+                        plan.read_ts,
+                    )?
+                }
+            };
+            streams.push(ScanStream::from(mutable_scan));
+        }
 
         let immutables: Vec<Arc<ImmutableSegment>> = {
             let seal = self.seal_state_lock();
@@ -463,7 +555,7 @@ where
             let options = ParquetStreamOptions {
                 projection: Some(selection.projection.clone()),
                 row_groups: selection.row_groups.clone(),
-                row_selection: selection.row_selection.clone(),
+                row_selection: selection.row_set.to_row_selection(),
                 row_filter_predicate: Some(&plan._predicate),
             };
             let data_stream = open_parquet_stream_with_metadata(

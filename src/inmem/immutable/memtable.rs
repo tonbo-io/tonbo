@@ -128,6 +128,10 @@ impl ImmutableMemTable {
         ImmutableRowIter::new(self)
     }
 
+    pub(crate) fn entry_count(&self) -> usize {
+        self.index.len()
+    }
+
     pub(crate) fn min_key(&self) -> Option<KeyOwned> {
         self.index.keys().next().map(|view| view.key().to_owned())
     }
@@ -141,6 +145,22 @@ impl ImmutableMemTable {
 
     pub(crate) fn mvcc_columns(&self) -> &MvccColumns {
         &self.mvcc
+    }
+
+    pub(crate) fn commit_ts_bounds(&self) -> Option<(Timestamp, Timestamp)> {
+        let mut iter = self.mvcc.commit_ts.iter();
+        let first = iter.next()?;
+        let mut min_ts = *first;
+        let mut max_ts = *first;
+        for ts in iter {
+            if *ts < min_ts {
+                min_ts = *ts;
+            }
+            if *ts > max_ts {
+                max_ts = *ts;
+            }
+        }
+        Some((min_ts, max_ts))
     }
 
     fn mvcc_row(&self, row: u32) -> (Timestamp, bool) {

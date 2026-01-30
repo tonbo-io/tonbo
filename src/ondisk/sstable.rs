@@ -364,6 +364,12 @@ pub enum SsTableError {
         /// Details about why the row filter predicate was rejected.
         reason: String,
     },
+    /// Row selection length mismatch.
+    #[error("row selection length mismatch: {reason}")]
+    RowSelection {
+        /// Details about why the row selection was invalid.
+        reason: String,
+    },
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),

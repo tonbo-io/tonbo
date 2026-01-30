@@ -29,7 +29,7 @@ use typed_arrow_dyn::{DynCell, DynRow};
 use crate::{
     db::{DB, DbInner, Expr, ScalarValue},
     extractor,
-    inmem::policy::BatchesThreshold,
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
     manifest::{SstEntry, VersionEdit},
     mode::DynModeConfig,
     mvcc::{MVCC_COMMIT_COL, Timestamp},
@@ -47,9 +47,8 @@ async fn plan_scan_filters_immutable_segments() {
         .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
-    // Pruning is currently disabled; expect to scan all immutables and retain the predicate
-    // for residual evaluation.
-    assert_eq!(plan.immutable_indexes, vec![0, 1]);
+    // Expect key-bound pruning to skip the non-overlapping immutable.
+    assert_eq!(plan.immutable_indexes, vec![0]);
     assert!(plan.residual_predicate.is_some());
 }
 
@@ -78,8 +77,8 @@ async fn plan_scan_marks_empty_range() {
         .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
-    // Pruning is currently disabled; even contradictory predicates scan all immutables.
-    assert_eq!(plan.immutable_indexes, vec![0]);
+    // Contradictory predicates yield empty key bounds; skip all immutables.
+    assert!(plan.immutable_indexes.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -259,7 +258,7 @@ async fn plan_scan_prunes_sst_row_groups_and_pages() {
         panic!("expected sst selection");
     };
     assert_eq!(selection.row_groups.as_ref(), Some(&vec![1]));
-    let row_selection = selection.row_selection.as_ref().expect("row selection");
+    let row_selection = selection.row_set.to_row_selection().expect("row selection");
     let has_skip = row_selection.iter().any(|sel| sel.skip);
     let has_select = row_selection.iter().any(|sel| !sel.skip);
     assert!(has_skip && has_select, "expected page-level pruning");
@@ -362,8 +361,126 @@ async fn plan_scan_prunes_sst_commit_ts_at_plan_time() {
     let ScanSelection::Sst(selection) = selection else {
         panic!("expected sst selection");
     };
-    let row_selection = selection.row_selection.as_ref().expect("row selection");
+    let row_selection = selection.row_set.to_row_selection().expect("row selection");
     assert_eq!(row_selection.row_count(), 50);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_prunes_mutable_by_key_bounds() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema_and_policy(schema.clone(), Arc::new(NeverSeal))
+        .await
+        .into_inner();
+
+    let rows = vec![DynRow(vec![
+        Some(DynCell::Str("k1".into())),
+        Some(DynCell::I32(1)),
+    ])];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let predicate = Expr::eq("id", ScalarValue::from("z1"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert!(plan.mutable_row_set.is_empty(), "expected mutable prune");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_prunes_mutable_commit_ts() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema_and_policy(schema.clone(), Arc::new(NeverSeal))
+        .await
+        .into_inner();
+
+    db.next_commit_ts(); // advance clock so first ingest is > read_ts
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+
+    let rows = vec![DynRow(vec![
+        Some(DynCell::Str("k1".into())),
+        Some(DynCell::I32(1)),
+    ])];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let plan = snapshot
+        .plan_scan(&db, &Expr::True, None, None)
+        .await
+        .expect("plan");
+    assert!(plan.mutable_row_set.is_empty(), "expected commit_ts prune");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_prunes_immutable_commit_ts() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+    db.next_commit_ts(); // advance clock so first ingest is > read_ts
+
+    let rows = vec![DynRow(vec![
+        Some(DynCell::Str("k1".into())),
+        Some(DynCell::I32(1)),
+    ])];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let snapshot = db.snapshot_at(Timestamp::new(0)).await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &Expr::True, None, None)
+        .await
+        .expect("plan");
+    assert!(
+        plan.immutable_indexes.is_empty(),
+        "expected immutable commit_ts prune"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_skips_sst_by_key_bounds_before_metadata() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let stats = SsTableStats {
+        min_key: Some(crate::key::KeyOwned::from("a")),
+        max_key: Some(crate::key::KeyOwned::from("b")),
+        ..Default::default()
+    };
+    let data_path = Path::from("scan-pre-prune/000.parquet");
+    let sst_entry = SstEntry::new(SsTableId::new(12), Some(stats), None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let predicate = Expr::eq("id", ScalarValue::from("z9"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert!(
+        plan.sst_selections.is_empty(),
+        "expected pre-metadata key bound pruning"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -630,6 +747,18 @@ async fn db_with_schema(schema: Arc<Schema>) -> DbInner<InMemoryFs, NoopExecutor
         .await
         .expect("db")
         .into_inner()
+}
+
+async fn db_with_schema_and_policy(
+    schema: Arc<Schema>,
+    policy: Arc<dyn SealPolicy + Send + Sync>,
+) -> DB<InMemoryFs, NoopExecutor> {
+    let extractor = extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+    let executor = Arc::new(NoopExecutor);
+    let config = DynModeConfig::new(schema, extractor).expect("config");
+    DB::new_with_policy(config, Arc::clone(&executor), policy)
+        .await
+        .expect("db")
 }
 
 fn rows_with_commit_ts(start: i32, count: usize, commit_ts: u64) -> RecordBatch {
