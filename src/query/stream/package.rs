@@ -17,7 +17,7 @@ use pin_project_lite::pin_project;
 use thiserror::Error;
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
-use crate::query::stream::{StreamError, merge::MergeStream};
+use crate::query::stream::{StreamEntry, StreamError, merge::MergeStream};
 
 pin_project! {
     /// Stream adapter that batches merged rows into `RecordBatch` chunks.
@@ -30,8 +30,9 @@ pin_project! {
         #[pin]
         inner: MergeStream<'t, E>,
         builder: DynRecordBatchBuilder,
+        pushdown_predicate: Option<Expr>,
         residual_predicate: Option<Expr>,
-        residual: Option<ResidualEvaluator>,
+        evaluator: Option<ResidualEvaluator>,
         scan_schema: SchemaRef,
         scan_dyn_schema: DynSchema,
         projection: Option<DynProjection>,
@@ -52,6 +53,7 @@ where
         merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
+        pushdown_predicate: Option<Expr>,
         residual_predicate: Option<Expr>,
     ) -> Result<Self, StreamError> {
         Self::with_limit(
@@ -59,6 +61,7 @@ where
             merge,
             scan_schema,
             result_schema,
+            pushdown_predicate,
             residual_predicate,
             None,
         )
@@ -70,13 +73,16 @@ where
         merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
+        pushdown_predicate: Option<Expr>,
         residual_predicate: Option<Expr>,
         limit: Option<usize>,
     ) -> Result<Self, StreamError> {
         assert!(batch_size > 0, "batch size must be greater than zero");
-        let residual = residual_predicate
-            .as_ref()
-            .map(|_| ResidualEvaluator::new(&scan_schema));
+        let evaluator = if pushdown_predicate.is_some() || residual_predicate.is_some() {
+            Some(ResidualEvaluator::new(&scan_schema))
+        } else {
+            None
+        };
         let projection = if scan_schema.as_ref() == result_schema.as_ref() {
             None
         } else {
@@ -90,8 +96,9 @@ where
             batch_size,
             inner: merge,
             builder: DynRecordBatchBuilder::new(result_schema, batch_size),
+            pushdown_predicate,
             residual_predicate,
-            residual,
+            evaluator,
             scan_schema: Arc::clone(&scan_schema),
             scan_dyn_schema: DynSchema::from_ref(scan_schema),
             projection,
@@ -129,9 +136,22 @@ where
         while *this.row_count < effective_batch_size {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(entry))) => {
+                    let is_sstable = matches!(&entry, StreamEntry::Sstable(_));
                     if let Some(row) = entry.into_row() {
+                        if !is_sstable
+                            && let (Some(predicate), Some(evaluator)) =
+                                (this.pushdown_predicate.as_ref(), this.evaluator.as_ref())
+                        {
+                            match evaluator.matches_owned(predicate, &row) {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                Err(err) => {
+                                    return Poll::Ready(Some(Err(err.into())));
+                                }
+                            }
+                        }
                         if let (Some(predicate), Some(evaluator)) =
-                            (this.residual_predicate.as_ref(), this.residual.as_ref())
+                            (this.residual_predicate.as_ref(), this.evaluator.as_ref())
                         {
                             match evaluator.matches_owned(predicate, &row) {
                                 Ok(true) => {}
@@ -741,8 +761,15 @@ mod tests {
         .expect("merge stream");
 
         let mut stream = Box::pin(
-            PackageStream::new(2, merge, Arc::clone(&schema), Arc::clone(&schema), None)
-                .expect("package stream"),
+            PackageStream::new(
+                2,
+                merge,
+                Arc::clone(&schema),
+                Arc::clone(&schema),
+                None,
+                None,
+            )
+            .expect("package stream"),
         );
         let batches = block_on(async {
             let mut out = Vec::new();
@@ -814,6 +841,7 @@ mod tests {
                 merge,
                 Arc::clone(&schema),
                 Arc::clone(&schema),
+                None,
                 Some(predicate),
             )
             .expect("package stream"),
@@ -875,6 +903,7 @@ mod tests {
                 merge,
                 Arc::clone(&schema),
                 Arc::clone(&schema),
+                None,
                 Some(predicate),
             )
             .expect("package stream"),

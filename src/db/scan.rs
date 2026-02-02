@@ -37,7 +37,7 @@ use crate::{
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{
             ParquetStreamOptions, SsTableError, open_parquet_stream_with_metadata,
-            validate_page_indexes,
+            split_predicate_for_row_filter, validate_page_indexes,
         },
     },
     query::{
@@ -79,16 +79,14 @@ impl TxSnapshot {
             });
         }
         let projected_schema = projected_schema.cloned();
-        let residual_predicate = if matches!(predicate, Expr::True) {
-            None
-        } else {
-            Some(predicate.clone())
-        };
         let scan_schema = if let Some(projection) = projected_schema.as_ref() {
-            projection_with_predicate(&db.schema, projection, residual_predicate.as_ref())?
+            projection_with_predicate(&db.schema, projection, Some(predicate))?
         } else {
-            projection_with_predicate(&db.schema, &db.schema, residual_predicate.as_ref())?
+            projection_with_predicate(&db.schema, &db.schema, Some(predicate))?
         };
+        let split = split_predicate_for_row_filter(predicate, &scan_schema);
+        let pushdown_predicate = split.pushdown;
+        let residual_predicate = split.residual;
         let read_ts = self.read_view().read_ts();
         let key_schema = db.extractor().key_schema();
         let key_bounds = key_bounds_for_predicate(predicate, &key_schema);
@@ -186,7 +184,7 @@ impl TxSnapshot {
             });
         }
         Ok(ScanPlan {
-            _predicate: predicate.clone(),
+            pushdown_predicate,
             immutable_indexes,
             mutable_row_set,
             immutable_row_sets,
@@ -438,26 +436,17 @@ where
                 >);
         }
 
+        let has_non_sst = !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
         let ScanPlan {
+            pushdown_predicate,
             residual_predicate,
             limit,
             ..
         } = plan;
-        // Limit placement depends on whether we have a residual predicate:
-        // - Without residual: apply limit in MergeStream for early termination, since all rows
-        //   passing the merge are final results.
-        // - With residual: defer limit to PackageStream, because MergeStream rows still need
-        //   filtering and we can't know how many will pass until evaluation.
-        let limit_for_merge = if residual_predicate.is_none() {
-            limit
-        } else {
-            None
-        };
-        let limit_for_package = if residual_predicate.is_some() {
-            limit
-        } else {
-            None
-        };
+        let needs_post_filter =
+            residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+        let limit_for_merge = if needs_post_filter { None } else { limit };
+        let limit_for_package = if needs_post_filter { limit } else { None };
         let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;
@@ -466,6 +455,7 @@ where
             merge,
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
+            pushdown_predicate,
             residual_predicate,
             limit_for_package,
         )
@@ -556,7 +546,7 @@ where
                 projection: Some(selection.projection.clone()),
                 row_groups: selection.row_groups.clone(),
                 row_selection: selection.row_set.to_row_selection(),
-                row_filter_predicate: Some(&plan._predicate),
+                row_filter_predicate: plan.pushdown_predicate.as_ref(),
             };
             let data_stream = open_parquet_stream_with_metadata(
                 Arc::clone(&self.fs),
@@ -946,6 +936,7 @@ where
         .clone()
         .unwrap_or_else(|| Arc::clone(&db.schema));
     let scan_schema = Arc::clone(&plan.scan_schema);
+    let has_txn_scan = txn_scan.is_some();
     let streams = db.build_scan_streams(&plan, txn_scan).await?;
 
     if streams.is_empty() {
@@ -956,22 +947,19 @@ where
             >);
     }
 
+    let has_non_sst =
+        has_txn_scan || !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
     let ScanPlan {
+        pushdown_predicate,
         residual_predicate,
         limit,
         ..
     } = plan;
-    let limit_for_merge = if residual_predicate.is_none() {
-        limit
-    } else {
-        None
-    };
-    let limit_for_package = if residual_predicate.is_some() {
-        limit
-    } else {
-        None
-    };
-    // Only apply limit early when there is no residual predicate to evaluate.
+    let needs_post_filter =
+        residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+    let limit_for_merge = if needs_post_filter { None } else { limit };
+    let limit_for_package = if needs_post_filter { limit } else { None };
+    // Only apply limit early when no post-merge filtering is required.
     let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
         .await
         .map_err(crate::db::DBError::from)?;
@@ -980,6 +968,7 @@ where
         merge,
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
+        pushdown_predicate,
         residual_predicate,
         limit_for_package,
     )

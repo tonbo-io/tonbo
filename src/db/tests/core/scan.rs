@@ -49,7 +49,8 @@ async fn plan_scan_filters_immutable_segments() {
         .expect("plan");
     // Expect key-bound pruning to skip the non-overlapping immutable.
     assert_eq!(plan.immutable_indexes, vec![0]);
-    assert!(plan.residual_predicate.is_some());
+    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.residual_predicate.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -63,6 +64,7 @@ async fn plan_scan_preserves_residual_predicate() {
         .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
+    assert!(plan.pushdown_predicate.is_some());
     assert!(plan.residual_predicate.is_some());
 }
 
@@ -102,7 +104,7 @@ async fn plan_scan_includes_predicate_columns_and_filters_before_projection() {
     let batch = build_batch(schema.clone(), rows).expect("batch");
     db.ingest(batch).await.expect("ingest");
 
-    let predicate = Expr::gt("v", ScalarValue::from(0i32));
+    let predicate = Expr::gt("v", ScalarValue::from(0i64));
     let projection = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
@@ -268,6 +270,60 @@ async fn plan_scan_prunes_sst_row_groups_and_pages() {
     let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
     let ids = collect_ids(&batches);
     assert_eq!(ids.len(), 40);
+    assert!(ids.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_pruning_preserves_pk_order_across_row_groups() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-prune-order");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    write_parquet_data(
+        Arc::clone(&db.fs),
+        data_path.clone(),
+        rows_with_commit_ts(0, 120, Timestamp::MIN.get()),
+        40,
+        10,
+    )
+    .await;
+    let sst_entry = SstEntry::new(SsTableId::new(6), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let predicate = Expr::and(vec![
+        Expr::gt_eq("v", ScalarValue::from(20i32)),
+        Expr::lt_eq("v", ScalarValue::from(75i32)),
+    ]);
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    let selection = plan.sst_selections[0].selection.clone();
+    let ScanSelection::Sst(selection) = selection else {
+        panic!("expected sst selection");
+    };
+    assert_eq!(selection.row_groups.as_ref(), Some(&vec![0, 1]));
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert_eq!(ids.first().map(String::as_str), Some("k000020"));
+    assert_eq!(ids.last().map(String::as_str), Some("k000075"));
     assert!(ids.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
@@ -508,6 +564,79 @@ async fn scan_limit_waits_for_residual_predicate() {
     let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
     let ids = collect_ids(&batches);
     assert_eq!(ids, vec!["c".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_limit_waits_for_pushdown_on_non_sst() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+    let rows = vec![
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(-1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(-2))]),
+        DynRow(vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(7))]),
+    ];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let predicate = Expr::gt("v", ScalarValue::from(0i32));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, Some(1))
+        .await
+        .expect("plan");
+    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.residual_predicate.is_none());
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert_eq!(ids, vec!["c".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_residual_predicate_filters_after_pushdown() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let rows = vec![
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(7))]),
+    ];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let sst_cfg = Arc::new(SsTableConfig::new(
+        schema.clone(),
+        Arc::clone(&db.fs),
+        Path::from("scan-residual-after-pushdown"),
+    ));
+    let descriptor = SsTableDescriptor::new(SsTableId::new(12), 0);
+    db.flush_immutables_with_descriptor(sst_cfg, descriptor)
+        .await
+        .expect("flush");
+
+    let predicate = Expr::and(vec![
+        Expr::gt_eq("v", ScalarValue::from(0i32)),
+        Expr::gt("v", ScalarValue::Float64(Some(5.5))),
+    ]);
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.residual_predicate.is_some());
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert_eq!(ids, vec!["b".to_string()]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

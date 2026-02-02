@@ -427,7 +427,8 @@ impl<'a> Iterator for RowSetIter<'a> {
 }
 
 /// Internal representation of a scan plan. Things included in the plan:
-/// * predicate: the caller-supplied predicate used for pruning and residual evaluation
+/// * pushdown_predicate: predicate portion safe for Parquet row filtering
+/// * residual_predicate: predicate portion to evaluate after merge/materialization
 /// * range_set: cached primary-key ranges derived from the predicate for pruning
 /// * immutable_memtable_idxes: which immutable memtables need to be scanned in execution phase
 /// * selections: per-source row selections (memtables default to all rows in this phase)
@@ -436,7 +437,7 @@ impl<'a> Iterator for RowSetIter<'a> {
 /// * limit: the raw limit
 /// * read_ts: snapshot/read timestamp
 pub(crate) struct ScanPlan {
-    pub(crate) _predicate: Expr,
+    pub(crate) pushdown_predicate: Option<Expr>,
     pub(crate) immutable_indexes: Vec<usize>,
     pub(crate) mutable_row_set: RowSet,
     pub(crate) immutable_row_sets: Vec<RowSet>,
