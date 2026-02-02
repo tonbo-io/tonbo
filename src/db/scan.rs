@@ -86,7 +86,7 @@ impl TxSnapshot {
         };
         let split = split_predicate_for_row_filter(predicate, &scan_schema);
         let pushdown_predicate = split.pushdown;
-        let residual_predicate = split.residual;
+        let mut residual_predicate = split.residual;
         let read_ts = self.read_view().read_ts();
         let key_schema = db.extractor().key_schema();
         let key_bounds = key_bounds_for_predicate(predicate, &key_schema);
@@ -131,6 +131,7 @@ impl TxSnapshot {
         let fs = Arc::clone(&db.fs);
         let executor: E = (**db.executor()).clone();
         let mut sst_selections = Vec::new();
+        let mut sst_requires_full_residual = false;
         for entry in self
             .table_snapshot()
             .latest_version
@@ -157,7 +158,7 @@ impl TxSnapshot {
             {
                 continue;
             }
-            let selection = prune_sst_selection(
+            let (selection, requires_residual) = prune_sst_selection(
                 Arc::clone(&fs),
                 entry.data_path(),
                 predicate,
@@ -167,6 +168,9 @@ impl TxSnapshot {
                 executor.clone(),
             )
             .await?;
+            if requires_residual {
+                sst_requires_full_residual = true;
+            }
             let mut selection = selection;
             if let Some(delete_path) = entry.delete_path() {
                 let delete_selection = plan_delete_sidecar_selection(
@@ -182,6 +186,11 @@ impl TxSnapshot {
                 entry: entry.clone(),
                 selection: ScanSelection::Sst(selection),
             });
+        }
+        if sst_requires_full_residual && !matches!(predicate, Expr::True) {
+            // Keep the full predicate for post-merge filtering when any SST
+            // schema cannot accept the pushdown portion.
+            residual_predicate = Some(predicate.clone());
         }
         Ok(ScanPlan {
             pushdown_predicate,
@@ -209,7 +218,7 @@ async fn prune_sst_selection<E>(
     scan_schema: &SchemaRef,
     key_schema: &SchemaRef,
     executor: E,
-) -> Result<SstSelection, SsTableError>
+) -> Result<(SstSelection, bool), SsTableError>
 where
     E: Executor + Clone + 'static,
 {
@@ -229,6 +238,9 @@ where
     let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&metadata), options)
         .map_err(SsTableError::Parquet)?;
     let schema = arrow_metadata.schema();
+    let requires_residual = split_predicate_for_row_filter(predicate, schema)
+        .residual
+        .is_some();
     let commit_predicate = Expr::lt_eq(MVCC_COMMIT_COL, ScalarValue::UInt64(Some(read_ts.get())));
     let prune_predicate = if matches!(predicate, Expr::True) {
         commit_predicate
@@ -322,14 +334,17 @@ where
     let projected_schema = Arc::new(Schema::new(projected_fields));
     let projection = ProjectionMask::roots(arrow_metadata.parquet_schema(), root_indices);
 
-    Ok(SstSelection {
-        row_groups,
-        row_set,
-        metadata,
-        projection,
-        projected_schema,
-        delete_selection: None,
-    })
+    Ok((
+        SstSelection {
+            row_groups,
+            row_set,
+            metadata,
+            projection,
+            projected_schema,
+            delete_selection: None,
+        },
+        requires_residual,
+    ))
 }
 
 fn schema_projection_indices(
