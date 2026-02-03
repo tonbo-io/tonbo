@@ -46,6 +46,7 @@ where
             self.wal_handle().cloned(),
             Arc::clone(&self.executor),
             self.cas_backoff.clone(),
+            self.compaction_metrics.clone(),
         )
     }
 

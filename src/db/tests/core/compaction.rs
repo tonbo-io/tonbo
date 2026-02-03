@@ -10,7 +10,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::RecordBatch;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fusio::{
     DynFs,
     disk::LocalFs,
@@ -19,7 +20,7 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::Path,
 };
-use futures::future::AbortHandle;
+use futures::{StreamExt, future::AbortHandle};
 use tokio::{sync::Mutex, time::sleep};
 use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -31,6 +32,7 @@ use crate::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome,
             LocalCompactionExecutor,
         },
+        metrics::{CompactionMetrics, CompactionQueueDropContext, CompactionQueueDropReason},
         orchestrator,
         planner::{
             CompactionInput, CompactionPlanner, CompactionSnapshot, CompactionTask,
@@ -41,12 +43,20 @@ use crate::{
         BackpressureDecision, CasBackoffConfig, CascadeConfig, DB, DbInner, L0BackpressureConfig,
         L0Stats,
     },
+    extractor::projection_for_columns,
     id::FileIdGenerator,
-    inmem::policy::BatchesThreshold,
+    inmem::{
+        immutable::memtable::{
+            DeleteSidecar, ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar,
+        },
+        policy::BatchesThreshold,
+    },
+    key::KeyTsViewRaw,
     manifest::{
         ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, VersionState, WalSegmentRef,
     },
-    ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId},
+    mvcc::Timestamp,
+    ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId, SsTableReader},
     schema::SchemaBuilder,
     test::build_batch,
 };
@@ -211,6 +221,8 @@ async fn l0_backpressure_applies_slowdown_delay() -> Result<(), Box<dyn std::err
         DB::new(mode_cfg, Arc::new(executor.clone()))
             .await?
             .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
 
     db.l0_backpressure = Some(
         L0BackpressureConfig::new(1, 3)
@@ -240,6 +252,8 @@ async fn l0_backpressure_applies_slowdown_delay() -> Result<(), Box<dyn std::err
 
     let sleeps = executor.sleep_calls();
     assert_eq!(sleeps, vec![Duration::from_millis(7)]);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.backpressure_slowdown, 1);
     Ok(())
 }
 
@@ -255,6 +269,8 @@ async fn l0_backpressure_stall_rechecks_until_reduced() -> Result<(), Box<dyn st
         DB::new(mode_cfg, Arc::new(executor.clone()))
             .await?
             .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
 
     db.l0_backpressure = Some(
         L0BackpressureConfig::new(1, 2)
@@ -321,6 +337,9 @@ async fn l0_backpressure_stall_rechecks_until_reduced() -> Result<(), Box<dyn st
         sleeps,
         vec![Duration::from_millis(9), Duration::from_millis(3)]
     );
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.backpressure_stall, 1);
+    assert_eq!(snapshot.backpressure_slowdown, 1);
     Ok(())
 }
 
@@ -584,6 +603,31 @@ impl CompactionPlanner for StaticPlanner {
 }
 
 #[derive(Clone)]
+struct OneShotPlanner {
+    task: CompactionTask,
+    planned: Arc<AtomicUsize>,
+}
+
+impl OneShotPlanner {
+    fn new(task: CompactionTask) -> Self {
+        Self {
+            task,
+            planned: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl CompactionPlanner for OneShotPlanner {
+    fn plan(&self, _snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+        if self.planned.fetch_add(1, Ordering::SeqCst) == 0 {
+            Some(self.task.clone())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
 struct StaticExecutor {
     outputs: Vec<SsTableDescriptor>,
     wal_segments: Vec<WalSegmentRef>,
@@ -609,6 +653,56 @@ impl CompactionExecutor for StaticExecutor {
             outcome.outputs = outputs;
             Ok(outcome)
         })
+    }
+
+    fn cleanup_outputs<'a>(
+        &'a self,
+        _outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Clone)]
+struct NoStatsExecutor {
+    output: SsTableDescriptor,
+}
+
+impl CompactionExecutor for NoStatsExecutor {
+    fn execute(
+        &self,
+        job: CompactionJob,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+    {
+        let output = self.output.clone();
+        Box::pin(async move {
+            CompactionOutcome::from_outputs(
+                vec![output],
+                job.inputs.clone(),
+                job.task.target_level as u32,
+                None,
+            )
+        })
+    }
+
+    fn cleanup_outputs<'a>(
+        &'a self,
+        _outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Clone)]
+struct FailingExecutor;
+
+impl CompactionExecutor for FailingExecutor {
+    fn execute(
+        &self,
+        _job: CompactionJob,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+    {
+        Box::pin(async { Err(CompactionError::NoInputs) })
     }
 
     fn cleanup_outputs<'a>(
@@ -686,7 +780,7 @@ async fn compaction_updates_manifest_wal_and_records_gc_plan()
         ],
         key_range: None,
     };
-    let planner = StaticPlanner { task };
+    let planner = OneShotPlanner::new(task);
 
     let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
         .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
@@ -790,7 +884,7 @@ async fn compaction_preserves_manifest_wal_when_metadata_missing()
         }],
         key_range: None,
     };
-    let planner = StaticPlanner { task };
+    let planner = OneShotPlanner::new(task);
 
     let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
         .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
@@ -954,7 +1048,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
         ],
         key_range: None,
     };
-    let planner = StaticPlanner { task };
+    let planner = OneShotPlanner::new(task);
     let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100)
         .with_max_output_bytes(8 * 1024 * 1024);
 
@@ -1021,6 +1115,162 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
         plan.obsolete_ssts.len() >= 1,
         "gc plan should record obsolete ssts"
     );
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_merges_overlap_heavy_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("compaction-overlap-heavy");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor =
+        crate::extractor::projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_root = temp_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&schema), fs, sst_root).with_key_extractor(extractor.into()),
+    );
+
+    let seg_a = segment_with_commits(Arc::clone(&schema), vec![("k".to_string(), 1, 10, false)]);
+    let seg_b = segment_with_commits(Arc::clone(&schema), vec![("k".to_string(), 2, 20, false)]);
+    let seg_c = segment_with_commits(
+        Arc::clone(&schema),
+        vec![
+            ("k".to_string(), 0, 30, true),
+            ("z".to_string(), 9, 25, false),
+        ],
+    );
+
+    let mut builder_a = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(1), 0),
+    );
+    builder_a.add_immutable(&seg_a)?;
+    let sst_a = builder_a.finish(NoopExecutor).await?;
+
+    let mut builder_b = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(2), 0),
+    );
+    builder_b.add_immutable(&seg_b)?;
+    let sst_b = builder_b.finish(NoopExecutor).await?;
+
+    let mut builder_c = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(3), 0),
+    );
+    builder_c.add_immutable(&seg_c)?;
+    let sst_c = builder_c.finish(NoopExecutor).await?;
+
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
+    for sst in [&sst_a, &sst_b, &sst_c] {
+        let desc = sst.descriptor();
+        let entry = SstEntry::new(
+            desc.id().clone(),
+            desc.stats().cloned(),
+            desc.wal_ids().map(|ids| ids.to_vec()),
+            desc.data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
+            desc.delete_path().cloned(),
+        );
+        db.inner()
+            .manifest
+            .apply_version_edits(
+                db.inner().manifest_table,
+                &[VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry],
+                }],
+            )
+            .await?;
+    }
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(3),
+            },
+        ],
+        key_range: None,
+    };
+    let planner = OneShotPlanner::new(task);
+    let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100);
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+
+    let mut data_keys = Vec::new();
+    let mut data_vals = Vec::new();
+    let mut delete_keys = Vec::new();
+    for desc in &outcome.outputs {
+        let reader = SsTableReader::open(Arc::clone(&sst_cfg), desc.clone()).await?;
+        let mut stream = reader
+            .into_stream(Timestamp::MAX, None, NoopExecutor)
+            .await?;
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            if batch.data.num_rows() > 0 {
+                let ids = batch
+                    .data
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .expect("string ids");
+                let vals = batch
+                    .data
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int32Array>()
+                    .expect("int vals");
+                for i in 0..batch.data.num_rows() {
+                    data_keys.push(ids.value(i).to_string());
+                    data_vals.push(vals.value(i));
+                }
+            }
+            if let Some(delete) = batch.delete.as_ref() {
+                if delete.num_rows() > 0 {
+                    let ids = delete
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<arrow_array::StringArray>()
+                        .expect("string delete ids");
+                    for i in 0..delete.num_rows() {
+                        delete_keys.push(ids.value(i).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(data_keys, vec!["z"]);
+    assert_eq!(data_vals, vec![9]);
+    assert!(delete_keys.contains(&"k".to_string()));
 
     fs::remove_dir_all(&temp_root)?;
     Ok(())
@@ -1133,6 +1383,226 @@ async fn compaction_self_kick_advances_without_periodic_tick()
     );
 
     fs::remove_dir_all(&db_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_splits_outputs_by_row_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("compaction-split-cap");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor =
+        crate::extractor::projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_root = temp_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&schema), fs, sst_root).with_key_extractor(extractor.into()),
+    );
+
+    let batch_a = build_batch(
+        Arc::clone(&schema),
+        vec![
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+        ],
+    )?;
+    let imm_a = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_a, "id")?;
+    let mut builder_a = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(1), 0),
+    );
+    builder_a.add_immutable(&imm_a)?;
+    let sst_a = builder_a.finish(NoopExecutor).await?;
+
+    let batch_b = build_batch(
+        Arc::clone(&schema),
+        vec![DynRow(vec![
+            Some(DynCell::Str("c".into())),
+            Some(DynCell::I32(3)),
+        ])],
+    )?;
+    let imm_b = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_b, "id")?;
+    let mut builder_b = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(2), 0),
+    );
+    builder_b.add_immutable(&imm_b)?;
+    let sst_b = builder_b.finish(NoopExecutor).await?;
+
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
+    for sst in [&sst_a, &sst_b] {
+        let desc = sst.descriptor();
+        let entry = SstEntry::new(
+            desc.id().clone(),
+            desc.stats().cloned(),
+            desc.wal_ids().map(|ids| ids.to_vec()),
+            desc.data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
+            desc.delete_path().cloned(),
+        );
+        db.inner()
+            .manifest
+            .apply_version_edits(
+                db.inner().manifest_table,
+                &[VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry],
+                }],
+            )
+            .await?;
+    }
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            },
+        ],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+    let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100).with_max_output_rows(1);
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+    assert!(
+        outcome.outputs.len() > 1,
+        "expected output splitting with row cap"
+    );
+    for output in &outcome.outputs {
+        let stats = output.stats().expect("output stats");
+        assert!(stats.rows <= 1);
+    }
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_splits_outputs_by_byte_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("compaction-split-bytes");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor =
+        crate::extractor::projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_root = temp_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&schema), fs, sst_root).with_key_extractor(extractor.into()),
+    );
+
+    let batch_a = build_batch(
+        Arc::clone(&schema),
+        vec![
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+        ],
+    )?;
+    let imm_a = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_a, "id")?;
+    let mut builder_a = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(1), 0),
+    );
+    builder_a.add_immutable(&imm_a)?;
+    let sst_a = builder_a.finish(NoopExecutor).await?;
+
+    let batch_b = build_batch(
+        Arc::clone(&schema),
+        vec![DynRow(vec![
+            Some(DynCell::Str("c".into())),
+            Some(DynCell::I32(3)),
+        ])],
+    )?;
+    let imm_b = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_b, "id")?;
+    let mut builder_b = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(2), 0),
+    );
+    builder_b.add_immutable(&imm_b)?;
+    let sst_b = builder_b.finish(NoopExecutor).await?;
+
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
+    for sst in [&sst_a, &sst_b] {
+        let desc = sst.descriptor();
+        let entry = SstEntry::new(
+            desc.id().clone(),
+            desc.stats().cloned(),
+            desc.wal_ids().map(|ids| ids.to_vec()),
+            desc.data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
+            desc.delete_path().cloned(),
+        );
+        db.inner()
+            .manifest
+            .apply_version_edits(
+                db.inner().manifest_table,
+                &[VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry],
+                }],
+            )
+            .await?;
+    }
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            },
+        ],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+    let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100).with_max_output_bytes(1);
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+    assert!(
+        outcome.outputs.len() > 1,
+        "expected output splitting with byte cap"
+    );
+
+    fs::remove_dir_all(&temp_root)?;
     Ok(())
 }
 
@@ -1289,10 +1759,12 @@ async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::err
     let schema = Arc::clone(&mode_cfg.schema);
     let executor = Arc::new(TokioExecutor::default());
     let policy = Arc::new(BatchesThreshold { batches: 1 });
-    let db: DbInner<InMemoryFs, TokioExecutor> =
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
         DB::new_with_policy(mode_cfg, Arc::clone(&executor), policy)
             .await?
             .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
 
     let sst_root = temp_root.join("sst");
     fs::create_dir_all(&sst_root)?;
@@ -1375,6 +1847,11 @@ async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::err
         }
     }
 
+    let snapshot = metrics.snapshot();
+    assert!(snapshot.cas_retries >= 1);
+    assert_eq!(snapshot.cas_aborts, 1);
+    assert_eq!(snapshot.job_failures, 1);
+
     fs::remove_dir_all(&temp_root)?;
     Ok(())
 }
@@ -1437,6 +1914,126 @@ async fn compaction_cas_backoff_sleeps_on_conflict() -> Result<(), Box<dyn std::
 
     let sleeps = executor.sleep_calls();
     assert_eq!(sleeps, vec![Duration::from_millis(5)]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_executor_failure_records_metrics() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![CompactionInput {
+            level: 0,
+            sst_id: SsTableId::new(1),
+        }],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+    let err = db
+        .run_compaction_task(&planner, &FailingExecutor)
+        .await
+        .expect_err("expected compaction failure");
+    assert!(matches!(err, CompactionError::NoInputs));
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.job_count, 0);
+    assert_eq!(snapshot.job_failures, 1);
+    assert_eq!(snapshot.cas_aborts, 0);
+    assert!(snapshot.last_job.is_some());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_metrics_ignore_missing_stats() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![CompactionInput {
+            level: 0,
+            sst_id: SsTableId::new(1),
+        }],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+    let output_desc = SsTableDescriptor::new(SsTableId::new(99), 1)
+        .with_storage_paths(Path::from("L1/099.parquet"), None);
+    let executor = NoStatsExecutor {
+        output: output_desc,
+    };
+
+    let outcome = db
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+    assert_eq!(outcome.add_ssts.len(), 1);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.job_count, 1);
+    assert_eq!(snapshot.bytes_in, 0);
+    assert_eq!(snapshot.bytes_out, 0);
+    assert_eq!(snapshot.rows_in, 0);
+    assert_eq!(snapshot.rows_out, 0);
+    assert_eq!(snapshot.tombstones_in, 0);
+    assert_eq!(snapshot.tombstones_out, 0);
+    let last_job = snapshot.last_job.expect("last job");
+    assert!(!last_job.input.complete);
+    assert!(!last_job.output.complete);
     Ok(())
 }
 
@@ -1546,6 +2143,341 @@ async fn wait_for_executions(
     }
 }
 
+async fn wait_for_metrics<F>(
+    metrics: &Arc<CompactionMetrics>,
+    timeout: Duration,
+    mut predicate: F,
+) -> bool
+where
+    F: FnMut(&crate::compaction::metrics::CompactionMetricsSnapshot) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let snapshot = metrics.snapshot();
+        if predicate(&snapshot) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn segment_with_commits(
+    schema: SchemaRef,
+    rows: Vec<(String, i32, u64, bool)>,
+) -> ImmutableMemTable {
+    let mut data_rows = Vec::new();
+    let mut data_commits = Vec::new();
+    let mut delete_rows = Vec::new();
+    let mut delete_commits = Vec::new();
+
+    for (key, value, commit, tombstone) in rows {
+        let ts = Timestamp::new(commit);
+        if tombstone {
+            delete_rows.push(DynRow(vec![Some(DynCell::Str(key.into()))]));
+            delete_commits.push(ts);
+        } else {
+            data_rows.push(DynRow(vec![
+                Some(DynCell::Str(key.into())),
+                Some(DynCell::I32(value)),
+            ]));
+            data_commits.push(ts);
+        }
+    }
+
+    let batch = if data_rows.is_empty() {
+        RecordBatch::new_empty(schema.clone())
+    } else {
+        build_batch(schema.clone(), data_rows).expect("data batch")
+    };
+    let tombstone_flags = vec![false; batch.num_rows()];
+    let (batch, mvcc) =
+        bundle_mvcc_sidecar(batch, data_commits.clone(), tombstone_flags).expect("mvcc");
+
+    let delete_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+    let delete_empty = delete_rows.is_empty();
+    let delete_batch = if delete_empty {
+        RecordBatch::new_empty(delete_schema.clone())
+    } else {
+        build_batch(delete_schema.clone(), delete_rows).expect("delete batch")
+    };
+    let delete_sidecar = if delete_empty {
+        DeleteSidecar::empty(&delete_schema)
+    } else {
+        DeleteSidecar::new(delete_batch, delete_commits.clone())
+    };
+
+    let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+    let mut composite = std::collections::BTreeMap::new();
+    let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+    let key_rows = extractor
+        .project_view(&batch, &row_indices)
+        .expect("project view");
+    for (row, key_row) in key_rows.into_iter().enumerate() {
+        composite.insert(
+            KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]),
+            ImmutableIndexEntry::Row(row as u32),
+        );
+    }
+
+    if !delete_sidecar.is_empty() {
+        let delete_schema = delete_sidecar.key_batch().schema().clone();
+        let indices: Vec<usize> = (0..delete_schema.fields().len()).collect();
+        let projection =
+            projection_for_columns(delete_schema.clone(), indices).expect("identity projection");
+        let delete_row_indices: Vec<usize> = (0..delete_sidecar.key_batch().num_rows()).collect();
+        let delete_key_rows = projection
+            .project_view(delete_sidecar.key_batch(), &delete_row_indices)
+            .expect("delete keys");
+        for (row, key_row) in delete_key_rows.into_iter().enumerate() {
+            let ts = delete_commits[row];
+            composite.insert(KeyTsViewRaw::new(key_row, ts), ImmutableIndexEntry::Delete);
+        }
+    }
+
+    ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_periodic_trigger_records_metrics() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut inner: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    inner
+        .manifest
+        .apply_version_edits(
+            inner.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![CompactionInput {
+            level: 0,
+            sst_id: SsTableId::new(1),
+        }],
+        key_range: None,
+    };
+    let planner = OneShotPlanner::new(task);
+    let executed = Arc::new(StdMutex::new(Vec::new()));
+    let executor = CountingExecutor::new(Arc::clone(&executed));
+    let driver = Arc::new(inner.compaction_driver());
+    let worker_config = CompactionWorkerConfig::new(
+        Some(Duration::from_millis(5)),
+        2,
+        1,
+        CascadeConfig::new(0, Duration::from_millis(0)),
+    );
+    let handle = driver.spawn_worker(
+        Arc::clone(&inner.executor),
+        planner,
+        executor,
+        worker_config,
+    );
+
+    assert!(
+        wait_for_metrics(&metrics, Duration::from_secs(1), |snapshot| {
+            snapshot.trigger_periodic >= 1
+        })
+        .await,
+        "expected periodic trigger metrics"
+    );
+    assert!(
+        wait_for_executions(&executed, 1).await,
+        "expected compaction execution"
+    );
+    drop(handle);
+
+    let snapshot = metrics.snapshot();
+    assert!(snapshot.trigger_periodic >= 1);
+    assert_eq!(snapshot.trigger_kick, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_planner_queue_drop_records_metrics() -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = CompactionMetrics::new();
+    metrics.record_queue_drop(
+        CompactionQueueDropContext::Planner,
+        CompactionQueueDropReason::Full,
+    );
+    metrics.record_queue_drop(
+        CompactionQueueDropContext::Planner,
+        CompactionQueueDropReason::Closed,
+    );
+    let snapshot = metrics.snapshot();
+    assert!(snapshot.queue_drops_planner_full >= 1);
+    assert!(snapshot.queue_drops_planner_closed >= 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_kick_triggers_without_periodic_tick() -> Result<(), Box<dyn std::error::Error>>
+{
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut inner: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    inner
+        .manifest
+        .apply_version_edits(
+            inner.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![CompactionInput {
+            level: 0,
+            sst_id: SsTableId::new(1),
+        }],
+        key_range: None,
+    };
+    let planner = OneShotPlanner::new(task);
+    let executed = Arc::new(StdMutex::new(Vec::new()));
+    let executor = CountingExecutor::new(Arc::clone(&executed));
+    let driver = Arc::new(inner.compaction_driver());
+    let worker_config =
+        CompactionWorkerConfig::new(None, 2, 1, CascadeConfig::new(0, Duration::from_millis(0)));
+    let handle = driver.spawn_worker(
+        Arc::clone(&inner.executor),
+        planner,
+        executor,
+        worker_config,
+    );
+
+    handle.kick();
+    assert!(
+        wait_for_executions(&executed, 1).await,
+        "expected compaction work after kick"
+    );
+    drop(handle);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.trigger_kick, 1);
+    assert_eq!(snapshot.trigger_periodic, 0);
+    assert!(snapshot.job_count >= 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cascade_scheduling_respects_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut inner: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    inner
+        .manifest
+        .apply_version_edits(
+            inner.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let executed = Arc::new(StdMutex::new(Vec::new()));
+    let planner = CascadePlanner;
+    let executor = CountingExecutor::new(Arc::clone(&executed));
+    let driver = Arc::new(inner.compaction_driver());
+    let worker_config =
+        CompactionWorkerConfig::new(None, 2, 1, CascadeConfig::new(0, Duration::from_millis(0)));
+    let handle = driver.spawn_worker(
+        Arc::clone(&inner.executor),
+        planner,
+        executor,
+        worker_config,
+    );
+
+    handle.kick();
+    assert!(
+        wait_for_executions(&executed, 1).await,
+        "expected initial compaction execution"
+    );
+    drop(handle);
+
+    let tasks = executed.lock().expect("executed lock").clone();
+    let l0_to_l1 = tasks
+        .iter()
+        .filter(|(source, target)| *source == 0 && *target == 1)
+        .count();
+    let l1_to_l2 = tasks
+        .iter()
+        .filter(|(source, target)| *source == 1 && *target == 2)
+        .count();
+    assert_eq!(l0_to_l1, 1);
+    assert_eq!(l1_to_l2, 0);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.cascades_scheduled, 0);
+    assert!(snapshot.cascades_blocked_budget >= 1);
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cascade_scheduling_respects_cooldown() -> Result<(), Box<dyn std::error::Error>> {
     let schema = Arc::new(Schema::new(vec![
@@ -1557,8 +2489,10 @@ async fn cascade_scheduling_respects_cooldown() -> Result<(), Box<dyn std::error
         .build()
         .expect("schema builder");
     let executor = Arc::new(TokioExecutor::default());
-    let db: DB<InMemoryFs, TokioExecutor> = DB::new(mode_cfg, Arc::clone(&executor)).await?;
-    let inner = Arc::clone(db.inner());
+    let mut inner: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
 
     let entry_a = SstEntry::new(
         SsTableId::new(1),
@@ -1621,6 +2555,9 @@ async fn cascade_scheduling_respects_cooldown() -> Result<(), Box<dyn std::error
         .count();
     assert_eq!(l0_to_l1, 2);
     assert_eq!(l1_to_l2, 1);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.cascades_scheduled, 1);
+    assert!(snapshot.cascades_blocked_cooldown >= 1);
     Ok(())
 }
 
