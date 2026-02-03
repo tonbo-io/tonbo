@@ -29,6 +29,7 @@ use futures::{
 
 use crate::{
     mvcc::Timestamp,
+    observability::{log_debug, log_info},
     wal::{
         WalAck, WalCommand, WalConfig, WalError, WalResult, WalSnapshot, WalSyncPolicy,
         frame::{self, Frame, encode_command},
@@ -130,6 +131,14 @@ pub(crate) fn spawn_writer<E>(
 where
     E: Executor + Timer + Clone,
 {
+    log_debug!(
+        component = "wal",
+        event = "wal_writer_spawned",
+        queue_size = cfg.queue_size,
+        initial_segment_seq = initial_segment_seq,
+        initial_frame_seq = initial_frame_seq,
+    );
+
     let (sender, receiver) = mpsc::channel(cfg.queue_size);
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
@@ -440,6 +449,14 @@ where
     ctx.queue_depth.store(0, Ordering::SeqCst);
     ctx.update_queue_depth_metric().await;
 
+    log_info!(
+        component = "wal",
+        event = "wal_writer_shutdown",
+        synced = shutdown_synced,
+        segment_seq = ctx.segment_seq,
+        segment_bytes = ctx.segment_bytes,
+    );
+
     Ok(())
 }
 
@@ -575,6 +592,16 @@ where
             }
         }
         ctx.enforce_retention_limit().await?;
+
+        log_info!(
+            component = "wal",
+            event = "wal_writer_bootstrap",
+            segment_seq = ctx.segment_seq,
+            segment_bytes = ctx.segment_bytes,
+            next_frame_seq = ctx.next_frame_seq,
+            completed_segments = ctx.completed_segments.len(),
+        );
+
         Ok(ctx)
     }
 
@@ -816,6 +843,16 @@ where
         self.record_sealed_segment(bounds);
         self.enforce_retention_limit().await?;
 
+        log_info!(
+            component = "wal",
+            event = "wal_segment_rotated",
+            sealed_seq = sealed_seq,
+            sealed_bytes = old_bytes,
+            new_seq = new_seq,
+            new_bytes = new_bytes,
+            sync_performed = sync_performed,
+        );
+
         Ok(RotationOutcome {
             performed: true,
             sync_performed,
@@ -944,8 +981,18 @@ where
         if let Some(limit) = self.cfg.retention_bytes {
             while self.total_retained_bytes() > limit {
                 if let Some(evicted) = self.completed_segments.pop_front() {
-                    self.remove_sealed_segment_metadata(evicted.seq());
+                    let evicted_seq = evicted.seq();
+                    let evicted_bytes = evicted.bytes();
+                    self.remove_sealed_segment_metadata(evicted_seq);
                     self.storage.remove_segment(evicted.path()).await?;
+
+                    log_info!(
+                        component = "wal",
+                        event = "wal_retention_pruned",
+                        evicted_seq = evicted_seq,
+                        evicted_bytes = evicted_bytes,
+                        retained_bytes = self.total_retained_bytes(),
+                    );
                 } else {
                     break;
                 }
