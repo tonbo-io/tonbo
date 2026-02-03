@@ -108,7 +108,7 @@ pub(crate) fn table_definition(config: &DynModeConfig, table_name: &str) -> Tabl
     }
 }
 
-fn fingerprint_schema(schema: &SchemaRef) -> String {
+pub(crate) fn fingerprint_schema(schema: &SchemaRef) -> String {
     let mut hasher = Sha256::new();
     let value =
         serde_json::to_value(schema.as_ref()).expect("arrow schema serialization should not fail");

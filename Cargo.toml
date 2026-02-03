@@ -44,6 +44,7 @@ arrow-buffer = "57.1.0"
 arrow-ipc = "57.1.0"
 arrow-schema = { version = "57.1.0", features = ["serde"] }
 arrow-select = "57.1.0"
+bytes = "1"
 crc32c = "0.6"
 crossbeam-skiplist = "0.1"
 datafusion-common = "51.0.0"
