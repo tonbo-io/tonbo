@@ -5,9 +5,11 @@ use std::sync::Arc;
 use fusio::Read;
 #[cfg(all(test, feature = "tokio"))]
 use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
+use tracing::instrument;
 
 use crate::{
     manifest::WalSegmentRef,
+    observability::{log_info, log_warn},
     wal::{
         WalConfig, WalError, WalResult,
         frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
@@ -37,6 +39,11 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments while honoring the provided manifest floor.
+    #[instrument(
+        name = "wal::replay",
+        skip(self, floor),
+        fields(floor_seq = floor.map(|f| f.seq()))
+    )]
     pub(crate) async fn scan_with_floor(
         &self,
         floor: Option<&WalSegmentRef>,
@@ -75,6 +82,14 @@ impl Replayer {
 
         let floor_seq = floor.map(|f| f.seq());
         let floor_first_frame = floor.map(|f| f.first_frame());
+
+        log_info!(
+            component = "wal",
+            event = "replay_started",
+            segment_count = segments.len(),
+            floor_seq = ?floor_seq,
+            floor_first_frame = ?floor_first_frame,
+        );
 
         let mut events = Vec::new();
         for segment in segments {
@@ -124,6 +139,13 @@ impl Replayer {
                         // recovery returns the events observed before the partial frame. Any
                         // other corruption surfaces as an error to avoid silently skipping valid
                         // transactions further in the log.
+                        log_warn!(
+                            component = "wal",
+                            event = "replay_truncated_tail",
+                            segment_path = %path_display,
+                            offset = offset,
+                            reason = reason,
+                        );
                         return Ok(events);
                     }
                     Err(err) => return Err(err),
@@ -148,6 +170,12 @@ impl Replayer {
                 offset = payload_end;
             }
         }
+
+        log_info!(
+            component = "wal",
+            event = "replay_completed",
+            events_recovered = events.len(),
+        );
 
         Ok(events)
     }
@@ -565,5 +593,72 @@ mod tests {
             .build()
             .expect("schema builder should succeed")
             .schema
+    }
+
+    #[test]
+    fn replay_emits_tracing_span() {
+        use std::sync::Mutex;
+
+        use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt};
+
+        // Capture output in a shared buffer
+        #[derive(Clone, Default)]
+        struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for TestWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for TestWriter {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = TestWriter(Arc::clone(&buffer));
+
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL),
+        );
+
+        // Run replay under our test subscriber using a dedicated runtime
+        tracing::subscriber::with_default(subscriber, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+
+            rt.block_on(async {
+                let backend = Arc::new(InMemoryFs::new());
+                let fs_dyn: Arc<dyn DynFs> = backend.clone();
+                let wal_root = FusioPath::parse("wal-span-test").expect("wal path");
+
+                let mut cfg = WalConfig::default();
+                cfg.dir = wal_root;
+                cfg.segment_backend = fs_dyn;
+                cfg.state_store = None;
+
+                let replayer = Replayer::new(cfg);
+                let _events = replayer.scan_with_floor(None).await.expect("scan");
+            });
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            output.contains("wal::replay"),
+            "Expected span 'wal::replay' in output, got: {}",
+            output
+        );
     }
 }
