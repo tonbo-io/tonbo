@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -41,7 +41,7 @@ use crate::{
     },
     db::{
         BackpressureDecision, CasBackoffConfig, CascadeConfig, DB, DbInner, L0BackpressureConfig,
-        L0Stats,
+        L0Stats, L0StatsRefreshGuard,
     },
     extractor::projection_for_columns,
     id::FileIdGenerator,
@@ -341,6 +341,81 @@ async fn l0_backpressure_stall_rechecks_until_reduced() -> Result<(), Box<dyn st
     assert_eq!(snapshot.backpressure_stall, 1);
     assert_eq!(snapshot.backpressure_slowdown, 1);
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn l0_backpressure_cache_stale_until_forced_refresh() -> Result<(), Box<dyn std::error::Error>>
+{
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = RecordingExecutor::new();
+    let mut db: DbInner<InMemoryFs, RecordingExecutor> =
+        DB::new(mode_cfg, Arc::new(executor.clone()))
+            .await?
+            .into_inner();
+
+    let backpressure = L0BackpressureConfig::new(1, 2)
+        .slowdown_delay(Duration::from_millis(1))
+        .stop_delay(Duration::from_secs(5));
+    db.l0_backpressure = Some(backpressure.clone());
+    db.compaction_worker = Some(dummy_compaction_handle());
+
+    let entry_a = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/1.parquet"),
+        None,
+    );
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry_a],
+            }],
+        )
+        .await?;
+
+    let decision = db.l0_backpressure_decision(&backpressure, false).await?;
+    assert!(matches!(decision, BackpressureDecision::Slowdown(_)));
+
+    let entry_b = SstEntry::new(
+        SsTableId::new(2),
+        None,
+        None,
+        Path::from("L0/2.parquet"),
+        None,
+    );
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry_b],
+            }],
+        )
+        .await?;
+
+    let cached = db.l0_backpressure_decision(&backpressure, false).await?;
+    assert!(matches!(cached, BackpressureDecision::Slowdown(_)));
+
+    let refreshed = db.l0_backpressure_decision(&backpressure, true).await?;
+    assert!(matches!(refreshed, BackpressureDecision::Stall(_)));
+
+    Ok(())
+}
+
+#[test]
+fn l0_stats_refresh_guard_clears_on_drop() {
+    let flag = AtomicBool::new(true);
+    {
+        let _guard = L0StatsRefreshGuard::new(&flag);
+    }
+    assert!(!flag.load(Ordering::Acquire));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

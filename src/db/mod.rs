@@ -5,8 +5,11 @@
 //! engine while we focus on a single runtime representation.
 
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use arrow_array::RecordBatch;
@@ -117,6 +120,55 @@ impl MinorCompactionState {
 struct L0Stats {
     file_count: usize,
     total_bytes: Option<usize>,
+}
+
+struct L0StatsCache {
+    stats: L0Stats,
+    last_refresh: Instant,
+    valid: bool,
+}
+
+impl L0StatsCache {
+    fn new(now: Instant) -> Self {
+        Self {
+            stats: L0Stats {
+                file_count: 0,
+                total_bytes: Some(0),
+            },
+            last_refresh: now,
+            valid: false,
+        }
+    }
+
+    fn is_fresh(&self, now: Instant, refresh_interval: Duration) -> bool {
+        self.valid && now.saturating_duration_since(self.last_refresh) < refresh_interval
+    }
+
+    fn snapshot(&self) -> L0Stats {
+        self.stats
+    }
+
+    fn update(&mut self, now: Instant, stats: L0Stats) {
+        self.stats = stats;
+        self.last_refresh = now;
+        self.valid = true;
+    }
+}
+
+struct L0StatsRefreshGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> L0StatsRefreshGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for L0StatsRefreshGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -434,6 +486,8 @@ where
     minor_compaction: Option<MinorCompactionState>,
     /// Optional L0 backpressure configuration for ingest and minor compaction.
     l0_backpressure: Option<L0BackpressureConfig>,
+    l0_stats_cache: AsyncMutex<L0StatsCache>,
+    l0_stats_refreshing: AtomicBool,
     /// Backoff policy for compaction publish CAS conflicts.
     cas_backoff: CasBackoffConfig,
 }
@@ -487,6 +541,8 @@ where
     minor_compaction: Option<MinorCompactionState>,
     /// Optional L0 backpressure configuration for ingest and minor compaction.
     l0_backpressure: Option<L0BackpressureConfig>,
+    l0_stats_cache: AsyncMutex<L0StatsCache>,
+    l0_stats_refreshing: AtomicBool,
     /// Backoff policy for compaction publish CAS conflicts.
     cas_backoff: CasBackoffConfig,
 }
@@ -573,6 +629,7 @@ where
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
     ) -> Self {
+        let now = executor.now();
         Self {
             schema,
             delete_schema,
@@ -595,6 +652,8 @@ where
             flush_lock: AsyncMutex::new(()),
             minor_compaction: None,
             l0_backpressure: None,
+            l0_stats_cache: AsyncMutex::new(L0StatsCache::new(now)),
+            l0_stats_refreshing: AtomicBool::new(false),
             cas_backoff: CasBackoffConfig::default(),
         }
     }
@@ -845,7 +904,7 @@ where
         self.seal_state_lock().immutables.len()
     }
 
-    async fn l0_stats(&self) -> Result<L0Stats, ManifestError> {
+    async fn l0_stats_from_manifest(&self) -> Result<L0Stats, ManifestError> {
         let snapshot = self
             .manifest
             .snapshot_latest_with_fallback(self.manifest_table, &self.table_meta)
@@ -876,11 +935,51 @@ where
         })
     }
 
+    async fn l0_stats(
+        &self,
+        config: &L0BackpressureConfig,
+        force_refresh: bool,
+    ) -> Result<L0Stats, ManifestError> {
+        let now = self.executor.now();
+        let refresh_interval = config.stop_delay_value().max(Duration::from_millis(1));
+
+        {
+            let cache = self.l0_stats_cache.lock().await;
+            if !force_refresh && cache.is_fresh(now, refresh_interval) {
+                return Ok(cache.snapshot());
+            }
+            if self.l0_stats_refreshing.load(Ordering::Acquire) {
+                return Ok(cache.snapshot());
+            }
+        }
+
+        if self
+            .l0_stats_refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            let cache = self.l0_stats_cache.lock().await;
+            return Ok(cache.snapshot());
+        }
+        let _refresh_guard = L0StatsRefreshGuard::new(&self.l0_stats_refreshing);
+
+        let stats_result = self.l0_stats_from_manifest().await;
+        let mut cache = self.l0_stats_cache.lock().await;
+        match stats_result {
+            Ok(stats) => {
+                cache.update(now, stats);
+                Ok(stats)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn l0_backpressure_decision(
         &self,
         config: &L0BackpressureConfig,
+        force_refresh: bool,
     ) -> Result<BackpressureDecision, ManifestError> {
-        let stats = self.l0_stats().await?;
+        let stats = self.l0_stats(config, force_refresh).await?;
         Ok(config.decision(stats))
     }
 
@@ -892,7 +991,7 @@ where
             return Ok(());
         }
         let mut decision = self
-            .l0_backpressure_decision(config)
+            .l0_backpressure_decision(config, false)
             .await
             .map_err(manifest_error_as_key_extract)?;
         match decision {
@@ -912,7 +1011,7 @@ where
                     }
                     self.executor.sleep(delay).await;
                     decision = self
-                        .l0_backpressure_decision(config)
+                        .l0_backpressure_decision(config, true)
                         .await
                         .map_err(manifest_error_as_key_extract)?;
                     match decision {
@@ -941,7 +1040,7 @@ where
             && self.compaction_worker.is_some()
         {
             match self
-                .l0_backpressure_decision(config)
+                .l0_backpressure_decision(config, false)
                 .await
                 .map_err(SsTableError::Manifest)?
             {

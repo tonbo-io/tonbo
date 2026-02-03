@@ -45,6 +45,8 @@ impl CompactionScheduler {
         budget: usize,
     ) -> (Self, mpsc::Receiver<ScheduledCompaction>) {
         let capacity = capacity.max(1);
+        // futures::channel::mpsc capacity is buffer + num_senders; reserve one
+        // sender slot so total capacity matches the configured queue capacity.
         let channel_capacity = capacity.saturating_sub(1);
         let (tx, rx) = mpsc::channel(channel_capacity);
         (
