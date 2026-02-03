@@ -462,26 +462,6 @@ where
     minor_compaction: Option<MinorCompactionState>,
 }
 
-// SAFETY: DbInner shares internal state behind explicit synchronization.
-unsafe impl<FS, E> Send for DbInner<FS, E>
-where
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone + Send + Sync,
-    DynMem: Send + Sync,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
-}
-
-// SAFETY: See rationale above for `Send`; read access is synchronized via external locks.
-unsafe impl<FS, E> Sync for DbInner<FS, E>
-where
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone + Send + Sync,
-    DynMem: Send + Sync,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
-}
-
 impl<FS, E> DbInner<FS, E>
 where
     FS: ManifestFs<E>,
