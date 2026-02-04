@@ -41,6 +41,7 @@ use parquet::{
         metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader},
         properties::{EnabledStatistics, WriterProperties},
     },
+    schema::types::ColumnPath,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +64,7 @@ use crate::{
 };
 
 const MVCC_SEQUENCE_COL: &str = "_sequence";
+const SST_DATA_PAGE_SIZE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Identifier for an SSTable stored on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,6 +85,8 @@ impl SsTableId {
 /// Default iteration budget used by merge operations to guard against runaway loops.
 /// `usize::MAX` disables the guard; set explicitly via config when debugging.
 pub const DEFAULT_MERGE_ITERATION_BUDGET: usize = usize::MAX;
+/// Default maximum number of rows per Parquet row group (Parquet default is 1M rows).
+pub const DEFAULT_MAX_ROW_GROUP_ROWS: usize = 1024 * 1024;
 
 /// Configuration bundle shared by SSTable builders and readers.
 #[derive(Clone)]
@@ -94,6 +98,7 @@ pub struct SsTableConfig {
     root: Path,
     key_extractor: Option<Arc<dyn KeyProjection>>,
     merge_iteration_budget: usize,
+    max_row_group_rows: usize,
 }
 
 impl SsTableConfig {
@@ -107,6 +112,7 @@ impl SsTableConfig {
             root,
             key_extractor: None,
             merge_iteration_budget: DEFAULT_MERGE_ITERATION_BUDGET,
+            max_row_group_rows: DEFAULT_MAX_ROW_GROUP_ROWS,
         }
     }
 
@@ -176,6 +182,17 @@ impl SsTableConfig {
     pub fn merge_iteration_budget(&self) -> usize {
         self.merge_iteration_budget
     }
+
+    /// Configure the maximum number of rows per Parquet row group.
+    pub fn with_max_row_group_rows(mut self, rows: usize) -> Self {
+        self.max_row_group_rows = rows.max(1);
+        self
+    }
+
+    /// Access the configured maximum row group row count.
+    pub fn max_row_group_rows(&self) -> usize {
+        self.max_row_group_rows
+    }
 }
 
 impl fmt::Debug for SsTableConfig {
@@ -187,6 +204,7 @@ impl fmt::Debug for SsTableConfig {
             .field("root", &self.root)
             .field("has_key_extractor", &self.key_extractor.is_some())
             .field("merge_iteration_budget", &self.merge_iteration_budget)
+            .field("max_row_group_rows", &self.max_row_group_rows)
             .finish()
     }
 }
@@ -661,8 +679,30 @@ impl ParquetTableWriter {
     }
 }
 
-fn writer_properties(compression: SsTableCompression) -> WriterProperties {
-    let builder = match compression {
+fn bloom_filter_columns(config: &SsTableConfig, schema: &SchemaRef) -> Vec<ColumnPath> {
+    // Bloom filters add write CPU and file size; restrict to key columns to target
+    // high-cardinality point lookups without bloating all columns.
+    let Some(extractor) = config.key_extractor() else {
+        return Vec::new();
+    };
+    let base_schema = config.schema();
+    extractor
+        .key_indices()
+        .iter()
+        .filter_map(|index| {
+            base_schema.fields().get(*index).and_then(|field| {
+                if schema.field_with_name(field.name()).is_ok() {
+                    Some(ColumnPath::from(field.name().as_str()))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
+fn writer_properties(config: &SsTableConfig, schema: &SchemaRef) -> WriterProperties {
+    let mut builder = match config.compression() {
         SsTableCompression::None => {
             WriterProperties::builder().set_compression(Compression::UNCOMPRESSED)
         }
@@ -670,11 +710,16 @@ fn writer_properties(compression: SsTableCompression) -> WriterProperties {
             WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default()))
         }
     };
-    builder
+    builder = builder
         // Always emit page indexes for SST reads.
         .set_statistics_enabled(EnabledStatistics::Page)
         .set_offset_index_disabled(false)
-        .build()
+        .set_data_page_size_limit(SST_DATA_PAGE_SIZE_LIMIT)
+        .set_max_row_group_size(config.max_row_group_rows());
+    for column in bloom_filter_columns(config, schema) {
+        builder = builder.set_column_bloom_filter_enabled(column, true);
+    }
+    builder.build()
 }
 
 /// Append the `_commit_ts` column to a record batch for persistence.
@@ -729,6 +774,7 @@ struct WriteContext<E>
 where
     E: Executor + Clone,
 {
+    config: Arc<SsTableConfig>,
     fs: Arc<dyn DynFs>,
     data_path: Path,
     delete_path: Path,
@@ -766,13 +812,15 @@ where
             config.schema().metadata().clone(),
         ));
 
+        let data_properties = writer_properties(config.as_ref(), &data_schema);
         let data_writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(data_file, executor.clone()),
             data_schema,
-            Some(writer_properties(config.compression())),
+            Some(data_properties),
         )?;
 
         Ok(Self {
+            config: Arc::clone(&config),
             fs,
             data_path,
             data_writer: Some(data_writer),
@@ -810,7 +858,7 @@ where
             let writer = AsyncArrowWriter::try_new(
                 AsyncWriter::new(file, self.executor.clone()),
                 batch.schema(),
-                Some(writer_properties(self.compression)),
+                Some(writer_properties(self.config.as_ref(), &batch.schema())),
             )?;
             self.delete_writer = Some(writer);
         }

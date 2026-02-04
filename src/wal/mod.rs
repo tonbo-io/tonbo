@@ -36,6 +36,7 @@ use crate::{
     id::FileId,
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
     mvcc::Timestamp,
+    observability::log_info,
     wal::metrics::WalMetrics,
 };
 
@@ -977,6 +978,17 @@ where
             join,
             next_payload_seq,
             Arc::clone(&metrics),
+        );
+
+        log_info!(
+            component = "wal",
+            event = "wal_enabled",
+            wal_dir = %cfg.dir,
+            queue_size = cfg.queue_size,
+            segment_max_bytes = cfg.segment_max_bytes,
+            sync_policy = ?cfg.sync,
+            recovery_mode = ?cfg.recovery,
+            retention_bytes = ?cfg.retention_bytes,
         );
 
         self.set_wal_config(Some(cfg.clone()));
