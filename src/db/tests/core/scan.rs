@@ -272,6 +272,54 @@ async fn plan_scan_prunes_sst_row_groups_and_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_skips_fully_pruned_sst() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-prune-empty");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    write_parquet_data(
+        Arc::clone(&db.fs),
+        data_path.clone(),
+        rows_with_commit_ts(0, 100, Timestamp::MIN.get()),
+        50,
+        10,
+    )
+    .await;
+    let sst_entry = SstEntry::new(SsTableId::new(13), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let predicate = Expr::gt("v", ScalarValue::from(1000i32));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    assert!(
+        plan.sst_selections.is_empty(),
+        "expected fully pruned SST to be skipped"
+    );
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert!(ids.is_empty(), "expected no rows");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_skips_ssts_after_read_ts() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),

@@ -159,7 +159,7 @@ impl TxSnapshot {
             {
                 continue;
             }
-            let selection = prune_sst_selection(
+            let mut selection = prune_sst_selection(
                 Arc::clone(&fs),
                 entry.data_path(),
                 predicate,
@@ -169,7 +169,9 @@ impl TxSnapshot {
                 executor.clone(),
             )
             .await?;
-            let mut selection = selection;
+            if selection.row_set.is_empty() {
+                continue;
+            }
             if let Some(delete_path) = entry.delete_path() {
                 let delete_selection = plan_delete_sidecar_selection(
                     Arc::clone(&fs),
@@ -245,11 +247,6 @@ where
     // Preserve PK-ascending scan order by keeping row groups in file order.
     row_groups.sort_unstable();
     row_groups.dedup();
-    let file_total_rows = usize::try_from(metadata.file_metadata().num_rows()).map_err(|_| {
-        SsTableError::Parquet(ParquetError::General(
-            "parquet row count exceeds usize::MAX".to_string(),
-        ))
-    })?;
     let selected_row_groups_rows = if row_groups.is_empty() {
         0usize
     } else {
@@ -266,27 +263,14 @@ where
             .into_iter()
             .sum::<usize>()
     };
+    let total_rows = selected_row_groups_rows;
     let row_set = match prune_result.row_selection().cloned() {
-        Some(selection) => {
-            let total_rows = if row_groups.is_empty() {
-                file_total_rows
-            } else {
-                selected_row_groups_rows
-            };
-            RowSet::from_row_selection(total_rows, selection).map_err(|err| {
-                SsTableError::RowSelection {
-                    reason: err.to_string(),
-                }
-            })?
-        }
-        None => {
-            let total_rows = if row_groups.is_empty() {
-                file_total_rows
-            } else {
-                selected_row_groups_rows
-            };
-            RowSet::all(total_rows)
-        }
+        Some(selection) => RowSet::from_row_selection(total_rows, selection).map_err(|err| {
+            SsTableError::RowSelection {
+                reason: err.to_string(),
+            }
+        })?,
+        None => RowSet::all(total_rows),
     };
     let total_row_groups = metadata.num_row_groups();
     let row_groups = if row_groups.len() == total_row_groups {
