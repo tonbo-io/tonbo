@@ -94,6 +94,7 @@ js-sys = "0.3"
 clap = { version = "4.5.4", features = ["derive"] }
 futures = "0.3"
 tempfile = "3"
+tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 typed-arrow = { version = "0.6.0", default-features = false, features = ["arrow-57", "ext-hooks", "views"] }
 
