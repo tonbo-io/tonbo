@@ -201,7 +201,19 @@ impl ScenarioHarness {
         Ok(commit_ts)
     }
 
-    async fn flush_one(&mut self) -> Result<u64, Box<dyn std::error::Error>> {
+    async fn ingest_delete(
+        &self,
+        key: &str,
+        oracle: &mut MvccOracle,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let commit_ts = self.next_commit_ts();
+        let batch = row_batch(Arc::clone(&self.schema), key, 0)?;
+        self.db.ingest_with_tombstones(batch, vec![true]).await?;
+        oracle.delete(key, commit_ts);
+        Ok(commit_ts)
+    }
+
+    async fn flush_immutables_to_l0(&mut self) -> Result<u64, Box<dyn std::error::Error>> {
         let sst_id = self.next_sst_id;
         self.next_sst_id += 1;
         let descriptor = SsTableDescriptor::new(SsTableId::new(sst_id), 0);
@@ -216,9 +228,9 @@ impl ScenarioHarness {
         &self,
         sst_ids: Vec<u64>,
         target_level: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<crate::compaction::executor::CompactionOutcome, Box<dyn std::error::Error>> {
         let start_id = 10_000;
-        compact_merge_l0(
+        let outcome = compact_merge_l0(
             self.db.inner().as_ref(),
             sst_ids,
             target_level,
@@ -226,7 +238,7 @@ impl ScenarioHarness {
             start_id,
         )
         .await?;
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -352,18 +364,77 @@ async fn compaction_correctness_overwrite_chain() -> Result<(), Box<dyn std::err
     let mut oracle = MvccOracle::default();
 
     let _ts0 = harness.ingest_put("k1", 10, &mut oracle).await?;
-    let sst0 = harness.flush_one().await?;
+    let sst0 = harness.flush_immutables_to_l0().await?;
     let _ts1 = harness.ingest_put("k1", 20, &mut oracle).await?;
-    let sst1 = harness.flush_one().await?;
+    let sst1 = harness.flush_immutables_to_l0().await?;
     let _ts2 = harness.ingest_put("k1", 30, &mut oracle).await?;
-    let sst2 = harness.flush_one().await?;
+    let sst2 = harness.flush_immutables_to_l0().await?;
 
     let snapshot = harness.db.begin_snapshot().await?;
     let snapshot_ts = snapshot.read_view().read_ts().get();
 
     assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
 
-    harness.compact_l0(vec![sst0, sst1, sst2], 1).await?;
+    let outcome = harness.compact_l0(vec![sst0, sst1, sst2], 1).await?;
+    assert!(
+        !outcome.add_ssts.is_empty(),
+        "scenario={scenario} expected compaction to add SSTs"
+    );
+    assert_eq!(
+        outcome.remove_ssts.len(),
+        3,
+        "scenario={scenario} expected compaction to remove 3 SSTs"
+    );
+    assert_eq!(
+        outcome.target_level, 1,
+        "scenario={scenario} expected target level 1"
+    );
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_correctness_delete_heavy() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = "delete_heavy";
+    let mut harness = ScenarioHarness::new("compaction-correctness-delete-heavy").await?;
+    let mut oracle = MvccOracle::default();
+
+    let _ts0 = harness.ingest_put("k1", 10, &mut oracle).await?;
+    let _ts1 = harness.ingest_delete("k1", &mut oracle).await?;
+    let sst0 = harness.flush_immutables_to_l0().await?;
+
+    let _ts2 = harness.ingest_put("k2", 20, &mut oracle).await?;
+    let _ts3 = harness.ingest_delete("k2", &mut oracle).await?;
+    let sst1 = harness.flush_immutables_to_l0().await?;
+
+    let _ts4 = harness.ingest_put("k3", 30, &mut oracle).await?;
+    let _ts5 = harness.ingest_delete("k3", &mut oracle).await?;
+    let sst2 = harness.flush_immutables_to_l0().await?;
+
+    let _ts6 = harness.ingest_put("k4", 40, &mut oracle).await?;
+    let sst3 = harness.flush_immutables_to_l0().await?;
+
+    let snapshot = harness.db.begin_snapshot().await?;
+    let snapshot_ts = snapshot.read_view().read_ts().get();
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+
+    let outcome = harness.compact_l0(vec![sst0, sst1, sst2, sst3], 1).await?;
+    assert!(
+        !outcome.add_ssts.is_empty(),
+        "scenario={scenario} expected compaction to add SSTs"
+    );
+    assert_eq!(
+        outcome.remove_ssts.len(),
+        4,
+        "scenario={scenario} expected compaction to remove 4 SSTs"
+    );
+    assert_eq!(
+        outcome.target_level, 1,
+        "scenario={scenario} expected target level 1"
+    );
 
     assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
 
