@@ -136,6 +136,23 @@ impl TxSnapshot {
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
+        self.plan_scan_with_context(db, predicate, projected_schema, limit, false)
+            .await
+    }
+
+    async fn plan_scan_with_context<FS, E>(
+        &self,
+        db: &DbInner<FS, E>,
+        predicate: &Expr,
+        projected_schema: Option<&SchemaRef>,
+        limit: Option<usize>,
+        force_predicate_columns: bool,
+    ) -> Result<ScanPlan, crate::db::DBError>
+    where
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
         if let Some(column) = find_bloom_filter_column(predicate) {
             return Err(crate::db::DBError::UnsupportedPredicate {
                 reason: format!(
@@ -144,12 +161,10 @@ impl TxSnapshot {
             });
         }
         let projected_schema = projected_schema.cloned();
-        let scan_schema = if let Some(projection) = projected_schema.as_ref() {
-            projection_with_predicate(&db.schema, projection, Some(predicate))?
-        } else {
-            projection_with_predicate(&db.schema, &db.schema, Some(predicate))?
-        };
-        let split = split_predicate_for_row_filter(predicate, &scan_schema);
+        let projection_schema = projected_schema.as_ref().unwrap_or(&db.schema);
+        let predicate_scan_schema =
+            projection_with_predicate(&db.schema, projection_schema, Some(predicate))?;
+        let split = split_predicate_for_row_filter(predicate, &predicate_scan_schema);
         let pushdown_predicate = split.pushdown;
         let mut residual_predicate = split.residual;
         let read_ts = self.read_view().read_ts();
@@ -202,6 +217,7 @@ impl TxSnapshot {
             pruner_cache: db.pruner_cache(),
             executor: executor.clone(),
         };
+        let has_non_sst = !mutable_row_set.is_empty() || !immutable_indexes.is_empty();
         let mut sst_selections = Vec::new();
         let mut sst_requires_full_residual = false;
         for entry in self
@@ -235,7 +251,7 @@ impl TxSnapshot {
                 entry.data_path(),
                 predicate,
                 read_ts,
-                &scan_schema,
+                &predicate_scan_schema,
                 &key_schema,
             )
             .await?;
@@ -265,6 +281,20 @@ impl TxSnapshot {
             // Keep the full predicate for post-merge filtering when any SST
             // schema cannot accept the pushdown portion.
             residual_predicate = Some(predicate.clone());
+        }
+        let needs_predicate_columns =
+            force_predicate_columns || residual_predicate.is_some() || has_non_sst;
+        let scan_schema = if needs_predicate_columns {
+            Arc::clone(&predicate_scan_schema)
+        } else {
+            Arc::clone(projection_schema)
+        };
+        if !needs_predicate_columns && scan_schema.as_ref() != predicate_scan_schema.as_ref() {
+            for sst in &mut sst_selections {
+                if let ScanSelection::Sst(selection) = &mut sst.selection {
+                    reproject_sst_selection(selection, &scan_schema, &key_schema)?;
+                }
+            }
         }
         Ok(ScanPlan {
             pushdown_predicate,
@@ -379,6 +409,27 @@ where
         Some(row_groups)
     };
 
+    let (projection, projected_schema) =
+        sst_projection_from_metadata(&arrow_metadata, scan_schema, key_schema)?;
+
+    Ok((
+        SstSelection {
+            row_groups,
+            row_set,
+            metadata,
+            projection,
+            projected_schema,
+            delete_selection: None,
+        },
+        requires_residual,
+    ))
+}
+
+fn sst_projection_from_metadata(
+    arrow_metadata: &ArrowReaderMetadata,
+    scan_schema: &SchemaRef,
+    key_schema: &SchemaRef,
+) -> Result<(ProjectionMask, SchemaRef), SsTableError> {
     let mut required = BTreeSet::new();
     for field in scan_schema.fields() {
         required.insert(field.name().to_string());
@@ -391,7 +442,7 @@ where
     let mut remaining = required;
     let mut projected_fields = Vec::new();
     let mut root_indices = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
+    for (idx, field) in arrow_metadata.schema().fields().iter().enumerate() {
         if remaining.remove(field.name()) {
             projected_fields.push(field.clone());
             root_indices.push(idx);
@@ -407,18 +458,22 @@ where
 
     let projected_schema = Arc::new(Schema::new(projected_fields));
     let projection = ProjectionMask::roots(arrow_metadata.parquet_schema(), root_indices);
+    Ok((projection, projected_schema))
+}
 
-    Ok((
-        SstSelection {
-            row_groups,
-            row_set,
-            metadata,
-            projection,
-            projected_schema,
-            delete_selection: None,
-        },
-        requires_residual,
-    ))
+fn reproject_sst_selection(
+    selection: &mut SstSelection,
+    scan_schema: &SchemaRef,
+    key_schema: &SchemaRef,
+) -> Result<(), SsTableError> {
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&selection.metadata), options)
+        .map_err(SsTableError::Parquet)?;
+    let (projection, projected_schema) =
+        sst_projection_from_metadata(&arrow_metadata, scan_schema, key_schema)?;
+    selection.projection = projection;
+    selection.projected_schema = projected_schema;
+    Ok(())
 }
 
 fn schema_projection_indices(
@@ -959,7 +1014,7 @@ where
             Some(overlay) if !overlay.staging.is_empty() => {
                 // We need to plan first to get the scan_schema
                 let plan = snapshot
-                    .plan_scan(db, &predicate, projection.as_ref(), limit)
+                    .plan_scan_with_context(db, &predicate, projection.as_ref(), limit, true)
                     .await?;
                 Some((
                     TransactionScan::new(
