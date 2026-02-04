@@ -4,8 +4,12 @@
 //! the earlier `Mode` trait indirection has been removed to simplify the core
 //! engine while we focus on a single runtime representation.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
+use aisle::Pruner;
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
 use fusio::{
@@ -44,7 +48,11 @@ use crate::{
         WalSegmentRef,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
-    ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
+    ondisk::{
+        bloom::{BloomFilterCache, default_bloom_cache},
+        metadata::{ParquetMetadataCache, default_parquet_metadata_cache},
+        sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
+    },
     transaction::{Snapshot as TxSnapshot, SnapshotError, TransactionDurability, TransactionError},
     wal::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
@@ -62,6 +70,7 @@ pub use crate::{
 
 /// Internal shared handle for the database backed by an `Arc`.
 pub(crate) type DynDbHandle<FS, E> = Arc<DbInner<FS, E>>;
+type PrunerCache = HashMap<String, Arc<Pruner>>;
 
 /// Metadata about a committed database version.
 ///
@@ -382,6 +391,12 @@ where
     /// Manifest handle with concrete filesystem type for static dispatch.
     manifest: TonboManifest<FS, E>,
     manifest_table: TableId,
+    /// Cached bloom filters for remote SST pruning.
+    bloom_cache: Arc<E::Mutex<BloomFilterCache>>,
+    /// Cached Aisle pruners keyed by schema fingerprint.
+    pruner_cache: Arc<E::Mutex<PrunerCache>>,
+    /// Cached Parquet metadata for SST pruning.
+    metadata_cache: Arc<E::Mutex<ParquetMetadataCache>>,
     /// WAL frame bounds covering the current mutable memtable, if any.
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// Per-key transactional locks (wired once transactional writes arrive).
@@ -429,6 +444,12 @@ where
     /// Manifest handle with concrete filesystem type for static dispatch.
     manifest: TonboManifest<FS, E>,
     manifest_table: TableId,
+    /// Cached bloom filters for remote SST pruning.
+    bloom_cache: Arc<E::Mutex<BloomFilterCache>>,
+    /// Cached Aisle pruners keyed by schema fingerprint.
+    pruner_cache: Arc<E::Mutex<PrunerCache>>,
+    /// Cached Parquet metadata for SST pruning.
+    metadata_cache: Arc<E::Mutex<ParquetMetadataCache>>,
     /// WAL frame bounds covering the current mutable memtable, if any.
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// Per-key transactional locks (wired once transactional writes arrive).
@@ -439,26 +460,6 @@ where
     flush_lock: AsyncMutex<()>,
     /// Optional minor compaction hook.
     minor_compaction: Option<MinorCompactionState>,
-}
-
-// SAFETY: DbInner shares internal state behind explicit synchronization.
-unsafe impl<FS, E> Send for DbInner<FS, E>
-where
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone + Send + Sync,
-    DynMem: Send + Sync,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
-}
-
-// SAFETY: See rationale above for `Send`; read access is synchronized via external locks.
-unsafe impl<FS, E> Sync for DbInner<FS, E>
-where
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone + Send + Sync,
-    DynMem: Send + Sync,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
 }
 
 impl<FS, E> DbInner<FS, E>
@@ -483,6 +484,21 @@ where
     /// matching the schema of delete sidecar parquet files.
     pub(crate) fn delete_extractor(&self) -> &Arc<dyn KeyProjection> {
         self.mem.delete_projection()
+    }
+
+    /// Access the shared bloom filter cache for pruning.
+    pub(crate) fn bloom_cache(&self) -> Arc<E::Mutex<BloomFilterCache>> {
+        Arc::clone(&self.bloom_cache)
+    }
+
+    /// Access the shared pruner cache for pruning.
+    pub(crate) fn pruner_cache(&self) -> Arc<E::Mutex<PrunerCache>> {
+        Arc::clone(&self.pruner_cache)
+    }
+
+    /// Access the shared Parquet metadata cache for pruning.
+    pub(crate) fn metadata_cache(&self) -> Arc<E::Mutex<ParquetMetadataCache>> {
+        Arc::clone(&self.metadata_cache)
     }
 
     /// Acquire a read guard to the mutable memtable (for testing/inspection).
@@ -538,6 +554,9 @@ where
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
+            bloom_cache: default_bloom_cache::<E>(),
+            pruner_cache: Arc::new(E::mutex(HashMap::new())),
+            metadata_cache: default_parquet_metadata_cache::<E>(),
             mutable_wal_range: Arc::new(Mutex::new(None)),
             _key_locks: Arc::new(LockableHashMap::new()),
             compaction_worker: None,
