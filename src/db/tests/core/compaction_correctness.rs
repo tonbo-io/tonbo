@@ -162,6 +162,7 @@ impl ScenarioHarness {
         let schema = Arc::clone(&config.schema);
         let db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(config)
             .on_disk(&db_root)?
+            .disable_minor_compaction()
             .build()
             .await?;
         let mut inner = db.into_inner();
@@ -300,6 +301,17 @@ async fn scan_key(
     Ok(Some(rows.remove(0).1))
 }
 
+async fn scan_range(
+    db: &DB<LocalFs, TokioExecutor>,
+    snapshot: &TxSnapshot,
+    start: &str,
+    end: &str,
+) -> Result<Vec<(String, i64)>, Box<dyn std::error::Error>> {
+    let predicate = Expr::between("id", ScalarValue::from(start), ScalarValue::from(end), true);
+    let batches = snapshot.scan(db).filter(predicate).collect().await?;
+    Ok(collect_rows(&batches))
+}
+
 async fn assert_oracle_matches(
     scenario: &str,
     snapshot_ts: u64,
@@ -324,6 +336,25 @@ async fn assert_oracle_matches(
              expected={expected:?} actual={actual:?}",
         );
     }
+    Ok(())
+}
+
+async fn assert_range_matches(
+    scenario: &str,
+    snapshot_ts: u64,
+    snapshot: &TxSnapshot,
+    oracle: &MvccOracle,
+    db: &DB<LocalFs, TokioExecutor>,
+    start: &str,
+    end: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = oracle.scan_range(Some(start), Some(end), snapshot_ts);
+    let actual = scan_range(db, snapshot, start, end).await?;
+    assert_eq!(
+        actual, expected,
+        "scenario={scenario} snapshot_ts={snapshot_ts} range={start}..={end} mismatch: \
+         expected={expected:?} actual={actual:?}",
+    );
     Ok(())
 }
 
@@ -437,6 +468,70 @@ async fn compaction_correctness_delete_heavy() -> Result<(), Box<dyn std::error:
     );
 
     assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_correctness_range_scan_with_deletes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let scenario = "range_scan_with_deletes";
+    let mut harness = ScenarioHarness::new("compaction-correctness-range-scan").await?;
+    let mut oracle = MvccOracle::default();
+
+    let _ts0 = harness.ingest_put("k01", 10, &mut oracle).await?;
+    let _ts1 = harness.ingest_put("k02", 20, &mut oracle).await?;
+    let _ts2 = harness.ingest_put("k03", 30, &mut oracle).await?;
+    let _ts3 = harness.ingest_delete("k02", &mut oracle).await?;
+    let sst0 = harness.flush_immutables_to_l0().await?;
+
+    let _ts4 = harness.ingest_put("k04", 40, &mut oracle).await?;
+    let _ts5 = harness.ingest_put("k05", 50, &mut oracle).await?;
+    let _ts6 = harness.ingest_delete("k05", &mut oracle).await?;
+    let _ts7 = harness.ingest_put("k06", 60, &mut oracle).await?;
+    let sst1 = harness.flush_immutables_to_l0().await?;
+
+    let snapshot = harness.db.begin_snapshot().await?;
+    let snapshot_ts = snapshot.read_view().read_ts().get();
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k02",
+        "k05",
+    )
+    .await?;
+
+    let outcome = harness.compact_l0(vec![sst0, sst1], 1).await?;
+    assert!(
+        !outcome.add_ssts.is_empty(),
+        "scenario={scenario} expected compaction to add SSTs"
+    );
+    assert_eq!(
+        outcome.remove_ssts.len(),
+        2,
+        "scenario={scenario} expected compaction to remove 2 SSTs"
+    );
+    assert_eq!(
+        outcome.target_level, 1,
+        "scenario={scenario} expected target level 1"
+    );
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k02",
+        "k05",
+    )
+    .await?;
 
     Ok(())
 }
