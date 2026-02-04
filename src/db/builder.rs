@@ -20,7 +20,10 @@ use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
 use crate::{
-    compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
+    compaction::{
+        CompactionWorkerConfig, MinorCompactor, executor::LocalCompactionExecutor,
+        metrics::CompactionMetrics, planner::CompactionStrategy,
+    },
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
@@ -1101,6 +1104,11 @@ where
         );
 
         inner.minor_compaction = minor_compaction_state;
+        if let Some(options) = compaction_options.as_ref() {
+            inner.l0_backpressure = options.backpressure().cloned();
+            inner.cas_backoff = options.cas_backoff_config().clone();
+            inner.compaction_metrics = options.metrics();
+        }
 
         if let Some(cfg) = wal_cfg.take() {
             inner.enable_wal(cfg).await?;
@@ -1119,14 +1127,14 @@ where
                 exec = exec.with_max_output_bytes(max_bytes);
             }
             let driver = Arc::new(inner.compaction_driver());
-            let handle = driver.spawn_worker(
-                Arc::clone(&inner.executor),
-                planner,
-                exec,
+            let worker_config = CompactionWorkerConfig::new(
                 options.effective_tick(),
                 options.effective_queue_capacity(),
                 options.effective_concurrency(),
+                options.cascade_config().clone(),
             );
+            let handle =
+                driver.spawn_worker(Arc::clone(&inner.executor), planner, exec, worker_config);
             inner.compaction_worker = Some(handle);
             inner.kick_compaction_worker();
         }
@@ -1153,6 +1161,10 @@ pub struct CompactionOptions {
     max_output_rows: Option<usize>,
     max_output_bytes: Option<usize>,
     periodic_tick: Option<Duration>,
+    backpressure: Option<L0BackpressureConfig>,
+    cascade: CascadeConfig,
+    cas_backoff: CasBackoffConfig,
+    compaction_metrics: Option<Arc<CompactionMetrics>>,
 }
 
 impl Default for CompactionOptions {
@@ -1164,6 +1176,10 @@ impl Default for CompactionOptions {
             max_output_rows: None,
             max_output_bytes: None,
             periodic_tick: None,
+            backpressure: Some(L0BackpressureConfig::default()),
+            cascade: CascadeConfig::default(),
+            cas_backoff: CasBackoffConfig::default(),
+            compaction_metrics: None,
         }
     }
 }
@@ -1190,6 +1206,8 @@ impl CompactionOptions {
     }
 
     /// Bound the in-process queue used to stage compaction jobs.
+    ///
+    /// When the queue is full, enqueue drops the task instead of blocking.
     #[must_use]
     pub fn queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity.max(1);
@@ -1221,6 +1239,41 @@ impl CompactionOptions {
         self
     }
 
+    /// Configure L0 backpressure thresholds for ingest/minor compaction.
+    #[must_use]
+    pub fn l0_backpressure(mut self, config: L0BackpressureConfig) -> Self {
+        self.backpressure = Some(config);
+        self
+    }
+
+    /// Disable L0 backpressure entirely.
+    #[must_use]
+    pub fn disable_l0_backpressure(mut self) -> Self {
+        self.backpressure = None;
+        self
+    }
+
+    /// Configure cascade scheduling policy for follow-up compactions.
+    #[must_use]
+    pub fn cascade(mut self, config: CascadeConfig) -> Self {
+        self.cascade = config;
+        self
+    }
+
+    /// Configure CAS conflict backoff for compaction publish.
+    #[must_use]
+    pub fn cas_backoff(mut self, config: CasBackoffConfig) -> Self {
+        self.cas_backoff = config;
+        self
+    }
+
+    /// Attach compaction metrics to record per-job and scheduler counters.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn compaction_metrics(mut self, metrics: Arc<CompactionMetrics>) -> Self {
+        self.compaction_metrics = Some(metrics);
+        self
+    }
     fn effective_concurrency(&self) -> usize {
         self.max_concurrent_jobs.max(1)
     }
@@ -1231,6 +1284,207 @@ impl CompactionOptions {
 
     fn effective_tick(&self) -> Option<Duration> {
         self.periodic_tick.filter(|interval| !interval.is_zero())
+    }
+
+    fn backpressure(&self) -> Option<&L0BackpressureConfig> {
+        self.backpressure.as_ref()
+    }
+
+    fn cascade_config(&self) -> &CascadeConfig {
+        &self.cascade
+    }
+
+    fn cas_backoff_config(&self) -> &CasBackoffConfig {
+        &self.cas_backoff
+    }
+
+    fn metrics(&self) -> Option<Arc<CompactionMetrics>> {
+        self.compaction_metrics.clone()
+    }
+}
+
+/// L0 backpressure tuning knobs for ingest and minor compaction.
+///
+/// Slowdown applies a fixed async delay per ingest when L0 exceeds the slowdown
+/// threshold. Stop stalls ingestion until L0 drops below the stop threshold,
+/// rechecking after `stop_delay`.
+#[derive(Clone, Debug)]
+pub struct L0BackpressureConfig {
+    slowdown_files: usize,
+    stop_files: usize,
+    slowdown_bytes: Option<usize>,
+    stop_bytes: Option<usize>,
+    slowdown_delay: Duration,
+    stop_delay: Duration,
+}
+
+impl Default for L0BackpressureConfig {
+    fn default() -> Self {
+        Self {
+            slowdown_files: 16,
+            stop_files: 32,
+            slowdown_bytes: None,
+            stop_bytes: None,
+            slowdown_delay: Duration::from_millis(25),
+            stop_delay: Duration::from_millis(200),
+        }
+    }
+}
+
+impl L0BackpressureConfig {
+    /// Create a backpressure config with file-count thresholds.
+    #[must_use]
+    pub fn new(slowdown_files: usize, stop_files: usize) -> Self {
+        let slowdown_files = slowdown_files.max(1);
+        let stop_files = stop_files.max(slowdown_files);
+        Self {
+            slowdown_files,
+            stop_files,
+            ..Default::default()
+        }
+    }
+
+    /// Set the delay injected when L0 is in the slowdown band.
+    #[must_use]
+    pub fn slowdown_delay(mut self, delay: Duration) -> Self {
+        if !delay.is_zero() {
+            self.slowdown_delay = delay;
+        }
+        self
+    }
+
+    /// Set the re-check delay used while L0 is stalled.
+    #[must_use]
+    pub fn stop_delay(mut self, delay: Duration) -> Self {
+        if !delay.is_zero() {
+            self.stop_delay = delay;
+        }
+        self
+    }
+
+    /// Enable slowdown based on total L0 bytes.
+    #[must_use]
+    pub fn slowdown_bytes(mut self, bytes: usize) -> Self {
+        self.slowdown_bytes = Some(bytes.max(1));
+        if let Some(stop) = self.stop_bytes {
+            self.stop_bytes = Some(stop.max(bytes.max(1)));
+        }
+        self
+    }
+
+    /// Enable stop based on total L0 bytes.
+    #[must_use]
+    pub fn stop_bytes(mut self, bytes: usize) -> Self {
+        let bytes = bytes.max(1);
+        self.stop_bytes = Some(bytes);
+        if let Some(slowdown) = self.slowdown_bytes {
+            self.stop_bytes = Some(bytes.max(slowdown));
+        }
+        self
+    }
+
+    pub(crate) fn slowdown_files(&self) -> usize {
+        self.slowdown_files
+    }
+
+    pub(crate) fn stop_files(&self) -> usize {
+        self.stop_files
+    }
+
+    pub(crate) fn slowdown_bytes_limit(&self) -> Option<usize> {
+        self.slowdown_bytes
+    }
+
+    pub(crate) fn stop_bytes_limit(&self) -> Option<usize> {
+        self.stop_bytes
+    }
+
+    pub(crate) fn slowdown_delay_value(&self) -> Duration {
+        self.slowdown_delay
+    }
+
+    pub(crate) fn stop_delay_value(&self) -> Duration {
+        self.stop_delay
+    }
+}
+
+/// Cascade scheduling guardrails for chained compactions.
+#[derive(Clone, Debug)]
+pub struct CascadeConfig {
+    max_follow_ups: usize,
+    cooldown: Duration,
+}
+
+impl Default for CascadeConfig {
+    fn default() -> Self {
+        Self {
+            max_follow_ups: 1,
+            cooldown: Duration::from_millis(500),
+        }
+    }
+}
+
+impl CascadeConfig {
+    /// Create a cascade config with a follow-up budget and cooldown.
+    #[must_use]
+    pub fn new(max_follow_ups: usize, cooldown: Duration) -> Self {
+        Self {
+            max_follow_ups,
+            cooldown,
+        }
+    }
+
+    pub(crate) fn max_follow_ups(&self) -> usize {
+        self.max_follow_ups
+    }
+
+    pub(crate) fn cooldown(&self) -> Duration {
+        self.cooldown
+    }
+}
+
+/// Backoff policy used when compaction publish hits CAS conflicts.
+#[derive(Clone, Debug)]
+pub struct CasBackoffConfig {
+    base_delay: Duration,
+    max_delay: Duration,
+}
+
+impl Default for CasBackoffConfig {
+    fn default() -> Self {
+        Self {
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+        }
+    }
+}
+
+impl CasBackoffConfig {
+    /// Configure the base and maximum delays for exponential backoff.
+    #[must_use]
+    pub fn new(base_delay: Duration, max_delay: Duration) -> Self {
+        let base_delay = if base_delay.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            base_delay
+        };
+        let max_delay = if max_delay < base_delay {
+            base_delay
+        } else {
+            max_delay
+        };
+        Self {
+            base_delay,
+            max_delay,
+        }
+    }
+
+    pub(crate) fn base_delay(&self) -> Duration {
+        self.base_delay
+    }
+
+    pub(crate) fn max_delay(&self) -> Duration {
+        self.max_delay
     }
 }
 
@@ -1440,6 +1694,11 @@ where
             .await
             .map_err(DbBuildError::Mode)?;
             inner.minor_compaction = minor_compaction_state;
+            if let Some(options) = compaction_options.as_ref() {
+                inner.l0_backpressure = options.backpressure().cloned();
+                inner.cas_backoff = options.cas_backoff_config().clone();
+                inner.compaction_metrics = options.metrics();
+            }
             inner.enable_wal(wal_cfg).await?;
             if let (Some(options), Some((sst_config, id_allocator))) =
                 (compaction_options, compaction_state)
@@ -1456,14 +1715,14 @@ where
                     exec = exec.with_max_output_bytes(max_bytes);
                 }
                 let driver = Arc::new(inner.compaction_driver());
-                let handle = driver.spawn_worker(
-                    Arc::clone(&inner.executor),
-                    planner,
-                    exec,
+                let worker_config = CompactionWorkerConfig::new(
                     options.effective_tick(),
                     options.effective_queue_capacity(),
                     options.effective_concurrency(),
+                    options.cascade_config().clone(),
                 );
+                let handle =
+                    driver.spawn_worker(Arc::clone(&inner.executor), planner, exec, worker_config);
                 inner.compaction_worker = Some(handle);
                 inner.kick_compaction_worker();
             }

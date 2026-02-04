@@ -12,6 +12,18 @@ use crate::{
 pub(crate) trait CompactionPlanner {
     /// Examine the snapshot of levels and return the next compaction task, if any.
     fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask>;
+    /// Plan a compaction task starting from a minimum source level.
+    ///
+    /// Implementations may ignore the `min_level` hint if they do not support
+    /// leveled selection. The default behavior matches [`plan`](Self::plan).
+    fn plan_with_min_level(
+        &self,
+        snapshot: &CompactionSnapshot,
+        min_level: usize,
+    ) -> Option<CompactionTask> {
+        let _ = min_level;
+        self.plan(snapshot)
+    }
 }
 
 /// Available compaction strategies selectable via configuration.
@@ -38,6 +50,16 @@ impl CompactionPlanner for CompactionPlannerKind {
     fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
         match self {
             Self::Leveled(planner) => LeveledCompactionPlanner::plan(planner, snapshot),
+        }
+    }
+
+    fn plan_with_min_level(
+        &self,
+        snapshot: &CompactionSnapshot,
+        min_level: usize,
+    ) -> Option<CompactionTask> {
+        match self {
+            Self::Leveled(planner) => planner.plan_with_min_level(snapshot, min_level),
         }
     }
 }
@@ -217,7 +239,7 @@ impl LeveledCompactionPlanner {
         if let Some(task) = self.plan_l0(snapshot) {
             return Some(task);
         }
-        self.plan_leveled(snapshot)
+        self.plan_leveled_from(snapshot, 1)
     }
 
     fn plan_l0(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
@@ -248,8 +270,17 @@ impl LeveledCompactionPlanner {
         })
     }
 
-    fn plan_leveled(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
-        for level_info in snapshot.levels().iter().filter(|info| info.level > 0) {
+    fn plan_leveled_from(
+        &self,
+        snapshot: &CompactionSnapshot,
+        min_level: usize,
+    ) -> Option<CompactionTask> {
+        let min_level = min_level.max(1);
+        for level_info in snapshot
+            .levels()
+            .iter()
+            .filter(|info| info.level >= min_level)
+        {
             let idx = level_info.level - 1;
             let Some(limit) = self.cfg.level_thresholds.get(idx).copied() else {
                 continue;
@@ -309,11 +340,30 @@ impl LeveledCompactionPlanner {
         }
         None
     }
+
+    fn plan_with_min_level(
+        &self,
+        snapshot: &CompactionSnapshot,
+        min_level: usize,
+    ) -> Option<CompactionTask> {
+        if min_level == 0 {
+            return self.plan(snapshot);
+        }
+        self.plan_leveled_from(snapshot, min_level)
+    }
 }
 
 impl CompactionPlanner for LeveledCompactionPlanner {
     fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
         LeveledCompactionPlanner::plan(self, snapshot)
+    }
+
+    fn plan_with_min_level(
+        &self,
+        snapshot: &CompactionSnapshot,
+        min_level: usize,
+    ) -> Option<CompactionTask> {
+        LeveledCompactionPlanner::plan_with_min_level(self, snapshot, min_level)
     }
 }
 

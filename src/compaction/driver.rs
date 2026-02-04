@@ -13,18 +13,23 @@ use std::{
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
-    executor::{Executor, RwLock, Timer},
+    executor::{Executor, Instant, RwLock, Timer},
 };
-use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle};
+use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle, lock::Mutex};
 
 use crate::{
     compaction::{
         executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
         handle::{CompactionHandle, CompactionTrigger},
+        metrics::{
+            CompactionCascadeDecision, CompactionIoStats, CompactionJobSnapshot, CompactionMetrics,
+            CompactionQueueDropContext, CompactionQueueDropReason, CompactionTriggerReason,
+        },
         orchestrator,
         planner::{CompactionPlanner, CompactionTask},
         scheduler::{CompactionScheduleError, CompactionScheduler, ScheduledCompaction},
     },
+    db::{CasBackoffConfig, CascadeConfig},
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
@@ -32,6 +37,82 @@ use crate::{
 /// Maximum retries for CAS conflicts when applying compaction edits.
 const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 const DEFAULT_COMPACTION_LEASE_TTL_MS: u64 = 30_000;
+
+#[derive(Debug)]
+struct CascadeControl {
+    max_follow_ups: usize,
+    cooldown: Duration,
+    remaining: usize,
+    last_cascade_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CascadeDecision {
+    Allowed,
+    BudgetExhausted,
+    CooldownActive,
+}
+
+impl CascadeControl {
+    fn new(max_follow_ups: usize, cooldown: Duration) -> Self {
+        Self {
+            max_follow_ups,
+            cooldown,
+            remaining: max_follow_ups,
+            last_cascade_at: None,
+        }
+    }
+
+    fn reset_budget(&mut self) {
+        self.remaining = self.max_follow_ups;
+    }
+
+    fn try_acquire(&mut self, now: Instant) -> CascadeDecision {
+        if self.remaining == 0 {
+            return CascadeDecision::BudgetExhausted;
+        }
+        if let Some(last) = self.last_cascade_at
+            && now.duration_since(last) < self.cooldown
+        {
+            return CascadeDecision::CooldownActive;
+        }
+        self.remaining = self.remaining.saturating_sub(1);
+        self.last_cascade_at = Some(now);
+        CascadeDecision::Allowed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use fusio::executor::Instant;
+
+    use super::{CascadeControl, CascadeDecision};
+
+    #[test]
+    fn cascade_control_enforces_budget_and_cooldown() {
+        let mut control = CascadeControl::new(1, Duration::from_millis(5));
+        let now = Instant::now();
+        assert!(matches!(control.try_acquire(now), CascadeDecision::Allowed));
+        assert!(matches!(
+            control.try_acquire(now),
+            CascadeDecision::BudgetExhausted
+        ));
+
+        control.reset_budget();
+        assert!(matches!(
+            control.try_acquire(now),
+            CascadeDecision::CooldownActive
+        ));
+
+        let later = now + Duration::from_millis(10);
+        assert!(matches!(
+            control.try_acquire(later),
+            CascadeDecision::Allowed
+        ));
+    }
+}
 
 /// Compaction driver that coordinates planning, execution, and manifest updates.
 ///
@@ -47,6 +128,41 @@ where
     pub(crate) table_id: TableId,
     pub(crate) wal_config: Option<RuntimeWalConfig>,
     pub(crate) wal_handle: Option<WalHandle<E>>,
+    pub(crate) runtime: Arc<E>,
+    pub(crate) cas_backoff: CasBackoffConfig,
+    compaction_metrics: Option<Arc<CompactionMetrics>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompactionWorkerConfig {
+    pub(crate) periodic_interval: Option<Duration>,
+    pub(crate) queue_capacity: usize,
+    pub(crate) max_concurrent_jobs: usize,
+    pub(crate) cascade: CascadeConfig,
+}
+
+struct DrainContext<'a, P, E> {
+    planner: &'a Arc<P>,
+    cascade_control: &'a Arc<Mutex<CascadeControl>>,
+    runtime: &'a Arc<E>,
+    cascade_trigger: &'a mpsc::Sender<CompactionTrigger>,
+    lease_ttl_ms: u64,
+}
+
+impl CompactionWorkerConfig {
+    pub(crate) fn new(
+        periodic_interval: Option<Duration>,
+        queue_capacity: usize,
+        max_concurrent_jobs: usize,
+        cascade: CascadeConfig,
+    ) -> Self {
+        Self {
+            periodic_interval,
+            queue_capacity,
+            max_concurrent_jobs,
+            cascade,
+        }
+    }
 }
 
 impl<FS, E> CompactionDriver<FS, E>
@@ -61,12 +177,18 @@ where
         table_id: TableId,
         wal_config: Option<RuntimeWalConfig>,
         wal_handle: Option<WalHandle<E>>,
+        runtime: Arc<E>,
+        cas_backoff: CasBackoffConfig,
+        compaction_metrics: Option<Arc<CompactionMetrics>>,
     ) -> Self {
         Self {
             manifest,
             table_id,
             wal_config,
             wal_handle,
+            runtime,
+            cas_backoff,
+            compaction_metrics,
         }
     }
 
@@ -145,6 +267,80 @@ where
         Ok(orchestrator::plan_from_version(planner, version))
     }
 
+    /// Build a compaction plan starting from a minimum source level.
+    pub(crate) async fn plan_compaction_task_from_level<P>(
+        &self,
+        planner: &P,
+        min_level: usize,
+    ) -> ManifestResult<Option<CompactionTask>>
+    where
+        P: CompactionPlanner,
+    {
+        let snapshot = self.manifest.snapshot_latest(self.table_id).await?;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        Ok(orchestrator::plan_from_version_with_min_level(
+            planner, version, min_level,
+        ))
+    }
+
+    fn cas_backoff_delay(&self, attempt: usize) -> Duration {
+        if attempt == 0 {
+            return Duration::from_millis(0);
+        }
+        let mut delay = self.cas_backoff.base_delay();
+        for _ in 1..attempt {
+            delay = delay.saturating_mul(2);
+        }
+        let max_delay = self.cas_backoff.max_delay();
+        if delay > max_delay { max_delay } else { delay }
+    }
+
+    async fn sleep_cas_backoff(&self, attempt: usize) {
+        let delay = self.cas_backoff_delay(attempt);
+        if !delay.is_zero() {
+            self.runtime.sleep(delay).await;
+        }
+    }
+
+    fn output_stats(outcome: &CompactionOutcome) -> (usize, CompactionIoStats) {
+        if !outcome.outputs.is_empty() {
+            (
+                outcome.outputs.len(),
+                CompactionIoStats::from_descriptors(&outcome.outputs),
+            )
+        } else if !outcome.add_ssts.is_empty() {
+            (
+                outcome.add_ssts.len(),
+                CompactionIoStats::from_entries(&outcome.add_ssts),
+            )
+        } else {
+            (
+                0,
+                CompactionIoStats {
+                    bytes: 0,
+                    rows: 0,
+                    tombstones: 0,
+                    complete: true,
+                },
+            )
+        }
+    }
+
+    fn record_job_success(&self, job: CompactionJobSnapshot) {
+        if let Some(metrics) = self.compaction_metrics.as_ref() {
+            metrics.record_job_success(job);
+        }
+    }
+
+    fn record_job_abort(&self, job: CompactionJobSnapshot) {
+        if let Some(metrics) = self.compaction_metrics.as_ref() {
+            metrics.record_job_abort(job);
+        }
+    }
+
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn run_compaction<CE, P>(
@@ -157,6 +353,8 @@ where
         P: CompactionPlanner,
     {
         let mut attempts = 0usize;
+        let mut cas_retries = 0usize;
+        let mut job_started_at: Option<Instant> = None;
         loop {
             attempts += 1;
             let snapshot = self
@@ -176,6 +374,13 @@ where
             };
 
             let inputs = orchestrator::resolve_inputs(version, &task)?;
+            let input_stats = CompactionIoStats::from_descriptors(&inputs);
+            let input_count = inputs.len();
+            let source_level = task.source_level;
+            let target_level = task.target_level;
+            if job_started_at.is_none() {
+                job_started_at = Some(self.runtime.now());
+            }
             let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
             let wal_floor = self.manifest_wal_floor().await;
             let job = CompactionJob {
@@ -184,7 +389,25 @@ where
                 lease: None,
             };
 
-            let outcome = executor.execute(job).await?;
+            let outcome = match executor.execute(job).await {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_abort(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: 0,
+                        input: input_stats,
+                        output: CompactionIoStats::default(),
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
+                    return Err(err);
+                }
+            };
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -196,6 +419,20 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
+                let (output_count, output_stats) = Self::output_stats(&outcome);
+                let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                let duration = self.runtime.now().duration_since(started_at);
+                self.record_job_success(CompactionJobSnapshot {
+                    source_level,
+                    target_level,
+                    input_sst_count: input_count,
+                    output_sst_count: output_count,
+                    input: input_stats,
+                    output: output_stats,
+                    duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                    cas_retries: cas_retries as u64,
+                    cas_aborted: false,
+                });
                 return Ok(Some(outcome));
             }
             match self
@@ -211,17 +448,61 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
+                    let (output_count, output_stats) = Self::output_stats(&outcome);
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_success(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: output_count,
+                        input: input_stats,
+                        output: output_stats,
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
                     return Ok(Some(outcome));
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    cas_retries = cas_retries.saturating_add(1);
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        let (output_count, output_stats) = Self::output_stats(&outcome);
+                        let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                        let duration = self.runtime.now().duration_since(started_at);
+                        self.record_job_abort(CompactionJobSnapshot {
+                            source_level,
+                            target_level,
+                            input_sst_count: input_count,
+                            output_sst_count: output_count,
+                            input: input_stats,
+                            output: output_stats,
+                            duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                            cas_retries: cas_retries as u64,
+                            cas_aborted: true,
+                        });
                         return Err(CompactionError::CasConflict);
                     }
+                    self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    let (output_count, output_stats) = Self::output_stats(&outcome);
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_abort(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: output_count,
+                        input: input_stats,
+                        output: output_stats,
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
                     return Err(CompactionError::Manifest(err));
                 }
             }
@@ -238,6 +519,8 @@ where
         CE: CompactionExecutor,
     {
         let mut attempts = 0usize;
+        let mut cas_retries = 0usize;
+        let mut job_started_at: Option<Instant> = None;
         loop {
             attempts += 1;
             let snapshot = self
@@ -258,6 +541,13 @@ where
 
             let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
             let inputs = orchestrator::resolve_inputs(version, &scheduled.task)?;
+            let input_stats = CompactionIoStats::from_descriptors(&inputs);
+            let input_count = inputs.len();
+            let source_level = scheduled.task.source_level;
+            let target_level = scheduled.task.target_level;
+            if job_started_at.is_none() {
+                job_started_at = Some(self.runtime.now());
+            }
             let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
             let wal_floor = self.manifest_wal_floor().await;
             let job = CompactionJob {
@@ -266,7 +556,25 @@ where
                 lease: Some(scheduled.lease.clone()),
             };
 
-            let outcome = executor.execute(job).await?;
+            let outcome = match executor.execute(job).await {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_abort(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: 0,
+                        input: input_stats,
+                        output: CompactionIoStats::default(),
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
+                    return Err(err);
+                }
+            };
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -278,6 +586,20 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
+                let (output_count, output_stats) = Self::output_stats(&outcome);
+                let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                let duration = self.runtime.now().duration_since(started_at);
+                self.record_job_success(CompactionJobSnapshot {
+                    source_level,
+                    target_level,
+                    input_sst_count: input_count,
+                    output_sst_count: output_count,
+                    input: input_stats,
+                    output: output_stats,
+                    duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                    cas_retries: cas_retries as u64,
+                    cas_aborted: false,
+                });
                 return Ok(Some(outcome));
             }
             let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
@@ -294,17 +616,61 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
+                    let (output_count, output_stats) = Self::output_stats(&outcome);
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_success(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: output_count,
+                        input: input_stats,
+                        output: output_stats,
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
                     return Ok(Some(outcome));
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    cas_retries = cas_retries.saturating_add(1);
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        let (output_count, output_stats) = Self::output_stats(&outcome);
+                        let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                        let duration = self.runtime.now().duration_since(started_at);
+                        self.record_job_abort(CompactionJobSnapshot {
+                            source_level,
+                            target_level,
+                            input_sst_count: input_count,
+                            output_sst_count: output_count,
+                            input: input_stats,
+                            output: output_stats,
+                            duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                            cas_retries: cas_retries as u64,
+                            cas_aborted: true,
+                        });
                         return Err(CompactionError::CasConflict);
                     }
+                    self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    let (output_count, output_stats) = Self::output_stats(&outcome);
+                    let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
+                    let duration = self.runtime.now().duration_since(started_at);
+                    self.record_job_abort(CompactionJobSnapshot {
+                        source_level,
+                        target_level,
+                        input_sst_count: input_count,
+                        output_sst_count: output_count,
+                        input: input_stats,
+                        output: output_stats,
+                        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        cas_retries: cas_retries as u64,
+                        cas_aborted: false,
+                    });
                     return Err(CompactionError::Manifest(err));
                 }
             }
@@ -315,15 +681,15 @@ where
         runtime: &E,
         periodic_interval: Option<Duration>,
         tick_rx: &mut mpsc::Receiver<CompactionTrigger>,
-    ) -> bool {
+    ) -> Option<CompactionTriggerReason> {
         if let Some(interval) = periodic_interval {
             let mut sleep = runtime.sleep(interval).fuse();
             futures::select_biased! {
-                _ = sleep => true,
-                msg = tick_rx.next() => msg.is_some(),
+                _ = sleep => Some(CompactionTriggerReason::Periodic),
+                msg = tick_rx.next() => msg.map(|_| CompactionTriggerReason::Kick),
             }
         } else {
-            tick_rx.next().await.is_some()
+            tick_rx.next().await.map(|_| CompactionTriggerReason::Kick)
         }
     }
 
@@ -337,6 +703,7 @@ where
     where
         P: CompactionPlanner,
     {
+        let metrics = self.compaction_metrics.as_ref();
         for _ in 0..budget {
             match self.plan_compaction_task(planner).await {
                 Ok(Some(task)) => {
@@ -347,9 +714,31 @@ where
                             continue;
                         }
                     };
-                    scheduler
+                    match scheduler
                         .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
-                        .await?;
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(CompactionScheduleError::Full) => {
+                            if let Some(metrics) = metrics {
+                                metrics.record_queue_drop(
+                                    CompactionQueueDropContext::Planner,
+                                    CompactionQueueDropReason::Full,
+                                );
+                            }
+                            eprintln!("compaction scheduler queue full; dropping task");
+                            break;
+                        }
+                        Err(CompactionScheduleError::Closed) => {
+                            if let Some(metrics) = metrics {
+                                metrics.record_queue_drop(
+                                    CompactionQueueDropContext::Planner,
+                                    CompactionQueueDropReason::Closed,
+                                );
+                            }
+                            return Err(CompactionScheduleError::Closed);
+                        }
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -361,34 +750,113 @@ where
         Ok(())
     }
 
-    async fn drain_and_execute<CE>(
+    async fn drain_and_execute<CE, P>(
         driver: &Arc<Self>,
         scheduler: &CompactionScheduler,
         rx: &mut mpsc::Receiver<ScheduledCompaction>,
         executor: &Arc<CE>,
+        ctx: &DrainContext<'_, P, E>,
     ) -> Result<bool, CompactionScheduleError>
     where
         CE: CompactionExecutor,
+        P: CompactionPlanner,
     {
         let applied_manifest = Arc::new(AtomicBool::new(false));
+        let metrics = driver.compaction_metrics.clone();
         scheduler
             .drain_with_budget(rx, |job| {
                 let driver = Arc::clone(driver);
                 let executor = Arc::clone(executor);
                 let applied_manifest = Arc::clone(&applied_manifest);
+                let metrics = metrics.clone();
+                let planner = Arc::clone(ctx.planner);
+                let scheduler = scheduler.clone();
+                let cascade_control = Arc::clone(ctx.cascade_control);
+                let runtime = Arc::clone(ctx.runtime);
+                let mut cascade_trigger = ctx.cascade_trigger.clone();
+                let lease_ttl_ms = ctx.lease_ttl_ms;
                 async move {
-                    match driver
+                    let source_level = job.task.source_level;
+                    let target_level = job.task.target_level;
+                    let outcome = match driver
                         .run_scheduled_compaction(job, executor.as_ref())
                         .await
                     {
-                        Ok(Some(outcome)) => {
-                            if !outcome.to_version_edits().is_empty() {
-                                applied_manifest.store(true, Ordering::Release);
-                            }
-                        }
-                        Ok(None) => {}
+                        Ok(Some(outcome)) => outcome,
+                        Ok(None) => return,
                         Err(err) => {
                             eprintln!("scheduled compaction failed: {err}");
+                            return;
+                        }
+                    };
+                    if !outcome.to_version_edits().is_empty() {
+                        applied_manifest.store(true, Ordering::Release);
+                    }
+
+                    if source_level == 0 && target_level == 1 {
+                        let decision = {
+                            let mut guard = cascade_control.lock().await;
+                            guard.try_acquire(runtime.now())
+                        };
+                        match decision {
+                            CascadeDecision::Allowed => {}
+                            CascadeDecision::BudgetExhausted => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics
+                                        .record_cascade(CompactionCascadeDecision::BlockedBudget);
+                                }
+                                return;
+                            }
+                            CascadeDecision::CooldownActive => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics
+                                        .record_cascade(CompactionCascadeDecision::BlockedCooldown);
+                                }
+                                return;
+                            }
+                        }
+                        let Ok(Some(task)) = driver
+                            .plan_compaction_task_from_level(planner.as_ref(), 1)
+                            .await
+                        else {
+                            return;
+                        };
+                        let manifest_head =
+                            match driver.manifest.snapshot_latest(driver.table_id).await {
+                                Ok(snapshot) => snapshot.head.last_manifest_txn,
+                                Err(err) => {
+                                    eprintln!("cascade snapshot failed: {err}");
+                                    return;
+                                }
+                            };
+                        match scheduler
+                            .enqueue(task, manifest_head, "cascade-compaction", lease_ttl_ms)
+                            .await
+                        {
+                            Ok(()) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_cascade(CompactionCascadeDecision::Scheduled);
+                                }
+                                let _ = cascade_trigger.try_send(CompactionTrigger::Kick);
+                            }
+                            Err(CompactionScheduleError::Full) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_queue_drop(
+                                        CompactionQueueDropContext::Cascade,
+                                        CompactionQueueDropReason::Full,
+                                    );
+                                }
+                                eprintln!("compaction scheduler queue full; dropping cascade");
+                            }
+                            Err(CompactionScheduleError::Closed) => {
+                                if let Some(metrics) = metrics.as_ref() {
+                                    metrics.record_queue_drop(
+                                        CompactionQueueDropContext::Cascade,
+                                        CompactionQueueDropReason::Closed,
+                                    );
+                                }
+                                eprintln!("compaction scheduler closed");
+                            }
                         }
                     }
                 }
@@ -417,62 +885,92 @@ where
         runtime: Arc<E>,
         planner: P,
         executor: CE,
-        periodic_interval: Option<Duration>,
-        queue_capacity: usize,
-        max_concurrent_jobs: usize,
+        config: CompactionWorkerConfig,
     ) -> CompactionHandle<E>
     where
         CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
         P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
     {
+        let CompactionWorkerConfig {
+            periodic_interval,
+            queue_capacity,
+            max_concurrent_jobs,
+            cascade,
+        } = config;
         let budget = max_concurrent_jobs.max(1);
         let queue_capacity = queue_capacity.max(budget).max(1);
         let (scheduler, mut rx) = CompactionScheduler::new(queue_capacity, budget);
         let (tick_tx, mut tick_rx) = mpsc::channel::<CompactionTrigger>(1);
+        let planner = Arc::new(planner);
         let driver = Arc::clone(self);
         let driver_for_loop = Arc::clone(&driver);
         let executor = Arc::new(executor);
         let runtime_for_loop = Arc::clone(&runtime);
+        let cascade_trigger = tick_tx.clone();
+        let cascade_control = Arc::new(Mutex::new(CascadeControl::new(
+            cascade.max_follow_ups(),
+            cascade.cooldown(),
+        )));
+        let metrics = driver_for_loop.compaction_metrics.clone();
         let lease_ttl_ms = periodic_interval
             .map(|interval| interval.as_millis().max(1) as u64)
             .unwrap_or(DEFAULT_COMPACTION_LEASE_TTL_MS);
         let (abort, reg) = AbortHandle::new_pair();
         let loop_future = async move {
             let runtime = runtime_for_loop;
-            let mut pending_trigger = false;
+            let mut pending_reason: Option<CompactionTriggerReason> = None;
             loop {
-                if !pending_trigger {
-                    let triggered =
+                if pending_reason.is_none() {
+                    pending_reason =
                         Self::wait_for_trigger(runtime.as_ref(), periodic_interval, &mut tick_rx)
                             .await;
-                    if !triggered {
+                    if pending_reason.is_none() {
                         return;
                     }
                 }
-                pending_trigger = false;
+
+                if let Some(reason) = pending_reason.take()
+                    && let Some(metrics) = metrics.as_ref()
+                {
+                    metrics.record_trigger(reason);
+                }
+                {
+                    let mut guard = cascade_control.lock().await;
+                    guard.reset_budget();
+                }
 
                 if let Err(err) = driver_for_loop
-                    .plan_and_enqueue(&planner, &scheduler, budget, lease_ttl_ms)
+                    .plan_and_enqueue(planner.as_ref(), &scheduler, budget, lease_ttl_ms)
                     .await
                 {
                     eprintln!("compaction scheduler closed: {err}");
                     return;
                 }
 
-                let applied_manifest =
-                    match Self::drain_and_execute(&driver, &scheduler, &mut rx, &executor).await {
-                        Ok(applied_manifest) => applied_manifest,
-                        Err(err) => {
-                            eprintln!("compaction scheduler drain stopped: {err}");
-                            return;
-                        }
-                    };
+                let drain_ctx = DrainContext {
+                    planner: &planner,
+                    cascade_control: &cascade_control,
+                    runtime: &runtime,
+                    cascade_trigger: &cascade_trigger,
+                    lease_ttl_ms,
+                };
+                let applied_manifest = match Self::drain_and_execute(
+                    &driver, &scheduler, &mut rx, &executor, &drain_ctx,
+                )
+                .await
+                {
+                    Ok(applied_manifest) => applied_manifest,
+                    Err(err) => {
+                        eprintln!("compaction scheduler drain stopped: {err}");
+                        return;
+                    }
+                };
 
                 // Self-kick after manifest edits so we can immediately pick up newly-eligible
                 // compactions (or remaining work beyond the current budget) without waiting
                 // for the next external or periodic trigger.
-                if applied_manifest && driver_for_loop.should_self_kick(&planner).await {
-                    pending_trigger = true;
+                if applied_manifest && driver_for_loop.should_self_kick(planner.as_ref()).await {
+                    pending_reason = Some(CompactionTriggerReason::Kick);
                 }
             }
         };
