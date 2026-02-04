@@ -3,6 +3,10 @@
 use std::marker::PhantomData;
 
 use fusio::executor::Executor;
+#[cfg(test)]
+use fusio::executor::JoinHandle;
+#[cfg(test)]
+use futures::SinkExt;
 use futures::{channel::mpsc, future::AbortHandle};
 
 /// Handle to a background compaction worker.
@@ -12,10 +16,12 @@ use futures::{channel::mpsc, future::AbortHandle};
 #[derive(Debug)]
 pub(crate) enum CompactionTrigger {
     Kick,
+    Shutdown,
 }
 
 pub(crate) struct CompactionHandle<E: Executor> {
-    abort: AbortHandle,
+    abort: Option<AbortHandle>,
+    join: Option<E::JoinHandle<()>>,
     trigger: Option<mpsc::Sender<CompactionTrigger>>,
     _marker: PhantomData<E>,
 }
@@ -24,11 +30,12 @@ impl<E: Executor> CompactionHandle<E> {
     /// Create a new compaction handle.
     pub(crate) fn new(
         abort: AbortHandle,
-        _join: Option<E::JoinHandle<()>>,
+        join: Option<E::JoinHandle<()>>,
         trigger: Option<mpsc::Sender<CompactionTrigger>>,
     ) -> Self {
         Self {
-            abort,
+            abort: Some(abort),
+            join,
             trigger,
             _marker: PhantomData,
         }
@@ -41,10 +48,29 @@ impl<E: Executor> CompactionHandle<E> {
             let _ = sender.try_send(CompactionTrigger::Kick);
         }
     }
+
+    /// Gracefully stop the compaction worker and wait for it to exit.
+    #[cfg(test)]
+    pub(crate) async fn shutdown(mut self) {
+        if let Some(mut sender) = self.trigger.take() {
+            let _ = sender.send(CompactionTrigger::Shutdown).await;
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join().await;
+        }
+        self.abort.take();
+    }
 }
 
 impl<E: Executor> Drop for CompactionHandle<E> {
     fn drop(&mut self) {
-        self.abort.abort();
+        if let Some(sender) = &self.trigger {
+            let mut sender = sender.clone();
+            let _ = sender.try_send(CompactionTrigger::Shutdown);
+        }
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+        let _ = self.join.take();
     }
 }
