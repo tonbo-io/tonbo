@@ -535,3 +535,69 @@ async fn compaction_correctness_range_scan_with_deletes() -> Result<(), Box<dyn 
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_correctness_cross_segment_overlap() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = "cross_segment_overlap";
+    let mut harness = ScenarioHarness::new("compaction-correctness-cross-segment").await?;
+    let mut oracle = MvccOracle::default();
+
+    let _ts0 = harness.ingest_put("k01", 10, &mut oracle).await?;
+    let _ts1 = harness.ingest_put("k02", 20, &mut oracle).await?;
+    let _ts2 = harness.ingest_put("k03", 30, &mut oracle).await?;
+    let sst0 = harness.flush_immutables_to_l0().await?;
+
+    let _ts3 = harness.ingest_put("k02", 200, &mut oracle).await?;
+    let _ts4 = harness.ingest_put("k04", 40, &mut oracle).await?;
+    let _ts5 = harness.ingest_delete("k01", &mut oracle).await?;
+    let sst1 = harness.flush_immutables_to_l0().await?;
+
+    let _ts6 = harness.ingest_put("k03", 300, &mut oracle).await?;
+    let _ts7 = harness.ingest_delete("k02", &mut oracle).await?;
+    let _ts8 = harness.ingest_put("k05", 50, &mut oracle).await?;
+    let sst2 = harness.flush_immutables_to_l0().await?;
+
+    let snapshot = harness.db.begin_snapshot().await?;
+    let snapshot_ts = snapshot.read_view().read_ts().get();
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k05",
+    )
+    .await?;
+
+    let outcome = harness.compact_l0(vec![sst0, sst1, sst2], 1).await?;
+    assert!(
+        !outcome.add_ssts.is_empty(),
+        "scenario={scenario} expected compaction to add SSTs"
+    );
+    assert_eq!(
+        outcome.remove_ssts.len(),
+        3,
+        "scenario={scenario} expected compaction to remove 3 SSTs"
+    );
+    assert_eq!(
+        outcome.target_level, 1,
+        "scenario={scenario} expected target level 1"
+    );
+
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k05",
+    )
+    .await?;
+
+    Ok(())
+}
