@@ -129,13 +129,13 @@ where
 }
 
 /// Helper to merge specific L0 SST ids into a target level using the local executor.
-pub fn compact_merge_l0<'a, FS, E>(
+pub(crate) fn compact_merge_l0<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     sst_ids: Vec<u64>,
     target_level: u32,
     sst_cfg: Arc<SsTableConfig>,
     start_id: u64,
-) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, Box<dyn std::error::Error>>> + 'a>>
 where
     FS: ManifestFs<E> + 'a,
     E: Executor + Timer + Clone + 'static,
@@ -165,8 +165,11 @@ where
         };
         let planner = StaticPlanner { task };
         let executor = LocalCompactionExecutor::new(sst_cfg, start_id);
-        let _ = db.run_compaction_task(&planner, &executor).await;
-        Ok(())
+        let outcome = db
+            .run_compaction_task(&planner, &executor)
+            .await?
+            .ok_or("compaction returned no outcome")?;
+        Ok(outcome)
     })
 }
 
