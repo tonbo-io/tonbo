@@ -421,7 +421,20 @@ async fn compaction_correctness_overwrite_chain() -> Result<(), Box<dyn std::err
         "scenario={scenario} expected target level 1"
     );
 
-    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    let post_snapshot = harness.db.begin_snapshot().await?;
+    let post_snapshot_ts = post_snapshot.read_view().read_ts().get();
+    assert_eq!(
+        post_snapshot_ts, snapshot_ts,
+        "scenario={scenario} expected snapshot ts to be stable across compaction"
+    );
+    assert_oracle_matches(
+        scenario,
+        post_snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+    )
+    .await?;
 
     Ok(())
 }
@@ -467,7 +480,20 @@ async fn compaction_correctness_delete_heavy() -> Result<(), Box<dyn std::error:
         "scenario={scenario} expected target level 1"
     );
 
-    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    let post_snapshot = harness.db.begin_snapshot().await?;
+    let post_snapshot_ts = post_snapshot.read_view().read_ts().get();
+    assert_eq!(
+        post_snapshot_ts, snapshot_ts,
+        "scenario={scenario} expected snapshot ts to be stable across compaction"
+    );
+    assert_oracle_matches(
+        scenario,
+        post_snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+    )
+    .await?;
 
     Ok(())
 }
@@ -521,11 +547,24 @@ async fn compaction_correctness_range_scan_with_deletes() -> Result<(), Box<dyn 
         "scenario={scenario} expected target level 1"
     );
 
-    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    let post_snapshot = harness.db.begin_snapshot().await?;
+    let post_snapshot_ts = post_snapshot.read_view().read_ts().get();
+    assert_eq!(
+        post_snapshot_ts, snapshot_ts,
+        "scenario={scenario} expected snapshot ts to be stable across compaction"
+    );
+    assert_oracle_matches(
+        scenario,
+        post_snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+    )
+    .await?;
     assert_range_matches(
         scenario,
-        snapshot_ts,
-        &snapshot,
+        post_snapshot_ts,
+        &post_snapshot,
         &oracle,
         &harness.db,
         "k02",
@@ -587,11 +626,24 @@ async fn compaction_correctness_cross_segment_overlap() -> Result<(), Box<dyn st
         "scenario={scenario} expected target level 1"
     );
 
-    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db).await?;
+    let post_snapshot = harness.db.begin_snapshot().await?;
+    let post_snapshot_ts = post_snapshot.read_view().read_ts().get();
+    assert_eq!(
+        post_snapshot_ts, snapshot_ts,
+        "scenario={scenario} expected snapshot ts to be stable across compaction"
+    );
+    assert_oracle_matches(
+        scenario,
+        post_snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+    )
+    .await?;
     assert_range_matches(
         scenario,
-        snapshot_ts,
-        &snapshot,
+        post_snapshot_ts,
+        &post_snapshot,
         &oracle,
         &harness.db,
         "k01",
