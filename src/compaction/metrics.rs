@@ -5,7 +5,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{manifest::SstEntry, ondisk::sstable::SsTableDescriptor};
+use crate::{
+    manifest::SstEntry,
+    observability::{log_debug, log_info, log_warn},
+    ondisk::sstable::SsTableDescriptor,
+};
 
 /// Aggregate I/O statistics for compaction inputs or outputs.
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +161,15 @@ pub(crate) enum CompactionTriggerReason {
     Periodic,
 }
 
+impl CompactionTriggerReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            CompactionTriggerReason::Kick => "kick",
+            CompactionTriggerReason::Periodic => "periodic",
+        }
+    }
+}
+
 /// Reason a compaction job was dropped from the scheduler queue.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompactionQueueDropReason {
@@ -166,6 +179,15 @@ pub(crate) enum CompactionQueueDropReason {
     Closed,
 }
 
+impl CompactionQueueDropReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            CompactionQueueDropReason::Full => "full",
+            CompactionQueueDropReason::Closed => "closed",
+        }
+    }
+}
+
 /// Context in which a compaction job drop occurred.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompactionQueueDropContext {
@@ -173,6 +195,15 @@ pub(crate) enum CompactionQueueDropContext {
     Planner,
     /// Drop happened when scheduling a cascade.
     Cascade,
+}
+
+impl CompactionQueueDropContext {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            CompactionQueueDropContext::Planner => "planner",
+            CompactionQueueDropContext::Cascade => "cascade",
+        }
+    }
 }
 
 /// Outcome for cascade scheduling decisions.
@@ -186,6 +217,16 @@ pub(crate) enum CompactionCascadeDecision {
     BlockedBudget,
 }
 
+impl CompactionCascadeDecision {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            CompactionCascadeDecision::Scheduled => "scheduled",
+            CompactionCascadeDecision::BlockedCooldown => "blocked_cooldown",
+            CompactionCascadeDecision::BlockedBudget => "blocked_budget",
+        }
+    }
+}
+
 /// Backpressure signals emitted by L0 thresholds.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompactionBackpressureSignal {
@@ -193,6 +234,15 @@ pub(crate) enum CompactionBackpressureSignal {
     Slowdown,
     /// Stall signal with a delay.
     Stall,
+}
+
+impl CompactionBackpressureSignal {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            CompactionBackpressureSignal::Slowdown => "slowdown",
+            CompactionBackpressureSignal::Stall => "stall",
+        }
+    }
 }
 
 /// Shared compaction metrics with optional stderr logging.
@@ -362,16 +412,17 @@ impl CompactionMetrics {
         match trigger {
             CompactionTriggerReason::Kick => {
                 add_saturating(&self.trigger_kick, 1);
-                if self.emit_logs {
-                    eprintln!("compaction trigger: kick");
-                }
             }
             CompactionTriggerReason::Periodic => {
                 add_saturating(&self.trigger_periodic, 1);
-                if self.emit_logs {
-                    eprintln!("compaction trigger: periodic");
-                }
             }
+        }
+        if self.emit_logs {
+            log_debug!(
+                component = "compaction",
+                event = "compaction_trigger",
+                reason = trigger.as_str(),
+            );
         }
     }
 
@@ -396,16 +447,11 @@ impl CompactionMetrics {
             }
         }
         if self.emit_logs {
-            eprintln!(
-                "compaction scheduler drop: context={} reason={}",
-                match context {
-                    CompactionQueueDropContext::Planner => "planner",
-                    CompactionQueueDropContext::Cascade => "cascade",
-                },
-                match reason {
-                    CompactionQueueDropReason::Full => "full",
-                    CompactionQueueDropReason::Closed => "closed",
-                }
+            log_warn!(
+                component = "compaction",
+                event = "compaction_queue_drop",
+                context = context.as_str(),
+                reason = reason.as_str(),
             );
         }
     }
@@ -415,22 +461,20 @@ impl CompactionMetrics {
         match decision {
             CompactionCascadeDecision::Scheduled => {
                 add_saturating(&self.cascades_scheduled, 1);
-                if self.emit_logs {
-                    eprintln!("compaction cascade: scheduled");
-                }
             }
             CompactionCascadeDecision::BlockedCooldown => {
                 add_saturating(&self.cascades_blocked_cooldown, 1);
-                if self.emit_logs {
-                    eprintln!("compaction cascade: blocked (cooldown)");
-                }
             }
             CompactionCascadeDecision::BlockedBudget => {
                 add_saturating(&self.cascades_blocked_budget, 1);
-                if self.emit_logs {
-                    eprintln!("compaction cascade: blocked (budget)");
-                }
             }
+        }
+        if self.emit_logs {
+            log_info!(
+                component = "compaction",
+                event = "compaction_cascade_decision",
+                decision = decision.as_str(),
+            );
         }
     }
 
@@ -443,21 +487,28 @@ impl CompactionMetrics {
         match signal {
             CompactionBackpressureSignal::Slowdown => {
                 add_saturating(&self.backpressure_slowdown, 1);
-                if self.emit_logs {
-                    eprintln!(
-                        "compaction backpressure: slowdown delay_ms={}",
-                        duration_ms(delay)
-                    );
-                }
             }
             CompactionBackpressureSignal::Stall => {
                 add_saturating(&self.backpressure_stall, 1);
-                if self.emit_logs {
-                    eprintln!(
-                        "compaction backpressure: stall delay_ms={}",
-                        duration_ms(delay)
-                    );
-                }
+            }
+        }
+        let delay_ms = duration_ms(delay);
+        match signal {
+            CompactionBackpressureSignal::Slowdown => {
+                log_info!(
+                    component = "compaction",
+                    event = "compaction_backpressure",
+                    signal = signal.as_str(),
+                    delay_ms,
+                );
+            }
+            CompactionBackpressureSignal::Stall => {
+                log_warn!(
+                    component = "compaction",
+                    event = "compaction_backpressure",
+                    signal = signal.as_str(),
+                    delay_ms,
+                );
             }
         }
     }
@@ -531,26 +582,25 @@ impl CompactionMetrics {
     }
 
     fn log_job(&self, status: &str, job: CompactionJobSnapshot) {
-        eprintln!(
-            "compaction job {status}: source=L{} target=L{} inputs={} outputs={} bytes_in={} \
-             bytes_out={} rows_in={} rows_out={} tombstones_in={} tombstones_out={} \
-             duration_ms={} cas_retries={} cas_aborted={} stats_in_complete={} \
-             stats_out_complete={}",
-            job.source_level,
-            job.target_level,
-            job.input_sst_count,
-            job.output_sst_count,
-            job.input.bytes,
-            job.output.bytes,
-            job.input.rows,
-            job.output.rows,
-            job.input.tombstones,
-            job.output.tombstones,
-            job.duration_ms,
-            job.cas_retries,
-            job.cas_aborted,
-            job.input.complete,
-            job.output.complete
+        log_info!(
+            component = "compaction",
+            event = "compaction_job_summary",
+            status,
+            source_level = job.source_level,
+            target_level = job.target_level,
+            input_count = job.input_sst_count,
+            output_count = job.output_sst_count,
+            input_bytes = job.input.bytes,
+            output_bytes = job.output.bytes,
+            input_rows = job.input.rows,
+            output_rows = job.output.rows,
+            input_tombstones = job.input.tombstones,
+            output_tombstones = job.output.tombstones,
+            duration_ms = job.duration_ms,
+            cas_retries = job.cas_retries,
+            cas_aborted = job.cas_aborted,
+            input_stats_complete = job.input.complete,
+            output_stats_complete = job.output.complete,
         );
     }
 }

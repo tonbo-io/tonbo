@@ -17,6 +17,7 @@ use std::{
 };
 
 use fusio::dynamic::MaybeSendFuture;
+use tracing::Instrument;
 use ulid::Ulid;
 
 use crate::{
@@ -296,50 +297,65 @@ impl CompactionExecutor for LocalCompactionExecutor {
         job: CompactionJob,
     ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
     {
-        Box::pin(async move {
-            if job.inputs.is_empty() {
-                return Err(CompactionError::NoInputs);
-            }
-            let _ = job.lease.as_ref();
-            let target = self.alloc_descriptor(job.task.target_level);
-            let (max_rows, max_bytes) = self.output_caps_for_level(job.task.target_level);
-            let merger = SsTableMerger::new(Arc::clone(&self.config), job.inputs.clone(), target)
-                .with_output_id_allocator(Arc::clone(&self.next_id))
-                .with_output_caps(max_rows, max_bytes);
-            let merged = merger.execute(fusio::executor::NoopExecutor).await?;
-            let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
-            let descriptors_for_outcome = {
-                #[cfg(test)]
-                {
-                    if self.corrupt_descriptors {
-                        let mut corrupted = descriptors.clone();
-                        if let Some(first) = corrupted.first_mut() {
-                            *first = SsTableDescriptor::new(first.id().clone(), first.level());
+        let source_level = job.task.source_level;
+        let target_level = job.task.target_level;
+        let input_count = job.inputs.len();
+        let span = tracing::info_span!(
+            "compaction::execute",
+            component = "compaction",
+            source_level,
+            target_level,
+            input_count,
+        );
+        Box::pin(
+            async move {
+                if job.inputs.is_empty() {
+                    return Err(CompactionError::NoInputs);
+                }
+                let _ = job.lease.as_ref();
+                let target = self.alloc_descriptor(job.task.target_level);
+                let (max_rows, max_bytes) = self.output_caps_for_level(job.task.target_level);
+                let merger =
+                    SsTableMerger::new(Arc::clone(&self.config), job.inputs.clone(), target)
+                        .with_output_id_allocator(Arc::clone(&self.next_id))
+                        .with_output_caps(max_rows, max_bytes);
+                let merged = merger.execute(fusio::executor::NoopExecutor).await?;
+                let descriptors: Vec<_> =
+                    merged.iter().map(|sst| sst.descriptor().clone()).collect();
+                let descriptors_for_outcome = {
+                    #[cfg(test)]
+                    {
+                        if self.corrupt_descriptors {
+                            let mut corrupted = descriptors.clone();
+                            if let Some(first) = corrupted.first_mut() {
+                                *first = SsTableDescriptor::new(first.id().clone(), first.level());
+                            }
+                            corrupted
+                        } else {
+                            descriptors.clone()
                         }
-                        corrupted
-                    } else {
+                    }
+                    #[cfg(not(test))]
+                    {
                         descriptors.clone()
                     }
-                }
-                #[cfg(not(test))]
-                {
-                    descriptors.clone()
-                }
-            };
-            match CompactionOutcome::from_outputs(
-                descriptors_for_outcome,
-                job.inputs,
-                job.task.target_level as u32,
-                None,
-            ) {
-                Ok(outcome) => Ok(outcome),
-                Err(err) => {
-                    // Best-effort cleanup for partial outputs; surface original error.
-                    let _ = self.cleanup_outputs(&descriptors).await;
-                    Err(err)
+                };
+                match CompactionOutcome::from_outputs(
+                    descriptors_for_outcome,
+                    job.inputs,
+                    job.task.target_level as u32,
+                    None,
+                ) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(err) => {
+                        // Best-effort cleanup for partial outputs; surface original error.
+                        let _ = self.cleanup_outputs(&descriptors).await;
+                        Err(err)
+                    }
                 }
             }
-        })
+            .instrument(span),
+        )
     }
 
     fn cleanup_outputs<'a>(

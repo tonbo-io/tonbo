@@ -16,6 +16,7 @@ use fusio::{
     executor::{Executor, Instant, RwLock, Timer},
 };
 use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle, lock::Mutex};
+use tracing::instrument;
 
 use crate::{
     compaction::{
@@ -31,6 +32,7 @@ use crate::{
     },
     db::{CasBackoffConfig, CascadeConfig},
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
+    observability::{log_debug, log_info, log_warn},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
 
@@ -214,14 +216,18 @@ where
                     }
                 }
                 if cfg.prune_dry_run {
-                    eprintln!(
-                        "wal prune dry-run: floor {} would remove {removed} segment(s)",
-                        floor.seq()
+                    log_info!(
+                        component = "wal",
+                        event = "wal_prune_dry_run",
+                        floor_seq = floor.seq(),
+                        removed_segments = removed,
                     );
                 } else if removed > 0 {
-                    eprintln!(
-                        "wal prune removed {removed} segment(s) below floor {}",
-                        floor.seq(),
+                    log_info!(
+                        component = "wal",
+                        event = "wal_prune_completed",
+                        floor_seq = floor.seq(),
+                        removed_segments = removed,
                     );
                 }
             }
@@ -231,10 +237,11 @@ where
                     let mut guard = metrics.write().await;
                     guard.record_wal_prune_failure();
                 }
-                eprintln!(
-                    "failed to prune wal segments below manifest floor {}: {}",
-                    floor.seq(),
-                    err
+                log_warn!(
+                    component = "wal",
+                    event = "wal_prune_failed",
+                    floor_seq = floor.seq(),
+                    error = ?err,
                 );
             }
         }
@@ -329,6 +336,87 @@ where
         }
     }
 
+    fn estimated_bytes(stats: &CompactionIoStats) -> Option<u64> {
+        stats.complete.then_some(stats.bytes)
+    }
+
+    fn log_plan_event(
+        source_level: usize,
+        target_level: usize,
+        input_count: usize,
+        stats: &CompactionIoStats,
+    ) {
+        let estimated_bytes = Self::estimated_bytes(stats);
+        log_debug!(
+            component = "compaction",
+            event = "compaction_plan_built",
+            source_level,
+            target_level,
+            input_count,
+            estimated_bytes = ?estimated_bytes,
+        );
+    }
+
+    fn log_execute_start(
+        source_level: usize,
+        target_level: usize,
+        input_count: usize,
+        stats: &CompactionIoStats,
+    ) {
+        log_info!(
+            component = "compaction",
+            event = "compaction_execute_start",
+            source_level,
+            target_level,
+            input_count,
+            input_bytes = stats.bytes,
+            input_rows = stats.rows,
+            input_tombstones = stats.tombstones,
+            input_stats_complete = stats.complete,
+        );
+    }
+
+    fn log_execute_complete(
+        source_level: usize,
+        target_level: usize,
+        input_count: usize,
+        output_count: usize,
+        duration_ms: u64,
+        output_stats: &CompactionIoStats,
+    ) {
+        log_info!(
+            component = "compaction",
+            event = "compaction_execute_complete",
+            source_level,
+            target_level,
+            input_count,
+            output_count,
+            duration_ms,
+            output_bytes = output_stats.bytes,
+            output_rows = output_stats.rows,
+            output_tombstones = output_stats.tombstones,
+            output_stats_complete = output_stats.complete,
+        );
+    }
+
+    fn log_execute_failed(
+        source_level: usize,
+        target_level: usize,
+        input_count: usize,
+        duration_ms: u64,
+        err: &CompactionError,
+    ) {
+        log_warn!(
+            component = "compaction",
+            event = "compaction_execute_failed",
+            source_level,
+            target_level,
+            input_count,
+            duration_ms,
+            error = ?err,
+        );
+    }
+
     fn record_job_success(&self, job: CompactionJobSnapshot) {
         if let Some(metrics) = self.compaction_metrics.as_ref() {
             metrics.record_job_success(job);
@@ -343,6 +431,11 @@ where
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[cfg(all(test, feature = "tokio"))]
+    #[instrument(
+        name = "compaction::run",
+        skip(self, planner, executor),
+        fields(component = "compaction", table_id = ?self.table_id)
+    )]
     pub(crate) async fn run_compaction<CE, P>(
         &self,
         planner: &P,
@@ -378,6 +471,7 @@ where
             let input_count = inputs.len();
             let source_level = task.source_level;
             let target_level = task.target_level;
+            Self::log_plan_event(source_level, target_level, input_count, &input_stats);
             if job_started_at.is_none() {
                 job_started_at = Some(self.runtime.now());
             }
@@ -389,9 +483,19 @@ where
                 lease: None,
             };
 
+            Self::log_execute_start(source_level, target_level, input_count, &input_stats);
+            let exec_started_at = self.runtime.now();
             let outcome = match executor.execute(job).await {
                 Ok(outcome) => outcome,
                 Err(err) => {
+                    let exec_duration = self.runtime.now().duration_since(exec_started_at);
+                    Self::log_execute_failed(
+                        source_level,
+                        target_level,
+                        input_count,
+                        exec_duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        &err,
+                    );
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
                     self.record_job_abort(CompactionJobSnapshot {
@@ -408,6 +512,16 @@ where
                     return Err(err);
                 }
             };
+            let exec_duration = self.runtime.now().duration_since(exec_started_at);
+            let (output_count, output_stats) = Self::output_stats(&outcome);
+            Self::log_execute_complete(
+                source_level,
+                target_level,
+                input_count,
+                output_count,
+                exec_duration.as_millis().try_into().unwrap_or(u64::MAX),
+                &output_stats,
+            );
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -419,7 +533,6 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
-                let (output_count, output_stats) = Self::output_stats(&outcome);
                 let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                 let duration = self.runtime.now().duration_since(started_at);
                 self.record_job_success(CompactionJobSnapshot {
@@ -435,6 +548,13 @@ where
                 });
                 return Ok(Some(outcome));
             }
+            log_debug!(
+                component = "manifest",
+                event = "manifest_cas_attempt",
+                table_id = ?self.table_id,
+                attempt = attempts,
+                max_retries = MAX_COMPACTION_APPLY_RETRIES,
+            );
             match self
                 .manifest
                 .apply_version_edits_cas(self.table_id, expected_head, &edits)
@@ -448,7 +568,6 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
-                    let (output_count, output_stats) = Self::output_stats(&outcome);
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
                     self.record_job_success(CompactionJobSnapshot {
@@ -468,6 +587,13 @@ where
                     executor.cleanup_outputs(&outcome.outputs).await?;
                     cas_retries = cas_retries.saturating_add(1);
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        log_warn!(
+                            component = "manifest",
+                            event = "manifest_cas_failed",
+                            table_id = ?self.table_id,
+                            attempt = attempts,
+                            max_retries = MAX_COMPACTION_APPLY_RETRIES,
+                        );
                         let (output_count, output_stats) = Self::output_stats(&outcome);
                         let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                         let duration = self.runtime.now().duration_since(started_at);
@@ -484,11 +610,24 @@ where
                         });
                         return Err(CompactionError::CasConflict);
                     }
+                    log_warn!(
+                        component = "manifest",
+                        event = "manifest_cas_retry",
+                        table_id = ?self.table_id,
+                        attempt = attempts,
+                        max_retries = MAX_COMPACTION_APPLY_RETRIES,
+                    );
                     self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    log_warn!(
+                        component = "manifest",
+                        event = "manifest_apply_failed",
+                        table_id = ?self.table_id,
+                        error = ?err,
+                    );
                     let (output_count, output_stats) = Self::output_stats(&outcome);
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
@@ -510,6 +649,17 @@ where
     }
 
     /// Execute a pre-scheduled compaction task with lease validation.
+    #[instrument(
+        name = "compaction::run_scheduled",
+        skip(self, scheduled, executor),
+        fields(
+            component = "compaction",
+            table_id = ?self.table_id,
+            source_level = scheduled.task.source_level,
+            target_level = scheduled.task.target_level,
+            input_count = scheduled.task.input.len()
+        )
+    )]
     async fn run_scheduled_compaction<CE>(
         &self,
         scheduled: ScheduledCompaction,
@@ -545,6 +695,7 @@ where
             let input_count = inputs.len();
             let source_level = scheduled.task.source_level;
             let target_level = scheduled.task.target_level;
+            Self::log_plan_event(source_level, target_level, input_count, &input_stats);
             if job_started_at.is_none() {
                 job_started_at = Some(self.runtime.now());
             }
@@ -556,9 +707,19 @@ where
                 lease: Some(scheduled.lease.clone()),
             };
 
+            Self::log_execute_start(source_level, target_level, input_count, &input_stats);
+            let exec_started_at = self.runtime.now();
             let outcome = match executor.execute(job).await {
                 Ok(outcome) => outcome,
                 Err(err) => {
+                    let exec_duration = self.runtime.now().duration_since(exec_started_at);
+                    Self::log_execute_failed(
+                        source_level,
+                        target_level,
+                        input_count,
+                        exec_duration.as_millis().try_into().unwrap_or(u64::MAX),
+                        &err,
+                    );
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
                     self.record_job_abort(CompactionJobSnapshot {
@@ -575,6 +736,16 @@ where
                     return Err(err);
                 }
             };
+            let exec_duration = self.runtime.now().duration_since(exec_started_at);
+            let (output_count, output_stats) = Self::output_stats(&outcome);
+            Self::log_execute_complete(
+                source_level,
+                target_level,
+                input_count,
+                output_count,
+                exec_duration.as_millis().try_into().unwrap_or(u64::MAX),
+                &output_stats,
+            );
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
             orchestrator::reconcile_wal_segments(
@@ -586,7 +757,6 @@ where
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
-                let (output_count, output_stats) = Self::output_stats(&outcome);
                 let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                 let duration = self.runtime.now().duration_since(started_at);
                 self.record_job_success(CompactionJobSnapshot {
@@ -603,6 +773,13 @@ where
                 return Ok(Some(outcome));
             }
             let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
+            log_debug!(
+                component = "manifest",
+                event = "manifest_cas_attempt",
+                table_id = ?self.table_id,
+                attempt = attempts,
+                max_retries = MAX_COMPACTION_APPLY_RETRIES,
+            );
             match self
                 .manifest
                 .apply_version_edits_cas(self.table_id, expected_head, &edits)
@@ -616,7 +793,6 @@ where
                             .await
                             .map_err(CompactionError::Manifest)?;
                     }
-                    let (output_count, output_stats) = Self::output_stats(&outcome);
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
                     self.record_job_success(CompactionJobSnapshot {
@@ -636,6 +812,13 @@ where
                     executor.cleanup_outputs(&outcome.outputs).await?;
                     cas_retries = cas_retries.saturating_add(1);
                     if attempts >= MAX_COMPACTION_APPLY_RETRIES {
+                        log_warn!(
+                            component = "manifest",
+                            event = "manifest_cas_failed",
+                            table_id = ?self.table_id,
+                            attempt = attempts,
+                            max_retries = MAX_COMPACTION_APPLY_RETRIES,
+                        );
                         let (output_count, output_stats) = Self::output_stats(&outcome);
                         let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                         let duration = self.runtime.now().duration_since(started_at);
@@ -652,11 +835,24 @@ where
                         });
                         return Err(CompactionError::CasConflict);
                     }
+                    log_warn!(
+                        component = "manifest",
+                        event = "manifest_cas_retry",
+                        table_id = ?self.table_id,
+                        attempt = attempts,
+                        max_retries = MAX_COMPACTION_APPLY_RETRIES,
+                    );
                     self.sleep_cas_backoff(attempts).await;
                     continue;
                 }
                 Err(err) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
+                    log_warn!(
+                        component = "manifest",
+                        event = "manifest_apply_failed",
+                        table_id = ?self.table_id,
+                        error = ?err,
+                    );
                     let (output_count, output_stats) = Self::output_stats(&outcome);
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
@@ -713,10 +909,18 @@ where
         for _ in 0..budget {
             match self.plan_compaction_task(planner).await {
                 Ok(Some(task)) => {
+                    let source_level = task.source_level;
+                    let target_level = task.target_level;
+                    let input_count = task.input.len();
                     let manifest_head = match self.manifest.snapshot_latest(self.table_id).await {
                         Ok(snapshot) => snapshot.head.last_manifest_txn,
                         Err(err) => {
-                            eprintln!("compaction snapshot failed: {err}");
+                            log_warn!(
+                                component = "compaction",
+                                event = "compaction_snapshot_failed",
+                                table_id = ?self.table_id,
+                                error = ?err,
+                            );
                             continue;
                         }
                     };
@@ -724,7 +928,15 @@ where
                         .enqueue(task, manifest_head, "local-compaction", lease_ttl_ms)
                         .await
                     {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            log_debug!(
+                                component = "compaction",
+                                event = "compaction_scheduled",
+                                source_level,
+                                target_level,
+                                input_count,
+                            );
+                        }
                         Err(CompactionScheduleError::Full) => {
                             if let Some(metrics) = metrics {
                                 metrics.record_queue_drop(
@@ -732,7 +944,12 @@ where
                                     CompactionQueueDropReason::Full,
                                 );
                             }
-                            eprintln!("compaction scheduler queue full; dropping task");
+                            log_warn!(
+                                component = "compaction",
+                                event = "compaction_queue_drop",
+                                context = CompactionQueueDropContext::Planner.as_str(),
+                                reason = CompactionQueueDropReason::Full.as_str(),
+                            );
                             break;
                         }
                         Err(CompactionScheduleError::Closed) => {
@@ -742,13 +959,24 @@ where
                                     CompactionQueueDropReason::Closed,
                                 );
                             }
+                            log_warn!(
+                                component = "compaction",
+                                event = "compaction_queue_drop",
+                                context = CompactionQueueDropContext::Planner.as_str(),
+                                reason = CompactionQueueDropReason::Closed.as_str(),
+                            );
                             return Err(CompactionScheduleError::Closed);
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    eprintln!("compaction planner failed: {err}");
+                    log_warn!(
+                        component = "compaction",
+                        event = "compaction_plan_failed",
+                        table_id = ?self.table_id,
+                        error = ?err,
+                    );
                     break;
                 }
             }
@@ -791,7 +1019,11 @@ where
                         Ok(Some(outcome)) => outcome,
                         Ok(None) => return,
                         Err(err) => {
-                            eprintln!("scheduled compaction failed: {err}");
+                            log_warn!(
+                                component = "compaction",
+                                event = "compaction_job_failed",
+                                error = ?err,
+                            );
                             return;
                         }
                     };
@@ -811,6 +1043,11 @@ where
                                     metrics
                                         .record_cascade(CompactionCascadeDecision::BlockedBudget);
                                 }
+                                log_info!(
+                                    component = "compaction",
+                                    event = "compaction_cascade_decision",
+                                    decision = CompactionCascadeDecision::BlockedBudget.as_str(),
+                                );
                                 return;
                             }
                             CascadeDecision::CooldownActive => {
@@ -818,6 +1055,11 @@ where
                                     metrics
                                         .record_cascade(CompactionCascadeDecision::BlockedCooldown);
                                 }
+                                log_info!(
+                                    component = "compaction",
+                                    event = "compaction_cascade_decision",
+                                    decision = CompactionCascadeDecision::BlockedCooldown.as_str(),
+                                );
                                 return;
                             }
                         }
@@ -831,7 +1073,12 @@ where
                             match driver.manifest.snapshot_latest(driver.table_id).await {
                                 Ok(snapshot) => snapshot.head.last_manifest_txn,
                                 Err(err) => {
-                                    eprintln!("cascade snapshot failed: {err}");
+                                    log_warn!(
+                                        component = "compaction",
+                                        event = "compaction_snapshot_failed",
+                                        table_id = ?driver.table_id,
+                                        error = ?err,
+                                    );
                                     return;
                                 }
                             };
@@ -843,6 +1090,11 @@ where
                                 if let Some(metrics) = metrics.as_ref() {
                                     metrics.record_cascade(CompactionCascadeDecision::Scheduled);
                                 }
+                                log_info!(
+                                    component = "compaction",
+                                    event = "compaction_cascade_decision",
+                                    decision = CompactionCascadeDecision::Scheduled.as_str(),
+                                );
                                 let _ = cascade_trigger.try_send(CompactionTrigger::Kick);
                             }
                             Err(CompactionScheduleError::Full) => {
@@ -852,7 +1104,12 @@ where
                                         CompactionQueueDropReason::Full,
                                     );
                                 }
-                                eprintln!("compaction scheduler queue full; dropping cascade");
+                                log_warn!(
+                                    component = "compaction",
+                                    event = "compaction_queue_drop",
+                                    context = CompactionQueueDropContext::Cascade.as_str(),
+                                    reason = CompactionQueueDropReason::Full.as_str(),
+                                );
                             }
                             Err(CompactionScheduleError::Closed) => {
                                 if let Some(metrics) = metrics.as_ref() {
@@ -861,7 +1118,12 @@ where
                                         CompactionQueueDropReason::Closed,
                                     );
                                 }
-                                eprintln!("compaction scheduler closed");
+                                log_warn!(
+                                    component = "compaction",
+                                    event = "compaction_queue_drop",
+                                    context = CompactionQueueDropContext::Cascade.as_str(),
+                                    reason = CompactionQueueDropReason::Closed.as_str(),
+                                );
                             }
                         }
                     }
@@ -879,7 +1141,12 @@ where
             Ok(Some(_)) => true,
             Ok(None) => false,
             Err(err) => {
-                eprintln!("compaction planner failed: {err}");
+                log_warn!(
+                    component = "compaction",
+                    event = "compaction_plan_failed",
+                    table_id = ?self.table_id,
+                    error = ?err,
+                );
                 false
             }
         }
@@ -949,7 +1216,11 @@ where
                     .plan_and_enqueue(planner.as_ref(), &scheduler, budget, lease_ttl_ms)
                     .await
                 {
-                    eprintln!("compaction scheduler closed: {err}");
+                    log_warn!(
+                        component = "compaction",
+                        event = "compaction_scheduler_closed",
+                        error = ?err,
+                    );
                     return;
                 }
 
@@ -967,7 +1238,11 @@ where
                 {
                     Ok(applied_manifest) => applied_manifest,
                     Err(err) => {
-                        eprintln!("compaction scheduler drain stopped: {err}");
+                        log_warn!(
+                            component = "compaction",
+                            event = "compaction_scheduler_drain_stopped",
+                            error = ?err,
+                        );
                         return;
                     }
                 };
