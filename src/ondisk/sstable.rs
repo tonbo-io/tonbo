@@ -1085,15 +1085,36 @@ impl SsTableReader {
     }
 }
 
-fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Result<Option<Expr>, SsTableError> {
+#[derive(Debug, Clone)]
+pub(crate) struct PredicateSplit {
+    pub(crate) pushdown: Option<Expr>,
+    pub(crate) residual: Option<Expr>,
+}
+
+pub(crate) fn split_predicate_for_row_filter(
+    predicate: &Expr,
+    schema: &SchemaRef,
+) -> PredicateSplit {
     match predicate {
-        Expr::True => Ok(None),
-        Expr::False => Ok(Some(Expr::False)),
+        Expr::True => PredicateSplit {
+            pushdown: None,
+            residual: None,
+        },
+        Expr::False => PredicateSplit {
+            pushdown: Some(Expr::False),
+            residual: None,
+        },
         Expr::Cmp { column, value, .. } => {
             if scalar_matches_column(schema, column, value) {
-                Ok(Some(predicate.clone()))
+                PredicateSplit {
+                    pushdown: Some(predicate.clone()),
+                    residual: None,
+                }
             } else {
-                Ok(None)
+                PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                }
             }
         }
         Expr::Between {
@@ -1102,77 +1123,154 @@ fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Result<Option<Expr>,
             if scalar_matches_column(schema, column, low)
                 && scalar_matches_column(schema, column, high)
             {
-                Ok(Some(predicate.clone()))
+                PredicateSplit {
+                    pushdown: Some(predicate.clone()),
+                    residual: None,
+                }
             } else {
-                Ok(None)
+                PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                }
             }
         }
         Expr::InList { column, values } => {
             if scalars_match_column(schema, column, values) {
-                Ok(Some(predicate.clone()))
+                PredicateSplit {
+                    pushdown: Some(predicate.clone()),
+                    residual: None,
+                }
             } else {
-                Ok(None)
+                PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                }
             }
         }
         Expr::StartsWith { column, .. } => {
             if is_string_column(schema, column) {
-                Ok(Some(predicate.clone()))
+                PredicateSplit {
+                    pushdown: Some(predicate.clone()),
+                    residual: None,
+                }
             } else {
-                Ok(None)
+                PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                }
             }
         }
         Expr::IsNull { column, .. } => {
             if column_type(schema, column).is_some() {
-                Ok(Some(predicate.clone()))
+                PredicateSplit {
+                    pushdown: Some(predicate.clone()),
+                    residual: None,
+                }
             } else {
-                Ok(None)
-            }
-        }
-        Expr::BloomFilterEq { column, .. } => Err(SsTableError::RowFilterPredicate {
-            reason: format!(
-                "BloomFilterEq predicate on column '{column}' is not supported for row filtering"
-            ),
-        }),
-        Expr::BloomFilterInList { column, .. } => Err(SsTableError::RowFilterPredicate {
-            reason: format!(
-                "BloomFilterInList predicate on column '{column}' is not supported for row \
-                 filtering"
-            ),
-        }),
-        Expr::And(children) => {
-            let mut supported = Vec::new();
-            for child in children {
-                if let Some(expr) = row_filter_expr(child, schema)? {
-                    supported.push(expr);
+                PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
                 }
             }
-            Ok(match supported.len() {
-                0 => None,
-                1 => Some(supported.remove(0)),
-                _ => Some(Expr::And(supported)),
-            })
+        }
+        Expr::BloomFilterEq { .. } | Expr::BloomFilterInList { .. } => PredicateSplit {
+            pushdown: None,
+            residual: Some(predicate.clone()),
+        },
+        Expr::And(children) => {
+            let mut pushdown = Vec::new();
+            let mut residual = Vec::new();
+            for child in children {
+                let split = split_predicate_for_row_filter(child, schema);
+                if let Some(expr) = split.pushdown {
+                    pushdown.push(expr);
+                }
+                if let Some(expr) = split.residual {
+                    residual.push(expr);
+                }
+            }
+            PredicateSplit {
+                pushdown: combine_and(pushdown),
+                residual: combine_and(residual),
+            }
         }
         Expr::Or(children) => {
-            let mut supported = Vec::new();
+            if children.is_empty() {
+                return PredicateSplit {
+                    pushdown: Some(Expr::False),
+                    residual: None,
+                };
+            }
+            let mut pushdown = Vec::new();
             for child in children {
-                match row_filter_expr(child, schema)? {
-                    Some(expr) => supported.push(expr),
-                    None => return Ok(None),
+                let split = split_predicate_for_row_filter(child, schema);
+                if split.residual.is_some() {
+                    return PredicateSplit {
+                        pushdown: None,
+                        residual: Some(predicate.clone()),
+                    };
+                }
+                match split.pushdown {
+                    Some(expr) => pushdown.push(expr),
+                    None => {
+                        // Child is fully supported but represents no filter (True).
+                        return PredicateSplit {
+                            pushdown: None,
+                            residual: None,
+                        };
+                    }
                 }
             }
-            Ok(match supported.len() {
-                0 => None,
-                1 => Some(supported.remove(0)),
-                _ => Some(Expr::Or(supported)),
-            })
+            PredicateSplit {
+                pushdown: combine_or(pushdown),
+                residual: None,
+            }
         }
         Expr::Not(child) => {
-            Ok(row_filter_expr(child, schema)?.map(|expr| Expr::Not(Box::new(expr))))
+            let split = split_predicate_for_row_filter(child, schema);
+            if split.residual.is_some() {
+                return PredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                };
+            }
+            if split.pushdown.is_none() {
+                return PredicateSplit {
+                    pushdown: Some(Expr::False),
+                    residual: None,
+                };
+            }
+            let pushdown = split.pushdown.map(|expr| Expr::Not(Box::new(expr)));
+            PredicateSplit {
+                pushdown,
+                residual: None,
+            }
         }
-        other => Err(SsTableError::RowFilterPredicate {
-            reason: format!("unsupported predicate variant: {other:?}"),
-        }),
+        _ => PredicateSplit {
+            pushdown: None,
+            residual: Some(predicate.clone()),
+        },
     }
+}
+
+fn combine_and(mut parts: Vec<Expr>) -> Option<Expr> {
+    match parts.len() {
+        0 => None,
+        1 => Some(parts.remove(0)),
+        _ => Some(Expr::And(parts)),
+    }
+}
+
+fn combine_or(mut parts: Vec<Expr>) -> Option<Expr> {
+    match parts.len() {
+        0 => None,
+        1 => Some(parts.remove(0)),
+        _ => Some(Expr::Or(parts)),
+    }
+}
+
+fn row_filter_expr(predicate: &Expr, schema: &SchemaRef) -> Result<Option<Expr>, SsTableError> {
+    Ok(split_predicate_for_row_filter(predicate, schema).pushdown)
 }
 
 async fn build_projection_mask_for_names<E>(
