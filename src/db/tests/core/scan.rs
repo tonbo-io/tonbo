@@ -899,6 +899,72 @@ async fn scan_row_filter_respects_tombstones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_keeps_delete_sidecar_when_data_pruned() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_cfg = Arc::new(SsTableConfig::new(
+        schema.clone(),
+        Arc::clone(&db.fs),
+        Path::from("scan-delete-sidecar-prune"),
+    ));
+
+    let upsert_rows = vec![DynRow(vec![
+        Some(DynCell::Str("k01".into())),
+        Some(DynCell::I32(10)),
+    ])];
+    let upsert = build_batch(schema.clone(), upsert_rows).expect("upsert");
+    db.ingest_with_tombstones(upsert, vec![false])
+        .await
+        .expect("upsert ingest");
+
+    let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
+    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+        .await
+        .expect("flush sst0");
+
+    let upsert_rows = vec![DynRow(vec![
+        Some(DynCell::Str("k02".into())),
+        Some(DynCell::I32(20)),
+    ])];
+    let upsert = build_batch(schema.clone(), upsert_rows).expect("upsert");
+    db.ingest_with_tombstones(upsert, vec![false])
+        .await
+        .expect("upsert ingest");
+
+    let delete_rows = vec![DynRow(vec![
+        Some(DynCell::Str("k01".into())),
+        Some(DynCell::I32(0)),
+    ])];
+    let delete = build_batch(schema.clone(), delete_rows).expect("delete");
+    db.ingest_with_tombstones(delete, vec![true])
+        .await
+        .expect("delete ingest");
+
+    let descriptor = SsTableDescriptor::new(SsTableId::new(2), 0);
+    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+        .await
+        .expect("flush sst1");
+
+    let predicate = Expr::eq("id", ScalarValue::from("k01"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert!(
+        ids.is_empty(),
+        "delete sidecar should suppress k01 from older SST"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn scan_projection_respects_tombstones() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),

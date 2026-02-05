@@ -255,7 +255,8 @@ impl TxSnapshot {
                 &key_schema,
             )
             .await?;
-            if selection.row_set.is_empty() {
+            let has_delete_sidecar = entry.delete_path().is_some();
+            if selection.row_set.is_empty() && !has_delete_sidecar {
                 continue;
             }
             if requires_residual {
