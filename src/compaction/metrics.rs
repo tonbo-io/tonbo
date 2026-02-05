@@ -492,23 +492,25 @@ impl CompactionMetrics {
                 add_saturating(&self.backpressure_stall, 1);
             }
         }
-        let delay_ms = duration_ms(delay);
-        match signal {
-            CompactionBackpressureSignal::Slowdown => {
-                log_info!(
-                    component = "compaction",
-                    event = "compaction_backpressure",
-                    signal = signal.as_str(),
-                    delay_ms,
-                );
-            }
-            CompactionBackpressureSignal::Stall => {
-                log_warn!(
-                    component = "compaction",
-                    event = "compaction_backpressure",
-                    signal = signal.as_str(),
-                    delay_ms,
-                );
+        if self.emit_logs {
+            let delay_ms = duration_ms(delay);
+            match signal {
+                CompactionBackpressureSignal::Slowdown => {
+                    log_info!(
+                        component = "compaction",
+                        event = "compaction_backpressure",
+                        signal = signal.as_str(),
+                        delay_ms,
+                    );
+                }
+                CompactionBackpressureSignal::Stall => {
+                    log_warn!(
+                        component = "compaction",
+                        event = "compaction_backpressure",
+                        signal = signal.as_str(),
+                        delay_ms,
+                    );
+                }
             }
         }
     }
