@@ -686,10 +686,16 @@ where
             let mut sleep = runtime.sleep(interval).fuse();
             futures::select_biased! {
                 _ = sleep => Some(CompactionTriggerReason::Periodic),
-                msg = tick_rx.next() => msg.map(|_| CompactionTriggerReason::Kick),
+                msg = tick_rx.next() => match msg {
+                    Some(CompactionTrigger::Kick) => Some(CompactionTriggerReason::Kick),
+                    Some(CompactionTrigger::Shutdown) | None => None,
+                },
             }
         } else {
-            tick_rx.next().await.map(|_| CompactionTriggerReason::Kick)
+            match tick_rx.next().await {
+                Some(CompactionTrigger::Kick) => Some(CompactionTriggerReason::Kick),
+                Some(CompactionTrigger::Shutdown) | None => None,
+            }
         }
     }
 

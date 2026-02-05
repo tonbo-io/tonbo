@@ -1,5 +1,6 @@
 mod common;
 mod compaction;
+mod compaction_correctness;
 mod flush;
 mod ingest;
 mod metadata;

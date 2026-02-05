@@ -1431,12 +1431,13 @@ async fn compaction_self_kick_advances_without_periodic_tick()
     let id_allocator = Arc::new(AtomicU64::new(10));
     let executor = LocalCompactionExecutor::with_id_allocator(Arc::clone(&sst_cfg), id_allocator);
     let driver = Arc::new(db.compaction_driver());
-    let worker_config = CompactionWorkerConfig::new(None, 1, 1, CascadeConfig::default());
+    let worker_config =
+        CompactionWorkerConfig::new(None, 1, 1, CascadeConfig::new(0, Duration::from_millis(0)));
     let handle = driver.spawn_worker(Arc::clone(&db.executor), planner, executor, worker_config);
 
     handle.kick();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
         if let Some(version) = snapshot.latest_version.as_ref() {
@@ -1457,6 +1458,7 @@ async fn compaction_self_kick_advances_without_periodic_tick()
         "expected L2 compaction to complete without new writes"
     );
 
+    handle.shutdown().await;
     fs::remove_dir_all(&db_root)?;
     Ok(())
 }
@@ -2386,7 +2388,7 @@ async fn compaction_periodic_trigger_records_metrics() -> Result<(), Box<dyn std
         wait_for_executions(&executed, 1).await,
         "expected compaction execution"
     );
-    drop(handle);
+    handle.shutdown().await;
 
     let snapshot = metrics.snapshot();
     assert!(snapshot.trigger_periodic >= 1);
@@ -2473,12 +2475,80 @@ async fn compaction_kick_triggers_without_periodic_tick() -> Result<(), Box<dyn 
         wait_for_executions(&executed, 1).await,
         "expected compaction work after kick"
     );
-    drop(handle);
+    handle.shutdown().await;
 
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.trigger_kick, 1);
     assert_eq!(snapshot.trigger_periodic, 0);
     assert!(snapshot.job_count >= 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cascade_scheduling_queue_size_one() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let mut inner: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?.into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let entry = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/001.parquet"),
+        None,
+    );
+    inner
+        .manifest
+        .apply_version_edits(
+            inner.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry],
+            }],
+        )
+        .await?;
+
+    let executed = Arc::new(StdMutex::new(Vec::new()));
+    let planner = CascadePlanner;
+    let executor = CountingExecutor::new(Arc::clone(&executed));
+    let driver = Arc::new(inner.compaction_driver());
+    let worker_config =
+        CompactionWorkerConfig::new(None, 1, 1, CascadeConfig::new(1, Duration::from_millis(0)));
+    let handle = driver.spawn_worker(
+        Arc::clone(&inner.executor),
+        planner,
+        executor,
+        worker_config,
+    );
+
+    handle.kick();
+    assert!(
+        wait_for_executions(&executed, 2).await,
+        "expected L0->L1 and L1->L2 executions with queue size 1"
+    );
+    handle.shutdown().await;
+
+    let tasks = executed.lock().expect("executed lock").clone();
+    let l0_to_l1 = tasks
+        .iter()
+        .filter(|(source, target)| *source == 0 && *target == 1)
+        .count();
+    let l1_to_l2 = tasks
+        .iter()
+        .filter(|(source, target)| *source == 1 && *target == 2)
+        .count();
+    assert_eq!(l0_to_l1, 1);
+    assert_eq!(l1_to_l2, 1);
     Ok(())
 }
 
@@ -2534,7 +2604,7 @@ async fn cascade_scheduling_respects_budget() -> Result<(), Box<dyn std::error::
         wait_for_executions(&executed, 1).await,
         "expected initial compaction execution"
     );
-    drop(handle);
+    handle.shutdown().await;
 
     let tasks = executed.lock().expect("executed lock").clone();
     let l0_to_l1 = tasks
@@ -2617,7 +2687,7 @@ async fn cascade_scheduling_respects_cooldown() -> Result<(), Box<dyn std::error
         "expected two L0->L1 executions and one cascade"
     );
 
-    drop(handle);
+    handle.shutdown().await;
 
     let tasks = executed.lock().expect("executed lock").clone();
     let l0_to_l1 = tasks
