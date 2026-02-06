@@ -12,6 +12,7 @@ use fusio_manifest::{
     BackoffPolicy, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, ManifestContext,
     SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
+use tracing::instrument;
 
 use super::{
     ManifestFs,
@@ -22,7 +23,11 @@ use super::{
     driver::{Manifest, ManifestError, ManifestResult, Stores, VersionSnapshot},
     version::VersionEdit,
 };
-use crate::{id::FileIdGenerator, mvcc::Timestamp};
+use crate::{
+    id::FileIdGenerator,
+    mvcc::Timestamp,
+    observability::{log_debug, log_info},
+};
 
 /// Concrete manifest type alias for a given filesystem and executor.
 pub(super) type ManifestInstance<C, FS, E> = Manifest<
@@ -179,6 +184,11 @@ where
         self.catalog.init_catalog_root().await
     }
 
+    #[instrument(
+        name = "manifest::register_table",
+        skip(self, file_ids, definition),
+        fields(component = "manifest")
+    )]
     pub(crate) async fn register_table(
         &self,
         file_ids: &FileIdGenerator,
@@ -195,6 +205,12 @@ where
             },
         )
         .await?;
+        log_info!(
+            component = "manifest",
+            event = "manifest_table_registered",
+            table_id = ?meta.table_id,
+            schema_version = meta.schema_version,
+        );
         Ok(meta)
     }
 
@@ -285,6 +301,11 @@ where
 }
 
 /// Construct a manifest rooted under `root/manifest` using the provided filesystem backend.
+#[instrument(
+    name = "manifest::init_fs_manifest",
+    skip(fs, root, executor),
+    fields(component = "manifest")
+)]
 pub(crate) async fn init_fs_manifest<FS, E>(
     fs: FS,
     root: &Path,
@@ -315,6 +336,7 @@ where
     let gc_manifest = open_manifest_instance::<FS, GcPlanCodec, E>(fs.clone(), &gc_root, executor);
     let tonbo = TonboManifest::new(version_manifest, catalog_manifest, gc_manifest);
     tonbo.init_catalog().await?;
+    log_debug!(component = "manifest", event = "manifest_initialized",);
     Ok(tonbo)
 }
 
