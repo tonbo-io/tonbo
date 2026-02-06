@@ -165,7 +165,7 @@ impl TxSnapshot {
         let predicate_scan_schema =
             projection_with_predicate(&db.schema, projection_schema, Some(predicate))?;
         let split = split_predicate_for_row_filter(predicate, &predicate_scan_schema);
-        let pushdown_predicate = split.pushdown;
+        let mut pushdown_predicate = split.pushdown;
         let mut residual_predicate = split.residual;
         let read_ts = self.read_view().read_ts();
         let key_schema = db.extractor().key_schema();
@@ -219,6 +219,14 @@ impl TxSnapshot {
             executor: executor.clone(),
         };
         let has_non_sst = !mutable_row_set.is_empty() || !immutable_indexes.is_empty();
+        let non_sst_residual = if force_predicate_columns && !matches!(predicate, Expr::True) {
+            Some(predicate.clone())
+        } else if has_non_sst {
+            split_predicate_for_non_sst(predicate, &key_schema).residual
+        } else {
+            None
+        };
+        residual_predicate = combine_predicates_with_and(residual_predicate, non_sst_residual);
         let mut sst_selections = Vec::new();
         let mut sst_requires_full_residual = false;
         for entry in self
@@ -284,8 +292,10 @@ impl TxSnapshot {
             // schema cannot accept the pushdown portion.
             residual_predicate = Some(predicate.clone());
         }
-        let needs_predicate_columns =
-            force_predicate_columns || residual_predicate.is_some() || has_non_sst;
+        if sst_selections.is_empty() {
+            pushdown_predicate = None;
+        }
+        let needs_predicate_columns = force_predicate_columns || residual_predicate.is_some();
         let scan_schema = if needs_predicate_columns {
             Arc::clone(&predicate_scan_schema)
         } else {
@@ -577,15 +587,12 @@ where
                 >);
         }
 
-        let has_non_sst = !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
         let ScanPlan {
-            pushdown_predicate,
             residual_predicate,
             limit,
             ..
         } = plan;
-        let needs_post_filter =
-            residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+        let needs_post_filter = residual_predicate.is_some();
         let limit_for_merge = if needs_post_filter { None } else { limit };
         let limit_for_package = if needs_post_filter { limit } else { None };
         let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
@@ -596,7 +603,6 @@ where
             merge,
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
-            pushdown_predicate,
             residual_predicate,
             limit_for_package,
         )
@@ -1085,7 +1091,6 @@ where
         .clone()
         .unwrap_or_else(|| Arc::clone(&db.schema));
     let scan_schema = Arc::clone(&plan.scan_schema);
-    let has_txn_scan = txn_scan.is_some();
     let streams = db.build_scan_streams(&plan, txn_scan).await?;
 
     if streams.is_empty() {
@@ -1096,16 +1101,12 @@ where
             >);
     }
 
-    let has_non_sst =
-        has_txn_scan || !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
     let ScanPlan {
-        pushdown_predicate,
         residual_predicate,
         limit,
         ..
     } = plan;
-    let needs_post_filter =
-        residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+    let needs_post_filter = residual_predicate.is_some();
     let limit_for_merge = if needs_post_filter { None } else { limit };
     let limit_for_package = if needs_post_filter { limit } else { None };
     // Only apply limit early when no post-merge filtering is required.
@@ -1117,7 +1118,6 @@ where
         merge,
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
-        pushdown_predicate,
         residual_predicate,
         limit_for_package,
     )
@@ -1140,5 +1140,113 @@ fn find_bloom_filter_column(predicate: &Expr) -> Option<&str> {
             .find_map(|child| find_bloom_filter_column(child)),
         Expr::Not(child) => find_bloom_filter_column(child.as_ref()),
         _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct NonSstPredicateSplit {
+    pushdown: Option<Expr>,
+    residual: Option<Expr>,
+}
+
+fn split_predicate_for_non_sst(predicate: &Expr, key_schema: &SchemaRef) -> NonSstPredicateSplit {
+    if key_schema.fields().len() != 1 {
+        return NonSstPredicateSplit {
+            pushdown: None,
+            residual: Some(predicate.clone()),
+        };
+    }
+    let Some(key_field) = key_schema.fields().first() else {
+        return NonSstPredicateSplit {
+            pushdown: None,
+            residual: Some(predicate.clone()),
+        };
+    };
+    split_predicate_for_non_sst_inner(predicate, key_field.name())
+}
+
+fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonSstPredicateSplit {
+    match predicate {
+        Expr::True => NonSstPredicateSplit {
+            pushdown: None,
+            residual: None,
+        },
+        Expr::False => NonSstPredicateSplit {
+            pushdown: Some(Expr::False),
+            residual: None,
+        },
+        Expr::Cmp { column, op, .. } => {
+            if column != key_column || matches!(op, aisle::CmpOp::NotEq) {
+                return NonSstPredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                };
+            }
+            NonSstPredicateSplit {
+                pushdown: Some(predicate.clone()),
+                residual: None,
+            }
+        }
+        Expr::Between { column, .. } => {
+            if column != key_column {
+                return NonSstPredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                };
+            }
+            NonSstPredicateSplit {
+                pushdown: Some(predicate.clone()),
+                residual: None,
+            }
+        }
+        Expr::StartsWith { column, prefix } => {
+            if column != key_column || prefix.is_empty() {
+                return NonSstPredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                };
+            }
+            NonSstPredicateSplit {
+                pushdown: Some(predicate.clone()),
+                residual: None,
+            }
+        }
+        Expr::And(children) => {
+            let mut pushdown = Vec::new();
+            let mut residual = Vec::new();
+            for child in children {
+                let split = split_predicate_for_non_sst_inner(child, key_column);
+                if let Some(expr) = split.pushdown {
+                    pushdown.push(expr);
+                }
+                if let Some(expr) = split.residual {
+                    residual.push(expr);
+                }
+            }
+            NonSstPredicateSplit {
+                pushdown: combine_and_parts(pushdown),
+                residual: combine_and_parts(residual),
+            }
+        }
+        _ => NonSstPredicateSplit {
+            pushdown: None,
+            residual: Some(predicate.clone()),
+        },
+    }
+}
+
+fn combine_and_parts(mut predicates: Vec<Expr>) -> Option<Expr> {
+    match predicates.len() {
+        0 => None,
+        1 => Some(predicates.remove(0)),
+        _ => Some(Expr::and(predicates)),
+    }
+}
+
+fn combine_predicates_with_and(lhs: Option<Expr>, rhs: Option<Expr>) -> Option<Expr> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(Expr::and(vec![lhs, rhs])),
+        (Some(expr), None) | (None, Some(expr)) => Some(expr),
+        (None, None) => None,
     }
 }
