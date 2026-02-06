@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    ops::Bound,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -447,6 +448,28 @@ impl DynMemInner {
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<DynRowScan<'t>, KeyExtractError> {
+        self.scan_visible_with_bounds(schema, projection_schema, read_ts, None)
+    }
+
+    /// Scan dynamic rows using MVCC visibility semantics at `read_ts`, restricted to a key range.
+    pub(crate) fn scan_visible_in_range<'t>(
+        &'t self,
+        schema: &SchemaRef,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        start: Bound<KeyOwned>,
+        end: Bound<KeyOwned>,
+    ) -> Result<DynRowScan<'t>, KeyExtractError> {
+        self.scan_visible_with_bounds(schema, projection_schema, read_ts, Some((start, end)))
+    }
+
+    fn scan_visible_with_bounds<'t>(
+        &'t self,
+        schema: &SchemaRef,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        bounds: Option<(Bound<KeyOwned>, Bound<KeyOwned>)>,
+    ) -> Result<DynRowScan<'t>, KeyExtractError> {
         let base_schema = self
             .batch_slots
             .iter()
@@ -455,8 +478,16 @@ impl DynMemInner {
             .unwrap_or_else(|| schema.clone());
         let dyn_schema = DynSchema::from_ref(base_schema.clone());
         let projection = build_projection(&base_schema, projection_schema.as_ref())?;
-        Ok(DynRowScan::new(
-            &self.index,
+        let cursor = match bounds {
+            Some((start, end)) => {
+                let lower = lower_bound_for_mutable(start);
+                let upper = upper_bound_for_mutable(end);
+                DynRowCursor::Range(self.index.range((lower, upper)))
+            }
+            None => DynRowCursor::Iter(self.index.iter()),
+        };
+        Ok(DynRowScan::new_with_cursor(
+            cursor,
             &self.batch_slots,
             read_ts,
             dyn_schema,
@@ -788,6 +819,18 @@ impl<'a> DynMemReadGuard<'a> {
         self.guard
             .scan_visible(self.schema, projection_schema, read_ts)
     }
+
+    /// Scan dynamic rows within a key range using MVCC visibility semantics at `read_ts`.
+    pub fn scan_visible_in_range(
+        &self,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        start: Bound<KeyOwned>,
+        end: Bound<KeyOwned>,
+    ) -> Result<DynRowScan<'_>, KeyExtractError> {
+        self.guard
+            .scan_visible_in_range(self.schema, projection_schema, read_ts, start, end)
+    }
 }
 
 /// A lightweight reference wrapper for testing that delegates to DynMem's test methods.
@@ -841,10 +884,53 @@ impl StatsProvider for DynMem {
     }
 }
 
+type DynRowIter<'t> =
+    crossbeam_skiplist::map::Iter<'t, KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>;
+type DynRowRange<'t> = crossbeam_skiplist::map::Range<
+    't,
+    KeyTsOwned,
+    (Bound<KeyTsOwned>, Bound<KeyTsOwned>),
+    KeyTsOwned,
+    DynMutation<BatchRowLoc, DeleteRowLoc>,
+>;
+
+enum DynRowCursor<'t> {
+    Iter(DynRowIter<'t>),
+    Range(DynRowRange<'t>),
+}
+
+impl<'t> Iterator for DynRowCursor<'t> {
+    type Item =
+        crossbeam_skiplist::map::Entry<'t, KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Iter(iter) => iter.next(),
+            Self::Range(range) => range.next(),
+        }
+    }
+}
+
+fn lower_bound_for_mutable(bound: Bound<KeyOwned>) -> Bound<KeyTsOwned> {
+    match bound {
+        Bound::Included(key) => Bound::Included(KeyTsOwned::new(key, Timestamp::MAX)),
+        Bound::Excluded(key) => Bound::Excluded(KeyTsOwned::new(key, Timestamp::MIN)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn upper_bound_for_mutable(bound: Bound<KeyOwned>) -> Bound<KeyTsOwned> {
+    match bound {
+        Bound::Included(key) => Bound::Included(KeyTsOwned::new(key, Timestamp::MIN)),
+        Bound::Excluded(key) => Bound::Excluded(KeyTsOwned::new(key, Timestamp::MAX)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
 /// Iterator over dynamic rows, materializing from `RecordBatch`es and filtering by MVCC visibility.
 pub(crate) struct DynRowScan<'t> {
     batch_slots: &'t [OnceLock<BatchAttachment>],
-    cursor: crossbeam_skiplist::map::Iter<'t, KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>,
+    cursor: DynRowCursor<'t>,
     read_ts: Timestamp,
     current_key: Option<KeyOwned>,
     emitted_for_key: bool,
@@ -877,8 +963,8 @@ impl<'t> fmt::Debug for DynRowScan<'t> {
 }
 
 impl<'t> DynRowScan<'t> {
-    fn new(
-        index: &'t SkipMap<KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>,
+    fn new_with_cursor(
+        cursor: DynRowCursor<'t>,
         batch_slots: &'t [OnceLock<BatchAttachment>],
         read_ts: Timestamp,
         dyn_schema: DynSchema,
@@ -886,7 +972,7 @@ impl<'t> DynRowScan<'t> {
     ) -> Self {
         Self {
             batch_slots,
-            cursor: index.iter(),
+            cursor,
             read_ts,
             current_key: None,
             emitted_for_key: false,
