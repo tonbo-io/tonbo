@@ -18,6 +18,7 @@ use parquet::{
         ProjectionMask,
         arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions},
     },
+    errors::ParquetError,
     file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
 };
 use typed_arrow_dyn::DynRow;
@@ -39,14 +40,14 @@ use crate::{
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{
             ParquetStreamOptions, SsTableError, open_parquet_stream_with_metadata,
-            validate_page_indexes,
+            split_predicate_for_row_filter, validate_page_indexes,
         },
     },
     query::{
         Expr, ScalarValue,
         scan::{
-            DeleteSelection, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
-            projection_with_predicate,
+            DeleteSelection, RowSet, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
+            key_bounds_for_predicate, projection_with_predicate,
         },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
@@ -135,6 +136,23 @@ impl TxSnapshot {
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
+        self.plan_scan_with_context(db, predicate, projected_schema, limit, false)
+            .await
+    }
+
+    async fn plan_scan_with_context<FS, E>(
+        &self,
+        db: &DbInner<FS, E>,
+        predicate: &Expr,
+        projected_schema: Option<&SchemaRef>,
+        limit: Option<usize>,
+        force_predicate_columns: bool,
+    ) -> Result<ScanPlan, crate::db::DBError>
+    where
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
         if let Some(column) = find_bloom_filter_column(predicate) {
             return Err(crate::db::DBError::UnsupportedPredicate {
                 reason: format!(
@@ -143,24 +161,53 @@ impl TxSnapshot {
             });
         }
         let projected_schema = projected_schema.cloned();
-        let residual_predicate = if matches!(predicate, Expr::True) {
-            None
-        } else {
-            Some(predicate.clone())
-        };
-        let scan_schema = if let Some(projection) = projected_schema.as_ref() {
-            projection_with_predicate(&db.schema, projection, residual_predicate.as_ref())?
-        } else {
-            projection_with_predicate(&db.schema, &db.schema, residual_predicate.as_ref())?
-        };
-        let immutable_indexes = {
+        let projection_schema = projected_schema.as_ref().unwrap_or(&db.schema);
+        let predicate_scan_schema =
+            projection_with_predicate(&db.schema, projection_schema, Some(predicate))?;
+        let split = split_predicate_for_row_filter(predicate, &predicate_scan_schema);
+        let pushdown_predicate = split.pushdown;
+        let mut residual_predicate = split.residual;
+        let read_ts = self.read_view().read_ts();
+        let key_schema = db.extractor().key_schema();
+        let key_bounds = key_bounds_for_predicate(predicate, &key_schema);
+        let (immutable_indexes, immutable_row_sets) = {
             let seal = db.seal_state_lock();
             let prune_input: Vec<&ImmutableSegment> =
                 seal.immutables.iter().map(|arc| arc.as_ref()).collect();
-            immutable::prune_segments(&prune_input)
+            let indexes = immutable::prune_segments(&prune_input, key_bounds.as_ref(), read_ts);
+            let row_sets = indexes
+                .iter()
+                .filter_map(|idx| seal.immutables.get(*idx))
+                .map(|segment| RowSet::all(segment.entry_count()))
+                .collect();
+            (indexes, row_sets)
         };
-        let read_ts = self.read_view().read_ts();
-        let key_schema = db.extractor().key_schema();
+        let mutable_row_set = {
+            let row_count = db.mem.row_count();
+            if row_count == 0 {
+                RowSet::all(0)
+            } else {
+                let (min_key, max_key) = db.mem.key_bounds();
+                let mut keep = true;
+                if let (Some(min_key), Some(max_key)) = (min_key.as_ref(), max_key.as_ref())
+                    && let Some(bounds) = key_bounds.as_ref()
+                    && !bounds.overlaps(min_key, max_key)
+                {
+                    keep = false;
+                }
+                if keep
+                    && let Some((min_commit_ts, _)) = db.mem.commit_ts_bounds()
+                    && min_commit_ts > read_ts
+                {
+                    keep = false;
+                }
+                if keep {
+                    RowSet::all(row_count)
+                } else {
+                    RowSet::none(row_count)
+                }
+            }
+        };
         let fs = Arc::clone(&db.fs);
         let executor: E = (**db.executor()).clone();
         let prune_ctx = PruneContext {
@@ -170,7 +217,9 @@ impl TxSnapshot {
             pruner_cache: db.pruner_cache(),
             executor: executor.clone(),
         };
+        let has_non_sst = !mutable_row_set.is_empty() || !immutable_indexes.is_empty();
         let mut sst_selections = Vec::new();
+        let mut sst_requires_full_residual = false;
         for entry in self
             .table_snapshot()
             .latest_version
@@ -180,21 +229,39 @@ impl TxSnapshot {
             .iter()
             .flatten()
         {
+            if let Some(bounds) = key_bounds.as_ref() {
+                if bounds.is_empty() {
+                    continue;
+                }
+                if let Some(stats) = entry.stats()
+                    && let (Some(min_key), Some(max_key)) =
+                        (stats.min_key.as_ref(), stats.max_key.as_ref())
+                    && !bounds.overlaps(min_key, max_key)
+                {
+                    continue;
+                }
+            }
             if let Some(min_commit_ts) = entry.stats().and_then(|stats| stats.min_commit_ts)
                 && min_commit_ts > read_ts
             {
                 continue;
             }
-            let selection = prune_sst_selection(
+            let (mut selection, requires_residual) = prune_sst_selection(
                 &prune_ctx,
                 entry.data_path(),
                 predicate,
                 read_ts,
-                &scan_schema,
+                &predicate_scan_schema,
                 &key_schema,
             )
             .await?;
-            let mut selection = selection;
+            let has_delete_sidecar = entry.delete_path().is_some();
+            if selection.row_set.is_empty() && !has_delete_sidecar {
+                continue;
+            }
+            if requires_residual {
+                sst_requires_full_residual = true;
+            }
             if let Some(delete_path) = entry.delete_path() {
                 let delete_selection = plan_delete_sidecar_selection(
                     Arc::clone(&prune_ctx.fs),
@@ -211,9 +278,30 @@ impl TxSnapshot {
                 selection: ScanSelection::Sst(selection),
             });
         }
+        if sst_requires_full_residual && !matches!(predicate, Expr::True) {
+            // Keep the full predicate for post-merge filtering when any SST
+            // schema cannot accept the pushdown portion.
+            residual_predicate = Some(predicate.clone());
+        }
+        let needs_predicate_columns =
+            force_predicate_columns || residual_predicate.is_some() || has_non_sst;
+        let scan_schema = if needs_predicate_columns {
+            Arc::clone(&predicate_scan_schema)
+        } else {
+            Arc::clone(projection_schema)
+        };
+        if !needs_predicate_columns && scan_schema.as_ref() != predicate_scan_schema.as_ref() {
+            for sst in &mut sst_selections {
+                if let ScanSelection::Sst(selection) = &mut sst.selection {
+                    reproject_sst_selection(selection, &scan_schema, &key_schema)?;
+                }
+            }
+        }
         Ok(ScanPlan {
-            _predicate: predicate.clone(),
+            pushdown_predicate,
             immutable_indexes,
+            mutable_row_set,
+            immutable_row_sets,
             mutable_selection: ScanSelection::AllRows,
             immutable_selection: ScanSelection::AllRows,
             sst_selections,
@@ -234,7 +322,7 @@ async fn prune_sst_selection<E>(
     read_ts: Timestamp,
     scan_schema: &SchemaRef,
     key_schema: &SchemaRef,
-) -> Result<SstSelection, SsTableError>
+) -> Result<(SstSelection, bool), SsTableError>
 where
     E: Executor + Clone + 'static,
 {
@@ -249,6 +337,9 @@ where
     let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&metadata), options)
         .map_err(SsTableError::Parquet)?;
     let schema = arrow_metadata.schema();
+    let requires_residual = split_predicate_for_row_filter(predicate, schema)
+        .residual
+        .is_some();
     let commit_predicate = Expr::lt_eq(MVCC_COMMIT_COL, ScalarValue::UInt64(Some(read_ts.get())));
     let prune_predicate = if matches!(predicate, Expr::True) {
         commit_predicate
@@ -287,7 +378,31 @@ where
     // Preserve PK-ascending scan order by keeping row groups in file order.
     row_groups.sort_unstable();
     row_groups.dedup();
-    let row_selection = prune_result.row_selection().cloned();
+    let selected_row_groups_rows = if row_groups.is_empty() {
+        0usize
+    } else {
+        row_groups
+            .iter()
+            .map(|idx| {
+                usize::try_from(metadata.row_group(*idx).num_rows()).map_err(|_| {
+                    SsTableError::Parquet(ParquetError::General(
+                        "parquet row group count exceeds usize::MAX".to_string(),
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>()
+    };
+    let total_rows = selected_row_groups_rows;
+    let row_set = match prune_result.row_selection().cloned() {
+        Some(selection) => RowSet::from_row_selection(total_rows, selection).map_err(|err| {
+            SsTableError::RowSelection {
+                reason: err.to_string(),
+            }
+        })?,
+        None => RowSet::all(total_rows),
+    };
     let total_row_groups = metadata.num_row_groups();
     let row_groups = if row_groups.len() == total_row_groups {
         None
@@ -295,6 +410,27 @@ where
         Some(row_groups)
     };
 
+    let (projection, projected_schema) =
+        sst_projection_from_metadata(&arrow_metadata, scan_schema, key_schema)?;
+
+    Ok((
+        SstSelection {
+            row_groups,
+            row_set,
+            metadata,
+            projection,
+            projected_schema,
+            delete_selection: None,
+        },
+        requires_residual,
+    ))
+}
+
+fn sst_projection_from_metadata(
+    arrow_metadata: &ArrowReaderMetadata,
+    scan_schema: &SchemaRef,
+    key_schema: &SchemaRef,
+) -> Result<(ProjectionMask, SchemaRef), SsTableError> {
     let mut required = BTreeSet::new();
     for field in scan_schema.fields() {
         required.insert(field.name().to_string());
@@ -307,7 +443,7 @@ where
     let mut remaining = required;
     let mut projected_fields = Vec::new();
     let mut root_indices = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
+    for (idx, field) in arrow_metadata.schema().fields().iter().enumerate() {
         if remaining.remove(field.name()) {
             projected_fields.push(field.clone());
             root_indices.push(idx);
@@ -323,15 +459,22 @@ where
 
     let projected_schema = Arc::new(Schema::new(projected_fields));
     let projection = ProjectionMask::roots(arrow_metadata.parquet_schema(), root_indices);
+    Ok((projection, projected_schema))
+}
 
-    Ok(SstSelection {
-        row_groups,
-        row_selection,
-        metadata,
-        projection,
-        projected_schema,
-        delete_selection: None,
-    })
+fn reproject_sst_selection(
+    selection: &mut SstSelection,
+    scan_schema: &SchemaRef,
+    key_schema: &SchemaRef,
+) -> Result<(), SsTableError> {
+    let options = ArrowReaderOptions::new().with_page_index(true);
+    let arrow_metadata = ArrowReaderMetadata::try_new(Arc::clone(&selection.metadata), options)
+        .map_err(SsTableError::Parquet)?;
+    let (projection, projected_schema) =
+        sst_projection_from_metadata(&arrow_metadata, scan_schema, key_schema)?;
+    selection.projection = projection;
+    selection.projected_schema = projected_schema;
+    Ok(())
 }
 
 fn schema_projection_indices(
@@ -428,26 +571,17 @@ where
                 >);
         }
 
+        let has_non_sst = !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
         let ScanPlan {
+            pushdown_predicate,
             residual_predicate,
             limit,
             ..
         } = plan;
-        // Limit placement depends on whether we have a residual predicate:
-        // - Without residual: apply limit in MergeStream for early termination, since all rows
-        //   passing the merge are final results.
-        // - With residual: defer limit to PackageStream, because MergeStream rows still need
-        //   filtering and we can't know how many will pass until evaluation.
-        let limit_for_merge = if residual_predicate.is_none() {
-            limit
-        } else {
-            None
-        };
-        let limit_for_package = if residual_predicate.is_some() {
-            limit
-        } else {
-            None
-        };
+        let needs_post_filter =
+            residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+        let limit_for_merge = if needs_post_filter { None } else { limit };
+        let limit_for_package = if needs_post_filter { limit } else { None };
         let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;
@@ -456,6 +590,7 @@ where
             merge,
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
+            pushdown_predicate,
             residual_predicate,
             limit_for_package,
         )
@@ -479,17 +614,19 @@ where
         }
         let scan_schema = Arc::clone(&plan.scan_schema);
         let key_schema = self.extractor().key_schema();
-        let mutable_scan = match &plan.mutable_selection {
-            ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
-                // TODO: apply key-range/memtable pruning once selection is wired.
-                OwnedMutableScan::from_guard(
-                    self.mem.read(),
-                    Some(Arc::clone(&scan_schema)),
-                    plan.read_ts,
-                )?
-            }
-        };
-        streams.push(ScanStream::from(mutable_scan));
+        if !plan.mutable_row_set.is_empty() {
+            let mutable_scan = match &plan.mutable_selection {
+                ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
+                    // TODO: apply key-range/memtable pruning once selection is wired.
+                    OwnedMutableScan::from_guard(
+                        self.mem.read(),
+                        Some(Arc::clone(&scan_schema)),
+                        plan.read_ts,
+                    )?
+                }
+            };
+            streams.push(ScanStream::from(mutable_scan));
+        }
 
         let immutables: Vec<Arc<ImmutableSegment>> = {
             let seal = self.seal_state_lock();
@@ -543,8 +680,8 @@ where
             let options = ParquetStreamOptions {
                 projection: Some(selection.projection.clone()),
                 row_groups: selection.row_groups.clone(),
-                row_selection: selection.row_selection.clone(),
-                row_filter_predicate: Some(&plan._predicate),
+                row_selection: selection.row_set.to_row_selection(),
+                row_filter_predicate: plan.pushdown_predicate.as_ref(),
             };
             let data_stream = open_parquet_stream_with_metadata(
                 Arc::clone(&self.fs),
@@ -878,7 +1015,7 @@ where
             Some(overlay) if !overlay.staging.is_empty() => {
                 // We need to plan first to get the scan_schema
                 let plan = snapshot
-                    .plan_scan(db, &predicate, projection.as_ref(), limit)
+                    .plan_scan_with_context(db, &predicate, projection.as_ref(), limit, true)
                     .await?;
                 Some((
                     TransactionScan::new(
@@ -934,6 +1071,7 @@ where
         .clone()
         .unwrap_or_else(|| Arc::clone(&db.schema));
     let scan_schema = Arc::clone(&plan.scan_schema);
+    let has_txn_scan = txn_scan.is_some();
     let streams = db.build_scan_streams(&plan, txn_scan).await?;
 
     if streams.is_empty() {
@@ -944,22 +1082,19 @@ where
             >);
     }
 
+    let has_non_sst =
+        has_txn_scan || !plan.mutable_row_set.is_empty() || !plan.immutable_indexes.is_empty();
     let ScanPlan {
+        pushdown_predicate,
         residual_predicate,
         limit,
         ..
     } = plan;
-    let limit_for_merge = if residual_predicate.is_none() {
-        limit
-    } else {
-        None
-    };
-    let limit_for_package = if residual_predicate.is_some() {
-        limit
-    } else {
-        None
-    };
-    // Only apply limit early when there is no residual predicate to evaluate.
+    let needs_post_filter =
+        residual_predicate.is_some() || (pushdown_predicate.is_some() && has_non_sst);
+    let limit_for_merge = if needs_post_filter { None } else { limit };
+    let limit_for_package = if needs_post_filter { limit } else { None };
+    // Only apply limit early when no post-merge filtering is required.
     let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
         .await
         .map_err(crate::db::DBError::from)?;
@@ -968,6 +1103,7 @@ where
         merge,
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
+        pushdown_predicate,
         residual_predicate,
         limit_for_package,
     )

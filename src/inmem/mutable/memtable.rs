@@ -493,6 +493,41 @@ impl DynMemInner {
         }
     }
 
+    pub(crate) fn key_bounds(&self) -> (Option<KeyOwned>, Option<KeyOwned>) {
+        let min = self
+            .index
+            .iter()
+            .next()
+            .map(|entry| entry.key().key().clone());
+        let max = self
+            .index
+            .iter()
+            .next_back()
+            .map(|entry| entry.key().key().clone());
+        (min, max)
+    }
+
+    pub(crate) fn commit_ts_bounds(&self) -> Option<(Timestamp, Timestamp)> {
+        let mut iter = self.index.iter();
+        let first = iter.next()?;
+        let mut min_ts = first.key().timestamp();
+        let mut max_ts = min_ts;
+        for entry in iter {
+            let ts = entry.key().timestamp();
+            if ts < min_ts {
+                min_ts = ts;
+            }
+            if ts > max_ts {
+                max_ts = ts;
+            }
+        }
+        Some((min_ts, max_ts))
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.index.len()
+    }
+
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         let key_owned = key.clone();
@@ -687,6 +722,18 @@ impl DynMem {
     /// Return `true` if there is any committed version for `key` newer than `snapshot_ts`.
     pub(crate) fn has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
         self.inner.read().has_conflict(key, snapshot_ts)
+    }
+
+    pub(crate) fn key_bounds(&self) -> (Option<KeyOwned>, Option<KeyOwned>) {
+        self.inner.read().key_bounds()
+    }
+
+    pub(crate) fn commit_ts_bounds(&self) -> Option<(Timestamp, Timestamp)> {
+        self.inner.read().commit_ts_bounds()
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.inner.read().row_count()
     }
 
     /// Access the extractor.

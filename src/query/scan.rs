@@ -1,17 +1,21 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, ops::Range, sync::Arc};
 
 use arrow_schema::{Schema, SchemaRef};
 use parquet::{
-    arrow::{ProjectionMask, arrow_reader::RowSelection},
+    arrow::{
+        ProjectionMask,
+        arrow_reader::{RowSelection, RowSelector},
+    },
     file::metadata::ParquetMetaData,
 };
+use thiserror::Error;
 
 use crate::{
     extractor::KeyExtractError,
     key::KeyOwned,
     manifest::{SstEntry, TableSnapshot},
     mvcc::Timestamp,
-    query::Expr,
+    query::{Expr, KeyPredicateValue, ScalarValue},
 };
 
 /// Selection information for a single SSTable scan.
@@ -19,8 +23,8 @@ use crate::{
 pub(crate) struct SstSelection {
     /// Row groups to include. None means all row groups.
     pub(crate) row_groups: Option<Vec<usize>>,
-    /// Optional row-level selection within chosen row groups.
-    pub(crate) row_selection: Option<RowSelection>,
+    /// Planned row set for this SST (per-source row id space).
+    pub(crate) row_set: RowSet,
     /// Cached Parquet metadata loaded at plan time.
     pub(crate) metadata: Arc<ParquetMetaData>,
     /// Projection mask for required columns.
@@ -67,17 +71,376 @@ pub(crate) struct SstScanSelection {
     pub(crate) selection: ScanSelection,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KeyBound {
+    key: KeyOwned,
+    inclusive: bool,
+}
+
+/// Key bounds derived from a predicate for source-level pruning.
+///
+/// `KeyBounds` is a coarse, conservative range used to decide whether an entire
+/// source can be skipped before any row-level pruning is attempted. It is not a
+/// row set itself; it only answers "can this source possibly contain matches?"
+/// and drives `RowSet::none` vs `RowSet::all` decisions for memtables, and
+/// pre-metadata pruning for SSTs.
+///
+/// Bounds are only derived for single-column primary keys. Multi-column keys
+/// return `None`, leaving pruning to other mechanisms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KeyBounds {
+    lower: Option<KeyBound>,
+    upper: Option<KeyBound>,
+    empty: bool,
+}
+
+impl KeyBounds {
+    fn empty() -> Self {
+        Self {
+            lower: None,
+            upper: None,
+            empty: true,
+        }
+    }
+
+    fn with_lower(key: KeyOwned, inclusive: bool) -> Self {
+        Self {
+            lower: Some(KeyBound { key, inclusive }),
+            upper: None,
+            empty: false,
+        }
+    }
+
+    fn with_upper(key: KeyOwned, inclusive: bool) -> Self {
+        Self {
+            lower: None,
+            upper: Some(KeyBound { key, inclusive }),
+            empty: false,
+        }
+    }
+
+    fn with_range(lower: (KeyOwned, bool), upper: (KeyOwned, bool)) -> Self {
+        let mut bounds = Self {
+            lower: Some(KeyBound {
+                key: lower.0,
+                inclusive: lower.1,
+            }),
+            upper: Some(KeyBound {
+                key: upper.0,
+                inclusive: upper.1,
+            }),
+            empty: false,
+        };
+        bounds.normalize_empty();
+        bounds
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.empty
+    }
+
+    fn normalize_empty(&mut self) {
+        if let (Some(lower), Some(upper)) = (&self.lower, &self.upper) {
+            match lower.key.cmp(&upper.key) {
+                std::cmp::Ordering::Greater => {
+                    self.empty = true;
+                }
+                std::cmp::Ordering::Equal => {
+                    if !(lower.inclusive && upper.inclusive) {
+                        self.empty = true;
+                    }
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        if self.empty || other.empty {
+            return Self::empty();
+        }
+        let lower = match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => match a.key.cmp(&b.key) {
+                std::cmp::Ordering::Greater => Some(a.clone()),
+                std::cmp::Ordering::Less => Some(b.clone()),
+                std::cmp::Ordering::Equal => Some(KeyBound {
+                    key: a.key.clone(),
+                    inclusive: a.inclusive && b.inclusive,
+                }),
+            },
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+        let upper = match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => match a.key.cmp(&b.key) {
+                std::cmp::Ordering::Greater => Some(b.clone()),
+                std::cmp::Ordering::Less => Some(a.clone()),
+                std::cmp::Ordering::Equal => Some(KeyBound {
+                    key: a.key.clone(),
+                    inclusive: a.inclusive && b.inclusive,
+                }),
+            },
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+        let mut bounds = Self {
+            lower,
+            upper,
+            empty: false,
+        };
+        bounds.normalize_empty();
+        bounds
+    }
+
+    fn union_envelope(&self, other: &Self) -> Self {
+        if self.empty {
+            return other.clone();
+        }
+        if other.empty {
+            return self.clone();
+        }
+        let lower = match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => match a.key.cmp(&b.key) {
+                std::cmp::Ordering::Greater => Some(b.clone()),
+                std::cmp::Ordering::Less => Some(a.clone()),
+                std::cmp::Ordering::Equal => Some(KeyBound {
+                    key: a.key.clone(),
+                    inclusive: a.inclusive || b.inclusive,
+                }),
+            },
+            (None, _) | (_, None) => None,
+        };
+        let upper = match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => match a.key.cmp(&b.key) {
+                std::cmp::Ordering::Greater => Some(a.clone()),
+                std::cmp::Ordering::Less => Some(b.clone()),
+                std::cmp::Ordering::Equal => Some(KeyBound {
+                    key: a.key.clone(),
+                    inclusive: a.inclusive || b.inclusive,
+                }),
+            },
+            (None, _) | (_, None) => None,
+        };
+        Self {
+            lower,
+            upper,
+            empty: false,
+        }
+    }
+
+    pub(crate) fn overlaps(&self, min_key: &KeyOwned, max_key: &KeyOwned) -> bool {
+        if self.empty {
+            return false;
+        }
+        if let Some(lower) = &self.lower {
+            match max_key.cmp(&lower.key) {
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Equal if !lower.inclusive => return false,
+                _ => {}
+            }
+        }
+        if let Some(upper) = &self.upper {
+            match min_key.cmp(&upper.key) {
+                std::cmp::Ordering::Greater => return false,
+                std::cmp::Ordering::Equal if !upper.inclusive => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+}
+
+/// Row selection wrapper for a single scan source.
+///
+/// A `RowSet` is scoped to a single source (memtable, immutable segment, or SST).
+/// It stores the total number of rows in that source (the row-id universe),
+/// plus a `RowSelection` describing which rows are selected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RowSet {
+    total_rows: usize,
+    selection: RowSelection,
+}
+
+/// Errors raised when combining row sets with mismatched source lengths.
+#[derive(Debug, Error)]
+pub(crate) enum RowSetError {
+    #[error("row set length mismatch: left {left} rows, right {right} rows")]
+    LengthMismatch { left: usize, right: usize },
+}
+
+impl RowSet {
+    /// Select all rows in a source with `total_rows` rows.
+    pub(crate) fn all(total_rows: usize) -> Self {
+        if total_rows == 0 {
+            return Self::from_ranges(0, std::iter::empty());
+        }
+        Self::from_ranges(total_rows, std::iter::once(0..total_rows))
+    }
+
+    /// Select no rows in a source with `total_rows` rows.
+    pub(crate) fn none(total_rows: usize) -> Self {
+        Self::from_ranges(total_rows, std::iter::empty())
+    }
+
+    /// Build a row set from a precomputed row selection.
+    ///
+    /// Returns an error if the selection length does not match `total_rows`.
+    pub(crate) fn from_row_selection(
+        total_rows: usize,
+        selection: RowSelection,
+    ) -> Result<Self, RowSetError> {
+        let implied_total: usize = selection.iter().map(|sel| sel.row_count).sum();
+        if implied_total != total_rows {
+            return Err(RowSetError::LengthMismatch {
+                left: total_rows,
+                right: implied_total,
+            });
+        }
+        Ok(Self {
+            total_rows,
+            selection,
+        })
+    }
+
+    /// Build a row set from consecutive row-id ranges.
+    pub(crate) fn from_ranges<I>(total_rows: usize, ranges: I) -> Self
+    where
+        I: Iterator<Item = Range<usize>>,
+    {
+        let selection = RowSelection::from_consecutive_ranges(ranges, total_rows);
+        Self {
+            total_rows,
+            selection,
+        }
+    }
+
+    /// Total number of rows in the source (row-id universe size).
+    pub(crate) fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    /// Number of selected rows.
+    pub(crate) fn len(&self) -> usize {
+        self.selection.row_count()
+    }
+
+    /// True if all rows are selected.
+    pub(crate) fn is_full(&self) -> bool {
+        self.len() == self.total_rows
+    }
+
+    /// True if no rows are selected.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn intersect(&self, other: &Self) -> Result<Self, RowSetError> {
+        if self.total_rows != other.total_rows {
+            return Err(RowSetError::LengthMismatch {
+                left: self.total_rows,
+                right: other.total_rows,
+            });
+        }
+        Ok(Self {
+            total_rows: self.total_rows,
+            selection: self.selection.intersection(&other.selection),
+        })
+    }
+
+    pub(crate) fn union(&self, other: &Self) -> Result<Self, RowSetError> {
+        if self.total_rows != other.total_rows {
+            return Err(RowSetError::LengthMismatch {
+                left: self.total_rows,
+                right: other.total_rows,
+            });
+        }
+        Ok(Self {
+            total_rows: self.total_rows,
+            selection: self.selection.union(&other.selection),
+        })
+    }
+
+    /// Iterate over selected row ids.
+    pub(crate) fn iter(&self) -> RowSetIter<'_> {
+        RowSetIter::new(&self.selection)
+    }
+
+    /// Access the underlying row selection.
+    pub(crate) fn selection(&self) -> &RowSelection {
+        &self.selection
+    }
+
+    /// Convert to `RowSelection`, returning `None` when full selection is implied.
+    pub(crate) fn to_row_selection(&self) -> Option<RowSelection> {
+        if self.is_full() {
+            None
+        } else {
+            Some(self.selection.clone())
+        }
+    }
+}
+
+/// Iterator over selected row ids.
+pub(crate) struct RowSetIter<'a> {
+    selectors: Box<dyn Iterator<Item = &'a RowSelector> + 'a>,
+    offset: usize,
+    current: Option<Range<usize>>,
+}
+
+impl<'a> RowSetIter<'a> {
+    fn new(selection: &'a RowSelection) -> Self {
+        Self {
+            selectors: Box::new(selection.iter()),
+            offset: 0,
+            current: None,
+        }
+    }
+}
+
+impl<'a> Iterator for RowSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(range) = self.current.as_mut() {
+                if let Some(next) = range.next() {
+                    return Some(next);
+                }
+                self.current = None;
+            }
+            let selector = self.selectors.next()?;
+            if selector.row_count == 0 {
+                continue;
+            }
+            if selector.skip {
+                self.offset = self.offset.saturating_add(selector.row_count);
+                continue;
+            }
+            let start = self.offset;
+            let end = self.offset.saturating_add(selector.row_count);
+            self.offset = end;
+            self.current = Some(start..end);
+        }
+    }
+}
+
 /// Internal representation of a scan plan. Things included in the plan:
-/// * predicate: the caller-supplied predicate used for pruning and residual evaluation
+/// * pushdown_predicate: predicate portion safe for Parquet row filtering
+/// * residual_predicate: predicate portion to evaluate after merge/materialization
 /// * range_set: cached primary-key ranges derived from the predicate for pruning
 /// * immutable_memtable_idxes: which immutable memtables need to be scanned in execution phase
 /// * selections: per-source row selections (memtables default to all rows in this phase)
+/// * row_sets: per-source row sets capturing planned pruning results
 /// * ssts: level-ed sstable where entry contains the identifier and its corresponding selection
 /// * limit: the raw limit
 /// * read_ts: snapshot/read timestamp
 pub(crate) struct ScanPlan {
-    pub(crate) _predicate: Expr,
+    pub(crate) pushdown_predicate: Option<Expr>,
     pub(crate) immutable_indexes: Vec<usize>,
+    pub(crate) mutable_row_set: RowSet,
+    pub(crate) immutable_row_sets: Vec<RowSet>,
     pub(crate) mutable_selection: ScanSelection,
     pub(crate) immutable_selection: ScanSelection,
     pub(crate) sst_selections: Vec<SstScanSelection>,
@@ -100,6 +463,98 @@ pub(crate) fn projection_with_predicate(
         collect_predicate_columns(pred, &mut required);
     }
     extend_projection_schema(base_schema, projection, &required)
+}
+
+/// Derive primary-key bounds from a predicate for coarse pruning.
+///
+/// This extracts an approximate key range that can be applied to a source's
+/// min/max key. If the bounds do not overlap, the source can be skipped.
+/// Only single-column primary keys are currently supported; multi-column keys
+/// return `None` (no pruning).
+pub(crate) fn key_bounds_for_predicate(
+    predicate: &Expr,
+    key_schema: &SchemaRef,
+) -> Option<KeyBounds> {
+    let field = key_schema.fields().first()?;
+    if key_schema.fields().len() != 1 {
+        return None;
+    }
+    let key_column = field.name();
+    bounds_from_expr(predicate, key_column)
+}
+
+fn scalar_to_key(value: &ScalarValue) -> Option<KeyOwned> {
+    <KeyOwned as KeyPredicateValue>::from_scalar(value)
+}
+
+fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
+    match expr {
+        Expr::True => None,
+        Expr::False => Some(KeyBounds::empty()),
+        Expr::Cmp { column, op, value } if column == key_column => {
+            let key = scalar_to_key(value)?;
+            let bounds = match op {
+                aisle::CmpOp::Eq => KeyBounds::with_range((key.clone(), true), (key, true)),
+                aisle::CmpOp::NotEq => return None,
+                aisle::CmpOp::Lt => KeyBounds::with_upper(key, false),
+                aisle::CmpOp::LtEq => KeyBounds::with_upper(key, true),
+                aisle::CmpOp::Gt => KeyBounds::with_lower(key, false),
+                aisle::CmpOp::GtEq => KeyBounds::with_lower(key, true),
+            };
+            Some(bounds)
+        }
+        Expr::Between {
+            column,
+            low,
+            high,
+            inclusive,
+        } if column == key_column => {
+            let low_key = scalar_to_key(low)?;
+            let high_key = scalar_to_key(high)?;
+            Some(KeyBounds::with_range(
+                (low_key, *inclusive),
+                (high_key, *inclusive),
+            ))
+        }
+        Expr::InList { column, values } if column == key_column => {
+            if values.is_empty() {
+                return Some(KeyBounds::empty());
+            }
+            let mut keys = Vec::with_capacity(values.len());
+            for value in values {
+                let key = scalar_to_key(value)?;
+                keys.push(key);
+            }
+            let min = keys.iter().min().cloned()?;
+            let max = keys.iter().max().cloned()?;
+            Some(KeyBounds::with_range((min, true), (max, true)))
+        }
+        Expr::And(children) => {
+            let mut acc: Option<KeyBounds> = None;
+            for child in children {
+                if let Some(bounds) = bounds_from_expr(child, key_column) {
+                    acc = Some(match acc {
+                        Some(prev) => prev.intersect(&bounds),
+                        None => bounds,
+                    });
+                }
+            }
+            acc
+        }
+        Expr::Or(children) => {
+            let mut acc: Option<KeyBounds> = None;
+            for child in children {
+                let bounds = bounds_from_expr(child, key_column)?;
+                acc = Some(match acc {
+                    Some(prev) => prev.union_envelope(&bounds),
+                    None => bounds,
+                });
+            }
+            acc
+        }
+        Expr::Not(_) => None,
+        _ => None,
+    }
 }
 
 fn extend_projection_schema(
@@ -173,5 +628,42 @@ impl ScanPlan {
     /// Pruning based on key ranges or statistics will be added in future iterations.
     pub(crate) fn sst_selections(&self) -> impl Iterator<Item = &SstScanSelection> {
         self.sst_selections.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_set_all_and_none() {
+        let all = RowSet::all(3);
+        assert_eq!(all.total_rows(), 3);
+        assert_eq!(all.len(), 3);
+        assert!(all.is_full());
+        assert!(!all.is_empty());
+        let selected: Vec<usize> = all.iter().collect();
+        assert_eq!(selected, vec![0, 1, 2]);
+        assert!(all.to_row_selection().is_none());
+
+        let none = RowSet::none(3);
+        assert_eq!(none.total_rows(), 3);
+        assert_eq!(none.len(), 0);
+        assert!(none.is_empty());
+        assert!(!none.is_full());
+        let selection = none.to_row_selection().expect("row selection");
+        assert_eq!(selection.row_count(), 0);
+    }
+
+    #[test]
+    fn row_set_from_selection_validates_length() {
+        let selection = RowSelection::from(vec![RowSelector::select(2)]);
+        let err = RowSet::from_row_selection(3, selection).expect_err("length mismatch");
+        match err {
+            RowSetError::LengthMismatch { left, right } => {
+                assert_eq!(left, 3);
+                assert_eq!(right, 2);
+            }
+        }
     }
 }
