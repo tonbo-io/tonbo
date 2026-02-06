@@ -924,6 +924,123 @@ mod tests {
     }
 
     #[test]
+    fn residual_cmp_null_yields_unknown() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+
+        let row_null = DynRow(vec![Some(DynCell::Null)]);
+        let predicate = Expr::gt("v", ScalarValue::from(0i64));
+        let outcome = evaluator
+            .evaluate_expr(&predicate, &row_null)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::Unknown);
+
+        let row_value = DynRow(vec![Some(DynCell::I64(5))]);
+        let predicate_null = Expr::eq("v", ScalarValue::Int64(None));
+        let outcome_null = evaluator
+            .evaluate_expr(&predicate_null, &row_value)
+            .expect("evaluate predicate");
+        assert_eq!(outcome_null, TriState::Unknown);
+    }
+
+    #[test]
+    fn residual_in_list_null_semantics() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+
+        let row_null = DynRow(vec![Some(DynCell::Null)]);
+        let predicate = Expr::in_list("v", vec![ScalarValue::from(1i64), ScalarValue::from(2i64)]);
+        let outcome = evaluator
+            .evaluate_expr(&predicate, &row_null)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::Unknown);
+
+        let row_value = DynRow(vec![Some(DynCell::I64(5))]);
+        let predicate_with_null =
+            Expr::in_list("v", vec![ScalarValue::from(1i64), ScalarValue::Int64(None)]);
+        let outcome_with_null = evaluator
+            .evaluate_expr(&predicate_with_null, &row_value)
+            .expect("evaluate predicate");
+        assert_eq!(outcome_with_null, TriState::Unknown);
+
+        let predicate_match =
+            Expr::in_list("v", vec![ScalarValue::Int64(None), ScalarValue::from(5i64)]);
+        let outcome_match = evaluator
+            .evaluate_expr(&predicate_match, &row_value)
+            .expect("evaluate predicate");
+        assert_eq!(outcome_match, TriState::True);
+    }
+
+    #[test]
+    fn residual_boolean_composition_preserves_unknown() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+        let row = DynRow(vec![Some(DynCell::I64(5))]);
+
+        let truthy = Expr::gt("v", ScalarValue::from(0i64));
+        let falsy = Expr::lt("v", ScalarValue::from(0i64));
+        let unknown = Expr::eq("v", ScalarValue::Int64(None));
+
+        let and_unknown = Expr::and(vec![truthy.clone(), unknown.clone()]);
+        let outcome = evaluator
+            .evaluate_expr(&and_unknown, &row)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::Unknown);
+
+        let and_false = Expr::and(vec![falsy.clone(), unknown.clone()]);
+        let outcome = evaluator
+            .evaluate_expr(&and_false, &row)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::False);
+
+        let or_unknown = Expr::or(vec![falsy.clone(), unknown.clone()]);
+        let outcome = evaluator
+            .evaluate_expr(&or_unknown, &row)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::Unknown);
+
+        let or_true = Expr::or(vec![truthy, unknown.clone()]);
+        let outcome = evaluator
+            .evaluate_expr(&or_true, &row)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::True);
+
+        let not_unknown = Expr::not(unknown);
+        let outcome = evaluator
+            .evaluate_expr(&not_unknown, &row)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::Unknown);
+    }
+
+    #[test]
+    fn residual_is_null_semantics() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let evaluator = ResidualEvaluator::new(&schema);
+
+        let row_null = DynRow(vec![Some(DynCell::Null)]);
+        let is_null = Expr::is_null("v");
+        let is_not_null = Expr::is_not_null("v");
+        let outcome = evaluator
+            .evaluate_expr(&is_null, &row_null)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::True);
+        let outcome = evaluator
+            .evaluate_expr(&is_not_null, &row_null)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::False);
+
+        let row_value = DynRow(vec![Some(DynCell::I64(1))]);
+        let outcome = evaluator
+            .evaluate_expr(&is_null, &row_value)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::False);
+        let outcome = evaluator
+            .evaluate_expr(&is_not_null, &row_value)
+            .expect("evaluate predicate");
+        assert_eq!(outcome, TriState::True);
+    }
+
+    #[test]
     fn residual_numeric_compare_large_uint64_vs_float64() {
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
         let evaluator = ResidualEvaluator::new(&schema);
