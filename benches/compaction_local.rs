@@ -59,7 +59,8 @@ async fn prepare_read_baseline(
     let scenario_name = "Read Baseline";
     let root = scenario_root(run_id, scenario_id);
     let schema = benchmark_schema();
-    let db = open_benchmark_db(&schema, &root, config, false).await?;
+    let io_probe = common::IoProbe::default();
+    let db = open_benchmark_db(&schema, &root, config, false, &io_probe).await?;
 
     ingest_workload(&db, &schema, config).await?;
 
@@ -71,11 +72,14 @@ async fn prepare_read_baseline(
         ));
     }
     let rows_per_scan = read_all_rows(&db).await?;
+    let setup_io = io_probe.snapshot();
 
     Ok(ScenarioState {
         scenario_id,
         scenario_name,
         db,
+        io_probe,
+        setup_io,
         rows_per_scan,
         version_before_compaction: version_ready,
         version_ready,
@@ -90,8 +94,9 @@ async fn prepare_read_post_compaction(
     let scenario_name = "Read Post Compaction";
     let root = scenario_root(run_id, scenario_id);
     let schema = benchmark_schema();
+    let io_probe = common::IoProbe::default();
 
-    let ingest_only_db = open_benchmark_db(&schema, &root, config, false).await?;
+    let ingest_only_db = open_benchmark_db(&schema, &root, config, false, &io_probe).await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
     let version_before_compaction = latest_version_summary(&ingest_only_db).await?;
     if version_before_compaction.sst_count == 0 {
@@ -103,15 +108,18 @@ async fn prepare_read_post_compaction(
     }
     drop(ingest_only_db);
 
-    let db = open_benchmark_db(&schema, &root, config, true).await?;
+    let db = open_benchmark_db(&schema, &root, config, true, &io_probe).await?;
     wait_for_compaction(&db, version_before_compaction, config).await?;
     let version_ready = latest_version_summary(&db).await?;
     let rows_per_scan = read_all_rows(&db).await?;
+    let setup_io = io_probe.snapshot();
 
     Ok(ScenarioState {
         scenario_id,
         scenario_name,
         db,
+        io_probe,
+        setup_io,
         rows_per_scan,
         version_before_compaction,
         version_ready,
