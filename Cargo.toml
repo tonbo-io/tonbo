@@ -92,6 +92,7 @@ js-sys = "0.3"
 
 [dev-dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
+criterion = "0.5"
 futures = "0.3"
 tempfile = "3"
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
@@ -138,3 +139,9 @@ path = "examples/10_dynamic/10c_dynamic_composite.rs"
 [[example]]
 name = "10d_dynamic_transaction"
 path = "examples/10_dynamic/10d_dynamic_transaction.rs"
+
+[[bench]]
+name = "compaction_local"
+path = "benches/compaction_local.rs"
+harness = false
+required-features = ["tokio"]

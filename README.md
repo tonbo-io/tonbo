@@ -173,6 +173,17 @@ Generate an HTML report:
 cargo llvm-cov --workspace --html
 ```
 
+### Compaction Benchmark (Local FS)
+
+Run the Criterion compaction baseline harness:
+
+```bash
+cargo bench --bench compaction_local
+```
+
+Benchmark configuration is env-only via `TONBO_COMPACTION_BENCH_*`.
+See [`docs/benchmarks/compaction-local.md`](./docs/benchmarks/compaction-local.md) for the full variable list, defaults, and JSON artifact schema.
+
 ### Project status
 
 Tonbo is currently in **alpha**. APIs may change, and we're actively iterating based on feedback.
