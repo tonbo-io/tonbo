@@ -92,7 +92,6 @@ js-sys = "0.3"
 
 [dev-dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
-criterion = "0.5"
 futures = "0.3"
 tempfile = "3"
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
@@ -100,6 +99,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 typed-arrow = { version = "0.6.0", default-features = false, features = ["arrow-57", "ext-hooks", "views"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.5"
 tokio = { version = "1", default-features = false, features = [
     "macros",
     "net",
