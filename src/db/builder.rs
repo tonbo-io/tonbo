@@ -943,9 +943,9 @@ where
     /// Set the memtable sealing policy.
     ///
     /// The seal policy controls when the mutable memtable is frozen into an
-    /// immutable segment. This is applied during DB construction, before any
-    /// Arc clones exist, so it always succeeds (unlike [`DB::set_seal_policy`]
-    /// which requires exclusive access).
+    /// immutable segment. For example, `BatchesThreshold { batches: 1 }` seals
+    /// after every ingested batch, which is useful for low-latency flush in
+    /// WASM or S3-backed deployments.
     #[must_use]
     pub fn with_seal_policy(
         mut self,
