@@ -47,7 +47,8 @@ use crate::{
         Expr, ScalarValue,
         scan::{
             DeleteSelection, RowSet, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
-            key_bounds_for_predicate, key_range_for_predicate, projection_with_predicate,
+            key_bounds_for_predicate, key_range_for_predicate, next_prefix_string,
+            projection_with_predicate,
         },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
@@ -1150,6 +1151,18 @@ struct NonSstPredicateSplit {
 }
 
 fn split_predicate_for_non_sst(predicate: &Expr, key_schema: &SchemaRef) -> NonSstPredicateSplit {
+    if matches!(predicate, Expr::True) {
+        return NonSstPredicateSplit {
+            pushdown: None,
+            residual: None,
+        };
+    }
+    if matches!(predicate, Expr::False) {
+        return NonSstPredicateSplit {
+            pushdown: Some(Expr::False),
+            residual: None,
+        };
+    }
     if key_schema.fields().len() != 1 {
         return NonSstPredicateSplit {
             pushdown: None,
@@ -1206,6 +1219,14 @@ fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonS
                     residual: Some(predicate.clone()),
                 };
             }
+            // Non-SST scans rely on key-range pruning for StartsWith. If there is
+            // no strict upper bound, keep a residual filter to avoid false positives.
+            if next_prefix_string(prefix).is_none() {
+                return NonSstPredicateSplit {
+                    pushdown: None,
+                    residual: Some(predicate.clone()),
+                };
+            }
             NonSstPredicateSplit {
                 pushdown: Some(predicate.clone()),
                 residual: None,
@@ -1248,5 +1269,51 @@ fn combine_predicates_with_and(lhs: Option<Expr>, rhs: Option<Expr>) -> Option<E
         (Some(lhs), Some(rhs)) => Some(Expr::and(vec![lhs, rhs])),
         (Some(expr), None) | (None, Some(expr)) => Some(expr),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_schema::{DataType, Field, Schema};
+
+    use super::*;
+
+    #[test]
+    fn split_non_sst_true_with_composite_key_keeps_residual_empty() {
+        let key_schema = Arc::new(Schema::new(vec![
+            Field::new("k1", DataType::Utf8, false),
+            Field::new("k2", DataType::Int64, false),
+        ]));
+        let split = split_predicate_for_non_sst(&Expr::True, &key_schema);
+        assert!(split.pushdown.is_none());
+        assert!(split.residual.is_none());
+    }
+
+    #[test]
+    fn split_non_sst_starts_with_without_upper_bound_requires_residual() {
+        let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let predicate = Expr::StartsWith {
+            column: "id".to_string(),
+            prefix: char::MAX.to_string(),
+        };
+
+        let split = split_predicate_for_non_sst(&predicate, &key_schema);
+        assert!(split.pushdown.is_none());
+        assert!(split.residual.is_some());
+    }
+
+    #[test]
+    fn split_non_sst_starts_with_unicode_gap_keeps_full_pushdown() {
+        let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let predicate = Expr::StartsWith {
+            column: "id".to_string(),
+            prefix: "\u{d7ff}".to_string(),
+        };
+
+        let split = split_predicate_for_non_sst(&predicate, &key_schema);
+        assert!(split.pushdown.is_some());
+        assert!(split.residual.is_none());
     }
 }
