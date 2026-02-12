@@ -278,11 +278,11 @@ impl ScenarioHarness {
     }
 
     async fn compact_l0(
-        &self,
+        &mut self,
         sst_ids: Vec<u64>,
         target_level: u32,
     ) -> Result<crate::compaction::executor::CompactionOutcome, Box<dyn std::error::Error>> {
-        let start_id = 10_000;
+        let start_id = self.next_sst_id.max(10_000);
         let outcome = compact_merge_l0(
             self.db.inner().as_ref(),
             sst_ids,
@@ -291,6 +291,14 @@ impl ScenarioHarness {
             start_id,
         )
         .await?;
+        let next_generated_id = outcome
+            .add_ssts
+            .iter()
+            .map(|entry| entry.sst_id().raw())
+            .max()
+            .map(|id| id.saturating_add(1))
+            .unwrap_or_else(|| start_id.saturating_add(1));
+        self.next_sst_id = self.next_sst_id.max(next_generated_id);
         Ok(outcome)
     }
 
@@ -636,6 +644,7 @@ struct ModelRunner {
     oracle: MvccOracle,
     l0_ssts: Vec<u64>,
     active_snapshot_ts: Option<u64>,
+    active_snapshot: Option<TxSnapshot>,
     allow_reopen: bool,
     eager_flush: bool,
     allow_sst: bool,
@@ -659,6 +668,7 @@ impl ModelRunner {
             oracle: MvccOracle::default(),
             l0_ssts: Vec::new(),
             active_snapshot_ts: None,
+            active_snapshot: None,
             allow_reopen,
             eager_flush,
             allow_sst,
@@ -671,6 +681,11 @@ impl ModelRunner {
             trace: &self.trace,
             snapshot_ts,
         }
+    }
+
+    fn clear_active_snapshot(&mut self) {
+        self.active_snapshot_ts = None;
+        self.active_snapshot = None;
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -703,6 +718,7 @@ impl ModelRunner {
     async fn apply_op(&mut self, op_kind: OpKind) -> Result<(), Box<dyn std::error::Error>> {
         match op_kind {
             OpKind::Put => {
+                self.clear_active_snapshot();
                 let key = self.pick_key();
                 let value = self.rng.next_i64(10_000);
                 self.trace.push(Op::Put {
@@ -720,6 +736,7 @@ impl ModelRunner {
                 }
             }
             OpKind::Delete => {
+                self.clear_active_snapshot();
                 let key = self.pick_key();
                 self.trace.push(Op::Delete { key: key.clone() });
                 self.harness.ingest_delete(&key, &mut self.oracle).await?;
@@ -731,6 +748,7 @@ impl ModelRunner {
                 }
             }
             OpKind::Flush => {
+                self.clear_active_snapshot();
                 self.trace.push(Op::Flush);
                 if self.allow_sst {
                     if let Some(sst_id) = self.harness.try_flush_immutables_to_l0().await? {
@@ -764,18 +782,7 @@ impl ModelRunner {
                 if outcome.add_ssts.is_empty() {
                     return Err("compaction produced no output sst".into());
                 }
-                let snapshot_ts = match self.active_snapshot_ts {
-                    Some(ts) => ts,
-                    None => {
-                        let snapshot = self.harness.db.begin_snapshot().await?;
-                        snapshot.read_view().read_ts().get()
-                    }
-                };
-                let snapshot = self
-                    .harness
-                    .db
-                    .snapshot_at(Timestamp::new(snapshot_ts))
-                    .await?;
+                let (snapshot, snapshot_ts) = self.read_snapshot().await?;
                 let ctx = self.failure_context(Some(snapshot_ts));
                 assert_oracle_matches(
                     "model_based_compaction",
@@ -836,6 +843,7 @@ impl ModelRunner {
                 let snapshot = self.harness.db.begin_snapshot().await?;
                 let snapshot_ts = snapshot.read_view().read_ts().get();
                 self.active_snapshot_ts = Some(snapshot_ts);
+                self.active_snapshot = Some(snapshot.clone());
                 self.trace.push(Op::Snapshot { snapshot_ts });
                 let ctx = self.failure_context(Some(snapshot_ts));
                 assert_oracle_matches(
@@ -868,6 +876,9 @@ impl ModelRunner {
                         Some(&ctx),
                     )
                     .await?;
+                    self.active_snapshot = Some(snapshot);
+                } else {
+                    self.active_snapshot = None;
                 }
             }
         }
@@ -875,8 +886,13 @@ impl ModelRunner {
     }
 
     async fn read_snapshot(&mut self) -> Result<(TxSnapshot, u64), Box<dyn std::error::Error>> {
-        if let Some(ts) = self.active_snapshot_ts {
+        if let Some(snapshot) = self.active_snapshot.as_ref()
+            && let Some(ts) = self.active_snapshot_ts
+        {
+            Ok((snapshot.clone(), ts))
+        } else if let Some(ts) = self.active_snapshot_ts {
             let snapshot = self.harness.db.snapshot_at(Timestamp::new(ts)).await?;
+            self.active_snapshot = Some(snapshot.clone());
             Ok((snapshot, ts))
         } else {
             let snapshot = self.harness.db.begin_snapshot().await?;
@@ -1236,9 +1252,6 @@ async fn compaction_correctness_reopen_snapshot_durability()
     let snapshot_ts = snapshot.read_view().read_ts().get();
     assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db, None).await?;
 
-    // Note: avoid compaction here because some SSTs can be missing Parquet page indexes,
-    // and the compaction read path currently requires them. Re-enable compaction coverage
-    // once page index emission is consistent for all SSTs.
     harness.reopen().await?;
     let reopened_snapshot = harness.db.snapshot_at(Timestamp::new(snapshot_ts)).await?;
     assert_oracle_matches(
@@ -1247,6 +1260,85 @@ async fn compaction_correctness_reopen_snapshot_durability()
         &reopened_snapshot,
         &oracle,
         &harness.db,
+        None,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_correctness_delete_only_sst_reopen_and_compact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = "delete_only_sst_reopen_and_compact";
+    let mut harness = ScenarioHarness::new("compaction-correctness-delete-only-sst").await?;
+    let mut oracle = MvccOracle::default();
+
+    let _ts0 = harness.ingest_delete("k01", &mut oracle).await?;
+    let sst0 = harness.flush_immutables_to_l0().await?;
+
+    let _ts1 = harness.ingest_put("k02", 20, &mut oracle).await?;
+    let sst1 = harness.flush_immutables_to_l0().await?;
+
+    let snapshot = harness.db.begin_snapshot().await?;
+    let snapshot_ts = snapshot.read_view().read_ts().get();
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db, None).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k02",
+        None,
+    )
+    .await?;
+
+    harness.reopen().await?;
+    let reopened = harness.db.snapshot_at(Timestamp::new(snapshot_ts)).await?;
+    assert_oracle_matches(scenario, snapshot_ts, &reopened, &oracle, &harness.db, None).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &reopened,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k02",
+        None,
+    )
+    .await?;
+
+    let outcome = harness.compact_l0(vec![sst0, sst1], 1).await?;
+    assert_eq!(
+        outcome.remove_ssts.len(),
+        2,
+        "scenario={scenario} expected compaction to remove 2 SSTs"
+    );
+    assert!(
+        !outcome.add_ssts.is_empty(),
+        "scenario={scenario} expected compaction to add SSTs"
+    );
+
+    let post_snapshot = harness.db.snapshot_at(Timestamp::new(snapshot_ts)).await?;
+    assert_oracle_matches(
+        scenario,
+        snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+        None,
+    )
+    .await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &post_snapshot,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k02",
         None,
     )
     .await?;

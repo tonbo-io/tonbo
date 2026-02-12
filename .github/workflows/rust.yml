@@ -68,7 +68,6 @@ jobs:
     name: compaction correctness (optional expanded randomized sst+reopen)
     runs-on: ubuntu-latest
     needs: build
-    continue-on-error: true
     env:
       TONBO_COMPACTION_MODEL_SST: "1"
       TONBO_COMPACTION_REOPEN: "1"

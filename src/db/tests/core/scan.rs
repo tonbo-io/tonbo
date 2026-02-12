@@ -218,6 +218,44 @@ async fn plan_scan_missing_page_indexes_is_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_empty_sst_without_page_indexes_is_allowed() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let sst_root = Path::from("scan-empty-no-page-index");
+    db.fs.create_dir_all(&sst_root).await.expect("create dir");
+    let data_path = sst_root.child("000.parquet");
+    let empty_batch = rows_with_commit_ts(0, 0, Timestamp::MIN.get());
+    write_parquet_data_missing_page_index(Arc::clone(&db.fs), data_path.clone(), empty_batch).await;
+
+    let sst_entry = SstEntry::new(SsTableId::new(12), None, None, data_path, None);
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![sst_entry],
+            }],
+        )
+        .await
+        .expect("add sst");
+
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &Expr::True, None, None)
+        .await
+        .expect("empty sst without page indexes should plan");
+    assert_eq!(plan.sst_selections.len(), 1);
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    assert!(collect_ids(&batches).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_prunes_sst_row_groups_and_pages() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),

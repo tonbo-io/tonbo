@@ -1487,6 +1487,36 @@ pub(crate) fn validate_page_indexes(
     metadata: &ParquetMetaData,
 ) -> Result<(), SsTableError> {
     let path = path.to_string();
+    let row_groups = metadata.num_row_groups();
+
+    // Empty SST data files (e.g. delete-only runs) have no pages, so parquet metadata may omit
+    // page-index sections entirely. Treat that representation as valid.
+    if row_groups == 0 {
+        if let Some(column_index) = metadata.column_index()
+            && !column_index.is_empty()
+        {
+            return Err(SsTableError::MissingPageIndex {
+                path: path.clone(),
+                reason: format!(
+                    "column index row group count mismatch: expected {row_groups}, got {}",
+                    column_index.len()
+                ),
+            });
+        }
+        if let Some(offset_index) = metadata.offset_index()
+            && !offset_index.is_empty()
+        {
+            return Err(SsTableError::MissingPageIndex {
+                path: path.clone(),
+                reason: format!(
+                    "offset index row group count mismatch: expected {row_groups}, got {}",
+                    offset_index.len()
+                ),
+            });
+        }
+        return Ok(());
+    }
+
     let column_index = metadata
         .column_index()
         .ok_or_else(|| SsTableError::MissingPageIndex {
@@ -1499,8 +1529,6 @@ pub(crate) fn validate_page_indexes(
             path: path.clone(),
             reason: "offset index missing".to_string(),
         })?;
-
-    let row_groups = metadata.num_row_groups();
     if column_index.len() != row_groups {
         return Err(SsTableError::MissingPageIndex {
             path: path.clone(),
@@ -2392,5 +2420,62 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_parquet_empty_without_page_indexes_is_allowed() {
+        use arrow_array::StringArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let values: ArrayRef = Arc::new(StringArray::from(Vec::<&str>::new()));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values]).expect("batch");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = Path::from(
+            tempdir
+                .path()
+                .join("empty-no-page-index.parquet")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let file = fs
+            .open_options(
+                &path,
+                OpenOptions::default()
+                    .create(true)
+                    .write(true)
+                    .truncate(true),
+            )
+            .await
+            .expect("open file");
+
+        let properties = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_offset_index_disabled(true)
+            .build();
+        let mut writer = AsyncArrowWriter::try_new(
+            AsyncWriter::new(file, NoopExecutor),
+            Arc::clone(&schema),
+            Some(properties),
+        )
+        .expect("writer");
+        writer.write(&batch).await.expect("write");
+        writer.close().await.expect("close");
+
+        let (mut stream, stream_schema) = open_parquet_stream_with_schema(
+            Arc::clone(&fs),
+            path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("empty parquet without page indexes should be readable");
+
+        assert_eq!(stream_schema.fields().len(), 1);
+        assert!(stream.next().await.is_none());
     }
 }
