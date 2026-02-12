@@ -13,6 +13,7 @@ use fusio_manifest::{
     types::Error as FusioManifestError,
 };
 use thiserror::Error;
+use tracing::instrument;
 
 use super::{
     VersionEdit,
@@ -23,7 +24,11 @@ use super::{
         VersionState, VersionValue, WalSegmentRef,
     },
 };
-use crate::{id::FileIdGenerator, mvcc::Timestamp};
+use crate::{
+    id::FileIdGenerator,
+    mvcc::Timestamp,
+    observability::{log_debug, log_warn},
+};
 
 /// Error type surfaced by Tonbo's manifest layer.
 #[derive(Debug, Error)]
@@ -158,6 +163,16 @@ where
             .await
     }
 
+    #[instrument(
+        name = "manifest::apply_version_edits",
+        skip(self, edits),
+        fields(
+            component = "manifest",
+            table_id = ?table,
+            edit_count = edits.len(),
+            cas = expected_head.is_some()
+        )
+    )]
     async fn apply_version_edits_inner(
         &self,
         table: TableId,
@@ -167,6 +182,14 @@ where
         if edits.is_empty() {
             return Err(ManifestError::Invariant("no version edits provided"));
         }
+
+        log_debug!(
+            component = "manifest",
+            event = "manifest_apply_start",
+            table_id = ?table,
+            edit_count = edits.len(),
+            cas = expected_head.is_some(),
+        );
 
         let mut session = self.inner.session_write().await?;
 
@@ -187,6 +210,13 @@ where
         if let Some(expected) = expected_head
             && head.last_manifest_txn != expected
         {
+            log_warn!(
+                component = "manifest",
+                event = "manifest_cas_conflict",
+                table_id = ?table,
+                expected_head = ?expected,
+                actual_head = ?head.last_manifest_txn,
+            );
             session.end().await?;
             return Err(ManifestError::CasConflict(
                 "manifest head advanced during compaction",
@@ -243,9 +273,20 @@ where
         }
 
         session.commit().await?;
+        log_debug!(
+            component = "manifest",
+            event = "manifest_apply_committed",
+            table_id = ?table,
+            manifest_txn = ?next_txn,
+        );
         Ok(next_txn)
     }
 
+    #[instrument(
+        name = "manifest::snapshot_latest",
+        skip(self),
+        fields(component = "manifest", table_id = ?table)
+    )]
     pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<VersionSnapshot> {
         let session = self.inner.session_read().await?;
         let manifest_snapshot = session.snapshot().clone();
@@ -292,6 +333,11 @@ where
     /// Unlike `snapshot_latest` which always returns the current head version,
     /// this method loads the exact version that was committed at `manifest_ts`.
     /// Returns `None` in `latest_version` if the version doesn't exist.
+    #[instrument(
+        name = "manifest::snapshot_at_version",
+        skip(self),
+        fields(component = "manifest", table_id = ?table, manifest_ts = ?manifest_ts)
+    )]
     pub(crate) async fn snapshot_at_version(
         &self,
         table: TableId,
@@ -335,6 +381,11 @@ where
         })
     }
 
+    #[instrument(
+        name = "manifest::init_table_head",
+        skip(self, head),
+        fields(component = "manifest", table_id = ?table_id)
+    )]
     pub(crate) async fn init_table_head(
         &self,
         table_id: TableId,
@@ -355,6 +406,11 @@ where
     ///
     /// Returns up to `limit` versions. Each version contains the full state
     /// (SSTs, WAL references) at that commit timestamp.
+    #[instrument(
+        name = "manifest::list_versions",
+        skip(self),
+        fields(component = "manifest", table_id = ?table, limit)
+    )]
     pub async fn list_versions(
         &self,
         table: TableId,
@@ -401,6 +457,11 @@ where
     }
 
     /// Fetch the persisted WAL floor for a table.
+    #[instrument(
+        name = "manifest::wal_floor",
+        skip(self),
+        fields(component = "manifest", table_id = ?table)
+    )]
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         let session = self.inner.session_read().await?;
         let key = VersionKey::WalFloor { table_id: table };
@@ -424,6 +485,11 @@ where
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
     E: Executor + Timer + Clone + 'static,
 {
+    #[instrument(
+        name = "manifest::put_gc_plan",
+        skip(self),
+        fields(component = "manifest", table_id = ?table_id)
+    )]
     pub(crate) async fn put_gc_plan(
         &self,
         table_id: TableId,
@@ -437,6 +503,11 @@ where
     }
 
     #[cfg(all(test, feature = "tokio"))]
+    #[instrument(
+        name = "manifest::take_gc_plan",
+        skip(self),
+        fields(component = "manifest", table_id = ?table_id)
+    )]
     pub(crate) async fn take_gc_plan(
         &self,
         table_id: TableId,
@@ -465,6 +536,11 @@ where
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
     E: Executor + Timer + Clone + 'static,
 {
+    #[instrument(
+        name = "manifest::init_catalog_root",
+        skip(self),
+        fields(component = "manifest")
+    )]
     pub(crate) async fn init_catalog_root(&self) -> ManifestResult<()> {
         let mut session = self.inner.session_write().await?;
         let key = CatalogKey::Root;
@@ -477,6 +553,11 @@ where
         Ok(())
     }
 
+    #[instrument(
+        name = "manifest::register_table",
+        skip(self, file_ids, definition),
+        fields(component = "manifest")
+    )]
     pub(crate) async fn register_table(
         &self,
         file_ids: &FileIdGenerator,
@@ -535,6 +616,11 @@ where
         Ok(meta)
     }
 
+    #[instrument(
+        name = "manifest::table_meta",
+        skip(self),
+        fields(component = "manifest", table_id = ?table)
+    )]
     pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
         let session = self.inner.session_read().await?;
         let key = CatalogKey::TableMeta { table_id: table };

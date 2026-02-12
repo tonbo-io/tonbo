@@ -6,10 +6,12 @@ use std::sync::{
 };
 
 use fusio::executor::{Executor, Timer};
+use tracing::instrument;
 
 use crate::{
     db::DbInner,
     manifest::ManifestFs,
+    observability::{log_info, log_warn},
     ondisk::sstable::{SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
 };
 
@@ -51,6 +53,15 @@ impl MinorCompactor {
     }
 
     /// Flush immutables when the threshold is met, returning the new SST on success.
+    #[instrument(
+        name = "compaction::minor",
+        skip(self, db, config),
+        fields(
+            component = "compaction",
+            target_level = self.target_level,
+            segment_threshold = self.segment_threshold
+        )
+    )]
     pub(crate) async fn maybe_compact<FS, E>(
         &self,
         db: &DbInner<FS, E>,
@@ -61,13 +72,50 @@ impl MinorCompactor {
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        if db.num_immutable_segments() < self.segment_threshold {
+        let immutable_segments = db.num_immutable_segments();
+        if immutable_segments < self.segment_threshold {
             return Ok(None);
         }
+        log_info!(
+            component = "compaction",
+            event = "minor_compaction_start",
+            immutable_segments,
+            target_level = self.target_level,
+        );
         let descriptor = self.next_descriptor();
-        db.flush_immutables_with_descriptor(config, descriptor)
+        match db
+            .flush_immutables_with_descriptor(config, descriptor)
             .await
-            .map(Some)
+        {
+            Ok(table) => {
+                if let Some(stats) = table.descriptor().stats() {
+                    log_info!(
+                        component = "compaction",
+                        event = "minor_compaction_complete",
+                        target_level = self.target_level,
+                        output_rows = stats.rows,
+                        output_bytes = stats.bytes,
+                        output_tombstones = stats.tombstones,
+                    );
+                } else {
+                    log_info!(
+                        component = "compaction",
+                        event = "minor_compaction_complete",
+                        target_level = self.target_level,
+                    );
+                }
+                Ok(Some(table))
+            }
+            Err(err) => {
+                log_warn!(
+                    component = "compaction",
+                    event = "minor_compaction_failed",
+                    target_level = self.target_level,
+                    error = ?err,
+                );
+                Err(err)
+            }
+        }
     }
 }
 

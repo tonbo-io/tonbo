@@ -637,7 +637,6 @@ fn next_scalar_char(current: char) -> Option<char> {
     }
     None
 }
-
 fn extend_projection_schema(
     base_schema: &SchemaRef,
     projection: &SchemaRef,
