@@ -1372,6 +1372,13 @@ pub(crate) fn validate_page_indexes(
     metadata: &ParquetMetaData,
 ) -> Result<(), SsTableError> {
     let path = path.to_string();
+
+    // Empty files (0 row groups) don't have page indexes - this is valid
+    // when the data batch is empty but deletes exist in the sidecar
+    if metadata.num_row_groups() == 0 {
+        return Ok(());
+    }
+
     let column_index = metadata
         .column_index()
         .ok_or_else(|| SsTableError::MissingPageIndex {
@@ -2200,5 +2207,27 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_page_indexes_accepts_zero_row_groups() {
+        use parquet::{
+            file::metadata::{FileMetaData, ParquetMetaData},
+            schema::types::{SchemaDescriptor, Type as SchemaType},
+        };
+
+        let parquet_schema = SchemaType::group_type_builder("schema")
+            .build()
+            .expect("parquet schema");
+        let schema_descr = Arc::new(SchemaDescriptor::new(Arc::new(parquet_schema)));
+        let file_meta = FileMetaData::new(2, 0, None, None, schema_descr, None);
+        let metadata = ParquetMetaData::new(file_meta, vec![]);
+
+        let path = Path::from("test/empty.parquet");
+        let result = validate_page_indexes(&path, &metadata);
+        assert!(
+            result.is_ok(),
+            "validate_page_indexes should accept files with 0 row groups"
+        );
     }
 }

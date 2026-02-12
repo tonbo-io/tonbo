@@ -26,6 +26,7 @@ use crate::{
     manifest::{ManifestError, TableSnapshot, VersionEdit},
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
+    ondisk::sstable::SsTableError,
     query::stream::StreamError,
     wal::{WalError, manifest_ext},
 };
@@ -675,6 +676,12 @@ where
             )?;
         }
 
+        db.maybe_seal_after_insert()
+            .map_err(TransactionCommitError::Apply)?;
+        db.maybe_run_minor_compaction()
+            .await
+            .map_err(TransactionCommitError::MinorCompaction)?;
+
         drop(key_guards);
         Ok(())
     }
@@ -1190,6 +1197,76 @@ mod tests {
         assert_eq!(results[1].0, KeyOwned::from("bb"));
         assert_eq!(results[2].0, KeyOwned::from("cc"));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_triggers_seal_when_policy_met() {
+        let (db, _schema) =
+            make_db_with_policy(Some(Arc::new(BatchesThreshold { batches: 1 }))).await;
+
+        assert_eq!(db.inner().num_immutable_segments(), 0);
+
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
+        tx.upsert(DynRow(vec![
+            Some(DynCell::Str("k1".into())),
+            Some(DynCell::I32(1)),
+        ]))
+        .expect("stage row");
+        tx.commit().await.expect("commit");
+
+        // The commit should have triggered maybe_seal_after_insert, which with
+        // BatchesThreshold { batches: 1 } should seal the mutable memtable.
+        assert!(
+            db.inner().num_immutable_segments() >= 1,
+            "transaction commit should trigger sealing when policy threshold is met"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_does_not_seal_when_policy_not_met() {
+        // Use default policy (very high thresholds) so a single row won't trigger sealing.
+        let (db, _schema) = make_db().await;
+
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
+        tx.upsert(DynRow(vec![
+            Some(DynCell::Str("k1".into())),
+            Some(DynCell::I32(1)),
+        ]))
+        .expect("stage row");
+        tx.commit().await.expect("commit");
+
+        assert_eq!(
+            db.inner().num_immutable_segments(),
+            0,
+            "default policy should not seal after a single small transaction"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_data_visible_after_seal() {
+        let (db, _schema) =
+            make_db_with_policy(Some(Arc::new(BatchesThreshold { batches: 1 }))).await;
+
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
+        tx.upsert(DynRow(vec![
+            Some(DynCell::Str("sealed-key".into())),
+            Some(DynCell::I32(42)),
+        ]))
+        .expect("stage row");
+        tx.commit().await.expect("commit");
+
+        // Data committed via transaction should be readable even after being sealed
+        // into an immutable segment.
+        let predicate = all_rows_predicate();
+        let batches = db
+            .scan()
+            .filter(predicate)
+            .collect()
+            .await
+            .expect("scan");
+        let rows = extract_rows(&batches);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ("sealed-key".to_string(), 42));
+    }
 }
 
 async fn write_wal_transaction<E>(
@@ -1473,4 +1550,7 @@ pub enum TransactionCommitError {
         /// Zero-based component index that was null.
         index: usize,
     },
+    /// Minor compaction failed after commit.
+    #[error("minor compaction failed: {0}")]
+    MinorCompaction(#[from] SsTableError),
 }

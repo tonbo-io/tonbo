@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use aisle::Pruner;
@@ -18,7 +18,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
 use fusio::{
     DynFs,
-    executor::{Executor, Timer},
+    executor::{Executor, Instant as ExecInstant, Timer},
     mem::fs::InMemoryFs,
 };
 use futures::lock::Mutex as AsyncMutex;
@@ -131,12 +131,12 @@ struct L0Stats {
 
 struct L0StatsCache {
     stats: L0Stats,
-    last_refresh: Instant,
+    last_refresh: ExecInstant,
     valid: bool,
 }
 
 impl L0StatsCache {
-    fn new(now: Instant) -> Self {
+    fn new(now: ExecInstant) -> Self {
         Self {
             stats: L0Stats {
                 file_count: 0,
@@ -147,7 +147,7 @@ impl L0StatsCache {
         }
     }
 
-    fn is_fresh(&self, now: Instant, refresh_interval: Duration) -> bool {
+    fn is_fresh(&self, now: ExecInstant, refresh_interval: Duration) -> bool {
         self.valid && now.saturating_duration_since(self.last_refresh) < refresh_interval
     }
 
@@ -155,7 +155,7 @@ impl L0StatsCache {
         self.stats
     }
 
-    fn update(&mut self, now: Instant, stats: L0Stats) {
+    fn update(&mut self, now: ExecInstant, stats: L0Stats) {
         self.stats = stats;
         self.last_refresh = now;
         self.valid = true;
@@ -327,6 +327,19 @@ where
     /// Begin constructing a DB through the fluent builder API.
     pub fn builder(config: DynModeConfig) -> DbBuilder {
         DbBuilder::new(config)
+    }
+
+    /// Set the sealing policy.
+    ///
+    /// Returns `true` if the policy was updated, or `false` if the DB handle
+    /// is shared and cannot be mutated.
+    pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) -> bool {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.set_seal_policy(policy);
+            true
+        } else {
+            false
+        }
     }
 
     /// Begin a read-only snapshot for queries.
@@ -1194,7 +1207,6 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    #[cfg(test)]
     pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
