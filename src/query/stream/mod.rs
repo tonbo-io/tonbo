@@ -25,7 +25,7 @@ use crate::{
         immutable::memtable::{ImmutableMemTable, ImmutableVisibleEntry, ImmutableVisibleScan},
         mutable::memtable::{DynMemReadGuard, DynRowScan, DynRowScanEntry},
     },
-    key::{KeyRow, KeyTsOwned, KeyTsViewRaw},
+    key::{KeyOwned, KeyRow, KeyTsOwned, KeyTsViewRaw},
     mvcc::Timestamp,
     ondisk::{
         scan::{SstableRowRef, SstableScan, SstableScanError},
@@ -78,6 +78,24 @@ impl<'t> OwnedMutableScan<'t> {
         })
     }
 
+    pub(crate) fn from_guard_range(
+        guard: DynMemReadGuard<'t>,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        start: std::ops::Bound<KeyOwned>,
+        end: std::ops::Bound<KeyOwned>,
+    ) -> Result<Self, KeyExtractError> {
+        let inner = {
+            let scan = guard.scan_visible_in_range(projection_schema, read_ts, start, end)?;
+            // SAFETY: `scan` borrows from `guard`, which we keep alive inside `_guard`.
+            unsafe { mem::transmute::<DynRowScan<'_>, DynRowScan<'t>>(scan) }
+        };
+        Ok(Self {
+            inner,
+            _guard: Some(guard),
+        })
+    }
+
     pub(crate) fn from_scan(inner: DynRowScan<'t>) -> Self {
         Self {
             inner,
@@ -119,6 +137,24 @@ impl<'t> OwnedImmutableScan<'t> {
     ) -> Result<Self, KeyExtractError> {
         let inner = {
             let scan = segment.scan_visible(projection_schema, read_ts)?;
+            // SAFETY: `scan` borrows from `segment`, which is kept alive by `_keep`.
+            unsafe { mem::transmute::<ImmutableVisibleScan<'_>, ImmutableVisibleScan<'t>>(scan) }
+        };
+        Ok(Self {
+            _keep: Arc::clone(&segment),
+            inner,
+        })
+    }
+
+    pub(crate) fn from_arc_range(
+        segment: Arc<ImmutableMemTable>,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        start: std::ops::Bound<KeyOwned>,
+        end: std::ops::Bound<KeyOwned>,
+    ) -> Result<Self, KeyExtractError> {
+        let inner = {
+            let scan = segment.scan_visible_in_range(projection_schema, read_ts, start, end)?;
             // SAFETY: `scan` borrows from `segment`, which is kept alive by `_keep`.
             unsafe { mem::transmute::<ImmutableVisibleScan<'_>, ImmutableVisibleScan<'t>>(scan) }
         };

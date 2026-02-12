@@ -1,4 +1,5 @@
 use std::{
+    ops::Bound,
     pin::Pin,
     sync::{
         Arc,
@@ -30,6 +31,7 @@ use crate::{
     db::{DB, DbInner, Expr, ScalarValue},
     extractor,
     inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+    key::KeyOwned,
     manifest::{SstEntry, VersionEdit},
     mode::DynModeConfig,
     mvcc::{MVCC_COMMIT_COL, Timestamp},
@@ -37,6 +39,16 @@ use crate::{
     query::scan::ScanSelection,
     test::build_batch,
 };
+
+fn assert_key_range(selection: &ScanSelection, start: Bound<KeyOwned>, end: Bound<KeyOwned>) {
+    match selection {
+        ScanSelection::KeyRange(range) => {
+            assert_eq!(&range.start, &start);
+            assert_eq!(&range.end, &end);
+        }
+        other => panic!("expected key-range selection, got {other:?}"),
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn plan_scan_filters_immutable_segments() {
@@ -51,6 +63,56 @@ async fn plan_scan_filters_immutable_segments() {
     assert_eq!(plan.immutable_indexes, vec![0]);
     assert!(plan.pushdown_predicate.is_some());
     assert!(plan.residual_predicate.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_key_range_eq_on_primary_key() {
+    let db = db_with_immutable_keys(&["k1", "z1"]).await;
+    let predicate = Expr::eq("id", ScalarValue::from("k1"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    let key = KeyOwned::from("k1");
+    assert_key_range(
+        &plan.mutable_selection,
+        Bound::Included(key.clone()),
+        Bound::Included(key.clone()),
+    );
+    assert_key_range(
+        &plan.immutable_selection,
+        Bound::Included(key.clone()),
+        Bound::Included(key),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plan_scan_key_range_between_on_primary_key() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema_and_policy(schema.clone(), Arc::new(NeverSeal))
+        .await
+        .into_inner();
+    let rows = vec![
+        DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("k9".into())), Some(DynCell::I32(9))]),
+    ];
+    let batch = build_batch(schema, rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let predicate = Expr::between("id", ScalarValue::from("k1"), ScalarValue::from("k9"), true);
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
+        .await
+        .expect("plan");
+    let start = Bound::Included(KeyOwned::from("k1"));
+    let end = Bound::Included(KeyOwned::from("k9"));
+    assert_key_range(&plan.mutable_selection, start.clone(), end.clone());
+    assert_key_range(&plan.immutable_selection, start, end);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

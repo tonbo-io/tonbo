@@ -47,7 +47,7 @@ use crate::{
         Expr, ScalarValue,
         scan::{
             DeleteSelection, RowSet, ScanPlan, ScanSelection, SstScanSelection, SstSelection,
-            key_bounds_for_predicate, projection_with_predicate,
+            key_bounds_for_predicate, key_range_for_predicate, projection_with_predicate,
         },
         stream::{
             Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
@@ -170,6 +170,7 @@ impl TxSnapshot {
         let read_ts = self.read_view().read_ts();
         let key_schema = db.extractor().key_schema();
         let key_bounds = key_bounds_for_predicate(predicate, &key_schema);
+        let key_range = key_range_for_predicate(predicate, &key_schema);
         let (immutable_indexes, immutable_row_sets) = {
             let seal = db.seal_state_lock();
             let prune_input: Vec<&ImmutableSegment> =
@@ -302,8 +303,13 @@ impl TxSnapshot {
             immutable_indexes,
             mutable_row_set,
             immutable_row_sets,
-            mutable_selection: ScanSelection::AllRows,
-            immutable_selection: ScanSelection::AllRows,
+            mutable_selection: key_range
+                .clone()
+                .map(ScanSelection::KeyRange)
+                .unwrap_or(ScanSelection::AllRows),
+            immutable_selection: key_range
+                .map(ScanSelection::KeyRange)
+                .unwrap_or(ScanSelection::AllRows),
             sst_selections,
             residual_predicate,
             projected_schema,
@@ -616,14 +622,18 @@ where
         let key_schema = self.extractor().key_schema();
         if !plan.mutable_row_set.is_empty() {
             let mutable_scan = match &plan.mutable_selection {
-                ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
-                    // TODO: apply key-range/memtable pruning once selection is wired.
-                    OwnedMutableScan::from_guard(
-                        self.mem.read(),
-                        Some(Arc::clone(&scan_schema)),
-                        plan.read_ts,
-                    )?
-                }
+                ScanSelection::AllRows | ScanSelection::Sst(_) => OwnedMutableScan::from_guard(
+                    self.mem.read(),
+                    Some(Arc::clone(&scan_schema)),
+                    plan.read_ts,
+                )?,
+                ScanSelection::KeyRange(range) => OwnedMutableScan::from_guard_range(
+                    self.mem.read(),
+                    Some(Arc::clone(&scan_schema)),
+                    plan.read_ts,
+                    range.start.clone(),
+                    range.end.clone(),
+                )?,
             };
             streams.push(ScanStream::from(mutable_scan));
         }
@@ -637,14 +647,18 @@ where
         };
         for segment in immutables {
             let owned = match &plan.immutable_selection {
-                ScanSelection::AllRows | ScanSelection::KeyRange(_) | ScanSelection::Sst(_) => {
-                    // TODO: apply key-range/immutable pruning once selection is wired.
-                    OwnedImmutableScan::from_arc(
-                        Arc::clone(&segment),
-                        Some(Arc::clone(&scan_schema)),
-                        plan.read_ts,
-                    )?
-                }
+                ScanSelection::AllRows | ScanSelection::Sst(_) => OwnedImmutableScan::from_arc(
+                    Arc::clone(&segment),
+                    Some(Arc::clone(&scan_schema)),
+                    plan.read_ts,
+                )?,
+                ScanSelection::KeyRange(range) => OwnedImmutableScan::from_arc_range(
+                    Arc::clone(&segment),
+                    Some(Arc::clone(&scan_schema)),
+                    plan.read_ts,
+                    range.start.clone(),
+                    range.end.clone(),
+                )?,
             };
             streams.push(ScanStream::from(owned));
         }
