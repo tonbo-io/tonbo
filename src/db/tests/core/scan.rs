@@ -61,7 +61,7 @@ async fn plan_scan_filters_immutable_segments() {
         .expect("plan");
     // Expect key-bound pruning to skip the non-overlapping immutable.
     assert_eq!(plan.immutable_indexes, vec![0]);
-    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.pushdown_predicate.is_none());
     assert!(plan.residual_predicate.is_none());
 }
 
@@ -126,7 +126,7 @@ async fn plan_scan_preserves_residual_predicate() {
         .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
-    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.pushdown_predicate.is_none());
     assert!(plan.residual_predicate.is_some());
 }
 
@@ -677,7 +677,7 @@ async fn scan_limit_waits_for_residual_predicate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn scan_limit_waits_for_pushdown_on_non_sst() {
+async fn scan_limit_waits_for_non_sst_residual_predicate() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
@@ -697,13 +697,87 @@ async fn scan_limit_waits_for_pushdown_on_non_sst() {
         .plan_scan(&db, &predicate, None, Some(1))
         .await
         .expect("plan");
-    assert!(plan.pushdown_predicate.is_some());
+    assert!(plan.pushdown_predicate.is_none());
+    assert!(plan.residual_predicate.is_some());
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let ids = collect_ids(&batches);
+    assert_eq!(ids, vec!["c".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_limit_applies_early_when_residual_empty() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+    let rows = vec![
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+        DynRow(vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(3))]),
+    ];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let predicate = Expr::eq("id", ScalarValue::from("c"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, Some(1))
+        .await
+        .expect("plan");
+    assert_key_range(
+        &plan.mutable_selection,
+        Bound::Included(KeyOwned::from("c")),
+        Bound::Included(KeyOwned::from("c")),
+    );
     assert!(plan.residual_predicate.is_none());
 
     let stream = db.execute_scan(plan).await.expect("execute");
     let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
     let ids = collect_ids(&batches);
     assert_eq!(ids, vec!["c".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scan_schema_non_sst_full_pushdown_skips_predicate_columns() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let db = db_with_schema(schema.clone()).await;
+
+    let rows = vec![
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+    ];
+    let batch = build_batch(schema.clone(), rows).expect("batch");
+    db.ingest(batch).await.expect("ingest");
+
+    let projection = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+    let predicate = Expr::eq("id", ScalarValue::from("b"));
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, Some(&projection), None)
+        .await
+        .expect("plan");
+    let scan_fields: Vec<&str> = plan
+        .scan_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    assert_eq!(scan_fields, vec!["v"]);
+    assert!(plan.residual_predicate.is_none());
+
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
+    let values = collect_i32s(&batches, 0);
+    assert_eq!(values, vec![2]);
+    for batch in &batches {
+        assert_eq!(batch.num_columns(), 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
