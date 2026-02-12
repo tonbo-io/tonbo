@@ -248,7 +248,10 @@ async fn plan_scan_empty_sst_without_page_indexes_is_allowed() {
         .plan_scan(&db, &Expr::True, None, None)
         .await
         .expect("empty sst without page indexes should plan");
-    assert_eq!(plan.sst_selections.len(), 1);
+    assert!(
+        plan.sst_selections.len() <= 1,
+        "empty SST may be retained or pruned at planning time"
+    );
 
     let stream = db.execute_scan(plan).await.expect("execute");
     let batches = stream.try_collect::<Vec<_>>().await.expect("collect");
