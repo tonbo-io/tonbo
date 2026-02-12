@@ -26,6 +26,7 @@ use crate::{
     manifest::{ManifestError, TableSnapshot, VersionEdit},
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
+    ondisk::sstable::SsTableError,
     query::stream::StreamError,
     wal::{WalError, manifest_ext},
 };
@@ -674,6 +675,12 @@ where
                 commit_ts,
             )?;
         }
+
+        db.maybe_seal_after_insert()
+            .map_err(TransactionCommitError::Apply)?;
+        db.maybe_run_minor_compaction()
+            .await
+            .map_err(TransactionCommitError::MinorCompaction)?;
 
         drop(key_guards);
         Ok(())
@@ -1473,4 +1480,7 @@ pub enum TransactionCommitError {
         /// Zero-based component index that was null.
         index: usize,
     },
+    /// Minor compaction failed after commit.
+    #[error("minor compaction failed: {0}")]
+    MinorCompaction(#[from] SsTableError),
 }

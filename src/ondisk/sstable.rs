@@ -1372,6 +1372,13 @@ pub(crate) fn validate_page_indexes(
     metadata: &ParquetMetaData,
 ) -> Result<(), SsTableError> {
     let path = path.to_string();
+
+    // Empty files (0 row groups) don't have page indexes - this is valid
+    // when the data batch is empty but deletes exist in the sidecar
+    if metadata.num_row_groups() == 0 {
+        return Ok(());
+    }
+
     let column_index = metadata
         .column_index()
         .ok_or_else(|| SsTableError::MissingPageIndex {
