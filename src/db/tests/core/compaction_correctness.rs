@@ -1174,6 +1174,52 @@ async fn compaction_correctness_model_randomized() -> Result<(), Box<dyn std::er
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_correctness_reopen_multi_immutable_flush_ordering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = "reopen_multi_immutable_flush_ordering";
+    let mut harness = ScenarioHarness::new("compaction-correctness-reopen-flush-ordering").await?;
+    let mut oracle = MvccOracle::default();
+
+    let _ts0 = harness.ingest_put("k02", 20, &mut oracle).await?;
+    let _ts1 = harness.ingest_put("k01", 10, &mut oracle).await?;
+    let _ts2 = harness.ingest_put("k02", 30, &mut oracle).await?;
+    let _ts3 = harness.ingest_put("k03", 40, &mut oracle).await?;
+    let _sst = harness.flush_immutables_to_l0().await?;
+
+    let snapshot = harness.db.begin_snapshot().await?;
+    let snapshot_ts = snapshot.read_view().read_ts().get();
+    assert_oracle_matches(scenario, snapshot_ts, &snapshot, &oracle, &harness.db, None).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &snapshot,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k03",
+        None,
+    )
+    .await?;
+
+    harness.reopen().await?;
+    let reopened = harness.db.snapshot_at(Timestamp::new(snapshot_ts)).await?;
+    assert_oracle_matches(scenario, snapshot_ts, &reopened, &oracle, &harness.db, None).await?;
+    assert_range_matches(
+        scenario,
+        snapshot_ts,
+        &reopened,
+        &oracle,
+        &harness.db,
+        "k01",
+        "k03",
+        None,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compaction_correctness_reopen_snapshot_durability()
 -> Result<(), Box<dyn std::error::Error>> {
     let scenario = "reopen_snapshot_durability";

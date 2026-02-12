@@ -16,7 +16,7 @@ use std::{collections::BTreeSet, convert::TryFrom, fmt, sync::Arc};
 use aisle::RowFilter as AisleRowFilter;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use arrow_select::take::take as arrow_take;
+use arrow_select::{concat::concat_batches as concat_record_batches, take::take as arrow_take};
 use fusio::{
     DynFs,
     error::Error as FsError,
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::ondisk::merge::{SsTableMerger, SsTableStreamBatch};
 use crate::{
-    extractor::{KeyExtractError, KeyProjection},
+    extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileId,
     inmem::immutable::{
         ImmutableSegment,
@@ -499,6 +499,7 @@ pub(super) struct ParquetTableWriter {
     staged: StagedTableStats,
     segments: Vec<StagedSegment>,
     wal_ids: Option<Vec<FileId>>,
+    staged_immutable_segments: usize,
 }
 
 impl ParquetTableWriter {
@@ -509,6 +510,7 @@ impl ParquetTableWriter {
             staged: StagedTableStats::new(),
             segments: Vec::new(),
             wal_ids: None,
+            staged_immutable_segments: 0,
         }
     }
 
@@ -566,6 +568,7 @@ impl ParquetTableWriter {
             deletes: segment.delete_sidecar().clone(),
         };
         self.segments.push(staged_segment);
+        self.staged_immutable_segments += 1;
         Ok(())
     }
 
@@ -649,21 +652,33 @@ impl ParquetTableWriter {
             return Err(SsTableError::NoImmutableSegments);
         }
 
-        let mut ctx =
-            WriteContext::new(Arc::clone(&self.config), &self.descriptor, executor).await?;
-        for segment in &self.segments {
+        let ParquetTableWriter {
+            config,
+            descriptor,
+            staged,
+            mut segments,
+            wal_ids,
+            staged_immutable_segments,
+        } = self;
+
+        if staged_immutable_segments > 1 {
+            // Multi-immutable flush can interleave key ranges across sealed segments. Normalize
+            // to a single globally ordered run so source-level dedup in `SstableScan` stays sound.
+            segments = normalize_immutable_flush_segments(segments, config.as_ref())?;
+        }
+
+        let mut ctx = WriteContext::new(Arc::clone(&config), &descriptor, executor).await?;
+        for segment in &segments {
             ctx.write_segment(segment).await?;
         }
         let (data_path, delete_path, data_bytes) = ctx.finish().await?;
-        let stats = SsTableStats::from_staged(
-            self.staged,
-            usize::try_from(data_bytes).unwrap_or(usize::MAX),
-        );
+        let stats =
+            SsTableStats::from_staged(staged, usize::try_from(data_bytes).unwrap_or(usize::MAX));
         Ok(SsTable::new(
-            self.descriptor
+            descriptor
                 .with_stats(stats)
                 .with_storage_paths(data_path, delete_path)
-                .with_wal_ids(self.wal_ids),
+                .with_wal_ids(wal_ids),
         ))
     }
 
@@ -671,6 +686,210 @@ impl ParquetTableWriter {
     fn plan(&self) -> &StagedTableStats {
         &self.staged
     }
+}
+
+#[derive(Debug)]
+struct SortKey {
+    key: KeyOwned,
+    commit_ts: Timestamp,
+    sequence: u64,
+    row_idx: u32,
+}
+
+fn normalize_immutable_flush_segments(
+    segments: Vec<StagedSegment>,
+    config: &SsTableConfig,
+) -> Result<Vec<StagedSegment>, SsTableError> {
+    if segments.len() <= 1 {
+        return Ok(segments);
+    }
+
+    let data_extractor = resolve_data_sort_extractor(config, &segments)?;
+    let sorted_data = sort_data_rows(&segments, data_extractor.as_ref())?;
+    let sorted_deletes = sort_delete_rows(&segments)?;
+    Ok(vec![StagedSegment {
+        data_with_commit: sorted_data,
+        deletes: sorted_deletes,
+    }])
+}
+
+fn resolve_data_sort_extractor(
+    config: &SsTableConfig,
+    segments: &[StagedSegment],
+) -> Result<Arc<dyn KeyProjection>, SsTableError> {
+    if let Some(extractor) = config.key_extractor() {
+        return Ok(Arc::clone(extractor));
+    }
+
+    let first_segment = segments.first().ok_or(SsTableError::NoImmutableSegments)?;
+    let data_schema = first_segment.data_with_commit.schema();
+    let key_schema = first_segment.deletes.key_batch().schema();
+    let mut key_indices = Vec::with_capacity(key_schema.fields().len());
+    for key_field in key_schema.fields() {
+        let Some(index) = data_schema
+            .fields()
+            .iter()
+            .position(|field| field.name() == key_field.name())
+        else {
+            return Err(SsTableError::SidecarMismatch(
+                "failed to derive data key projection from immutable delete schema",
+            ));
+        };
+        key_indices.push(index);
+    }
+    let projection = projection_for_columns(data_schema, key_indices)?;
+    Ok(projection.into())
+}
+
+fn sort_data_rows(
+    segments: &[StagedSegment],
+    extractor: &dyn KeyProjection,
+) -> Result<RecordBatch, SsTableError> {
+    let Some(first) = segments.first() else {
+        return Err(SsTableError::NoImmutableSegments);
+    };
+    let data_schema = first.data_with_commit.schema();
+    let mut all_batches = Vec::with_capacity(segments.len());
+    let mut keys = Vec::new();
+    let mut row_offset = 0usize;
+
+    for segment in segments {
+        let batch = &segment.data_with_commit;
+        if batch.schema().as_ref() != data_schema.as_ref() {
+            return Err(SsTableError::SidecarMismatch(
+                "staged immutable data schema mismatch",
+            ));
+        }
+        all_batches.push(batch.clone());
+        if batch.num_rows() == 0 {
+            continue;
+        }
+
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let key_rows = extractor.project_view(batch, &row_indices)?;
+        let commits = commit_ts_column(batch)?;
+        let sequence_col = batch
+            .column_by_name(MVCC_SEQUENCE_COL)
+            .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>());
+        for (row, key_row) in key_rows.into_iter().enumerate() {
+            let key = KeyOwned::from_key_row(&key_row)?;
+            let row_idx = u32::try_from(row_offset.saturating_add(row)).map_err(|_| {
+                SsTableError::SidecarMismatch("staged immutable row index overflowed u32")
+            })?;
+            let sequence = sequence_col.map(|col| col.value(row)).unwrap_or(row as u64);
+            keys.push(SortKey {
+                key,
+                commit_ts: Timestamp::new(commits.value(row)),
+                sequence,
+                row_idx,
+            });
+        }
+        row_offset = row_offset.saturating_add(batch.num_rows());
+    }
+
+    let merged = if all_batches.len() == 1 {
+        all_batches.pop().expect("single batch available")
+    } else {
+        concat_record_batches(&data_schema, &all_batches)
+            .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))?
+    };
+
+    if keys.is_empty() {
+        return Ok(merged);
+    }
+
+    keys.sort_by(|lhs, rhs| {
+        lhs.key
+            .cmp(&rhs.key)
+            .then_with(|| rhs.commit_ts.cmp(&lhs.commit_ts))
+            .then_with(|| rhs.sequence.cmp(&lhs.sequence))
+            .then_with(|| lhs.row_idx.cmp(&rhs.row_idx))
+    });
+    let sorted_indices: Vec<u32> = keys.into_iter().map(|entry| entry.row_idx).collect();
+    take_record_batch(&merged, &sorted_indices)
+}
+
+fn sort_delete_rows(segments: &[StagedSegment]) -> Result<DeleteSidecar, SsTableError> {
+    let Some(first) = segments.first() else {
+        return Err(SsTableError::NoImmutableSegments);
+    };
+    let key_schema = first.deletes.key_batch().schema();
+    let key_columns = key_schema.fields().len();
+    let mut all_batches = Vec::with_capacity(segments.len());
+    let mut keys = Vec::new();
+    let mut row_offset = 0usize;
+
+    for segment in segments {
+        if segment.deletes.key_batch().schema().as_ref() != key_schema.as_ref() {
+            return Err(SsTableError::SidecarMismatch(
+                "staged immutable delete schema mismatch",
+            ));
+        }
+        let batch = segment
+            .deletes
+            .to_record_batch()
+            .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))?;
+        all_batches.push(batch.clone());
+    }
+
+    let Some(delete_schema) = all_batches.first().map(RecordBatch::schema) else {
+        return Ok(DeleteSidecar::empty(&key_schema));
+    };
+    let extractor = projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
+    let extractor: Arc<dyn KeyProjection> = extractor.into();
+
+    for batch in &all_batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let key_rows = extractor.project_view(batch, &row_indices)?;
+        let commits = batch
+            .column_by_name(MVCC_COMMIT_COL)
+            .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+            .ok_or(SsTableError::SidecarMismatch(
+                "delete sidecar missing commit_ts column",
+            ))?;
+        let sequence_col = batch
+            .column_by_name(MVCC_SEQUENCE_COL)
+            .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>());
+        for (row, key_row) in key_rows.into_iter().enumerate() {
+            let key = KeyOwned::from_key_row(&key_row)?;
+            let row_idx = u32::try_from(row_offset.saturating_add(row)).map_err(|_| {
+                SsTableError::SidecarMismatch("staged delete row index overflowed u32")
+            })?;
+            let sequence = sequence_col.map(|col| col.value(row)).unwrap_or(row as u64);
+            keys.push(SortKey {
+                key,
+                commit_ts: Timestamp::new(commits.value(row)),
+                sequence,
+                row_idx,
+            });
+        }
+        row_offset = row_offset.saturating_add(batch.num_rows());
+    }
+
+    let merged = if all_batches.len() == 1 {
+        all_batches.pop().expect("single delete batch available")
+    } else {
+        concat_record_batches(&delete_schema, &all_batches)
+            .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))?
+    };
+
+    if keys.is_empty() {
+        return Ok(DeleteSidecar::empty(&key_schema));
+    }
+
+    keys.sort_by(|lhs, rhs| {
+        lhs.key
+            .cmp(&rhs.key)
+            .then_with(|| rhs.commit_ts.cmp(&lhs.commit_ts))
+            .then_with(|| rhs.sequence.cmp(&lhs.sequence))
+            .then_with(|| lhs.row_idx.cmp(&rhs.row_idx))
+    });
+    let sorted_indices: Vec<u32> = keys.into_iter().map(|entry| entry.row_idx).collect();
+    let sorted = take_record_batch(&merged, &sorted_indices)?;
+    decode_delete_sidecar(&sorted, extractor.as_ref())
 }
 
 fn bloom_filter_columns(config: &SsTableConfig, schema: &SchemaRef) -> Vec<ColumnPath> {
@@ -1952,6 +2171,83 @@ mod tests {
             .expect("max key");
         assert_eq!(min_key, "a");
         assert_eq!(max_key, "e");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_orders_rows_across_multiple_immutables() {
+        use arrow_array::StringArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = Path::from(tempdir.path().to_string_lossy().to_string());
+        let extractor = projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> = extractor.into();
+        let config = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), fs, root).with_key_extractor(extractor),
+        );
+
+        let mut writer = ParquetTableWriter::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(77), 0),
+        );
+        let segment_old = sample_segment(
+            vec![("k2".to_string(), 20), ("k3".to_string(), 30)],
+            vec![20, 10],
+            vec![false, false],
+        );
+        let segment_new = sample_segment(
+            vec![("k1".to_string(), 40), ("k2".to_string(), 50)],
+            vec![30, 25],
+            vec![false, false],
+        );
+        writer.stage_immutable(&segment_old).expect("stage old");
+        writer.stage_immutable(&segment_new).expect("stage new");
+
+        let table = writer.finish(NoopExecutor).await.expect("finish");
+        let data_path = table.descriptor().data_path().expect("data path").clone();
+        let mut stream = open_parquet_stream(
+            Arc::clone(config.fs()),
+            data_path,
+            None,
+            None,
+            None,
+            None,
+            NoopExecutor,
+        )
+        .await
+        .expect("open data stream");
+
+        let mut got = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch.expect("batch");
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id column");
+            let commits = batch
+                .column_by_name(MVCC_COMMIT_COL)
+                .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+                .expect("commit column");
+            for row in 0..batch.num_rows() {
+                got.push((ids.value(row).to_string(), commits.value(row)));
+            }
+        }
+
+        assert_eq!(
+            got,
+            vec![
+                ("k1".to_string(), 30),
+                ("k2".to_string(), 25),
+                ("k2".to_string(), 20),
+                ("k3".to_string(), 10),
+            ],
+            "multi-immutable flush must persist rows in global key/timestamp order"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
