@@ -809,13 +809,30 @@ impl DbBuilder<Unconfigured> {
         self,
         root: impl AsRef<std::path::Path>,
     ) -> Result<DbBuilder<StorageConfig<LocalFs>>, DbBuildError> {
+        self.on_durable_fs(Arc::new(LocalFs {}), root)
+    }
+
+    /// Select a durable filesystem backend rooted at `root`.
+    ///
+    /// This is primarily intended for advanced harnesses (e.g. benchmarks/tests)
+    /// that need a wrapped filesystem implementation while preserving the normal
+    /// durable `on_disk` layout semantics.
+    #[must_use = "use the returned DbBuilder to continue configuration"]
+    #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+    pub fn on_durable_fs<FS>(
+        self,
+        fs: Arc<FS>,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<DbBuilder<StorageConfig<FS>>, DbBuildError>
+    where
+        FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
+    {
         let root_ref = root.as_ref();
         let path =
             Path::from_filesystem_path(root_ref).map_err(|err| DbBuildError::InvalidPath {
                 path: root_ref.display().to_string(),
                 reason: err.to_string(),
             })?;
-        let fs = Arc::new(LocalFs {});
         let state = StorageConfig::new(fs, path, DurabilityClass::Durable).with_create_layout(true);
         Ok(DbBuilder {
             mode_config: self.mode_config,

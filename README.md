@@ -173,6 +173,31 @@ Generate an HTML report:
 cargo llvm-cov --workspace --html
 ```
 
+### Compaction Benchmark (Local FS)
+
+Default run:
+
+```bash
+cargo bench --bench compaction_local
+```
+
+Example tuned run:
+
+```bash
+TONBO_COMPACTION_BENCH_INGEST_BATCHES=768 \
+TONBO_COMPACTION_BENCH_ROWS_PER_BATCH=96 \
+TONBO_COMPACTION_BENCH_KEY_SPACE=4096 \
+TONBO_COMPACTION_BENCH_ARTIFACT_ITERATIONS=64 \
+TONBO_COMPACTION_BENCH_CRITERION_SAMPLE_SIZE=30 \
+TONBO_COMPACTION_BENCH_WAL_SYNC=always \
+cargo bench --bench compaction_local
+```
+
+Benchmark configuration is env-only via `TONBO_COMPACTION_BENCH_*`.
+For benchmark setup, scenario wiring, and JSON artifact schema/output, see:
+- `benches/compaction_local.rs`
+- `benches/compaction/common.rs`
+
 ### Project status
 
 Tonbo is currently in **alpha**. APIs may change, and we're actively iterating based on feedback.
