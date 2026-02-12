@@ -643,6 +643,8 @@ struct ModelRunner {
 
 impl ModelRunner {
     async fn new(seed: u64, name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // Baseline runs leave SST/reopen off for deterministic behavior. Expanded CI coverage
+        // opts into randomized SST/compaction/reopen paths via these env toggles.
         let allow_reopen = env::var("TONBO_COMPACTION_REOPEN").is_ok();
         let allow_sst = env::var("TONBO_COMPACTION_MODEL_SST").is_ok();
         let eager_flush = allow_sst
