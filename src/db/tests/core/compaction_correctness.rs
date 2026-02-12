@@ -643,6 +643,7 @@ struct ModelRunner {
     harness: ScenarioHarness,
     oracle: MvccOracle,
     l0_ssts: Vec<u64>,
+    // When set, reads run against this exact snapshot until a mutating op invalidates it.
     active_snapshot_ts: Option<u64>,
     active_snapshot: Option<TxSnapshot>,
     allow_reopen: bool,
@@ -684,6 +685,8 @@ impl ModelRunner {
     }
 
     fn clear_active_snapshot(&mut self) {
+        // Model snapshots are treated as read-only checkpoints. Any write/flush operation
+        // invalidates the pinned snapshot so follow-up reads observe a fresh view.
         self.active_snapshot_ts = None;
         self.active_snapshot = None;
     }
@@ -971,6 +974,68 @@ fn mvcc_oracle_visible_version_prefers_tombstone() {
 
     let scan = oracle.scan_range(Some("a"), Some("c"), 6);
     assert_eq!(scan, vec![("c".to_string(), 31)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_runner_mutation_ops_clear_active_snapshot() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut runner = ModelRunner::new(7, "compaction-correctness-model-snapshot-clear").await?;
+
+    runner.apply_op(OpKind::Snapshot).await?;
+    assert!(runner.active_snapshot_ts.is_some());
+    assert!(runner.active_snapshot.is_some());
+
+    runner.apply_op(OpKind::Put).await?;
+    assert!(runner.active_snapshot_ts.is_none());
+    assert!(runner.active_snapshot.is_none());
+
+    runner.apply_op(OpKind::Snapshot).await?;
+    assert!(runner.active_snapshot_ts.is_some());
+    assert!(runner.active_snapshot.is_some());
+
+    runner.apply_op(OpKind::Delete).await?;
+    assert!(runner.active_snapshot_ts.is_none());
+    assert!(runner.active_snapshot.is_none());
+
+    runner.apply_op(OpKind::Snapshot).await?;
+    assert!(runner.active_snapshot_ts.is_some());
+    assert!(runner.active_snapshot.is_some());
+
+    runner.apply_op(OpKind::Flush).await?;
+    assert!(runner.active_snapshot_ts.is_none());
+    assert!(runner.active_snapshot.is_none());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_runner_reads_use_pinned_snapshot_until_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut runner = ModelRunner::new(11, "compaction-correctness-model-pinned-read").await?;
+
+    runner.apply_op(OpKind::Snapshot).await?;
+    let pinned_ts = runner
+        .active_snapshot_ts
+        .ok_or("snapshot should set active_snapshot_ts")?;
+
+    runner.apply_op(OpKind::Get).await?;
+    let last = runner
+        .trace
+        .entries
+        .back()
+        .ok_or("expected get op in trace")?;
+    match &last.op {
+        Op::Get { snapshot_ts, .. } => assert_eq!(*snapshot_ts, pinned_ts),
+        other => return Err(format!("expected Get op, got {other:?}").into()),
+    }
+    assert_eq!(runner.active_snapshot_ts, Some(pinned_ts));
+    assert!(runner.active_snapshot.is_some());
+
+    runner.apply_op(OpKind::Put).await?;
+    assert!(runner.active_snapshot_ts.is_none());
+    assert!(runner.active_snapshot.is_none());
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
