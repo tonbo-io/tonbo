@@ -23,7 +23,7 @@ Compaction rewrites physical layout and can silently break logical correctness. 
 ## Non-Goals
 
 - Performance benchmarking or tuning.
-- CI gating or long-running fuzzing (added later once validated).
+- Long-running fuzzing as a required CI blocker.
 - Full coverage of crash recovery or manifest/GC interactions (follow-on work).
 - Guaranteeing correctness for future range tombstones or remote compaction (follow-on work).
 
@@ -114,6 +114,11 @@ The gate must emit enough context to replay failures:
 
 Initial coverage targets **minor compaction** and the current read path across mutable + immutable + SST layers. Major compaction, manifest/GC, and remote execution are validated in Phase 1+ after the minimal gate is stable.
 
+### CI Execution Lanes
+
+- **Required deterministic baseline:** run `compaction_correctness_` while skipping `compaction_correctness_model_randomized`. This keeps the required gate reproducible and focused on deterministic scenario coverage.
+- **Optional expanded randomized lane:** run `compaction_correctness_model_randomized` with `TONBO_COMPACTION_MODEL_SST=1`, `TONBO_COMPACTION_REOPEN=1`, and `TONBO_COMPACTION_EAGER_FLUSH=1` (with explicit seed list) to intentionally exercise SST/compaction/reopen model behavior.
+
 ## References
 
 - [Model-based testing](https://en.wikipedia.org/wiki/Model-based_testing)
@@ -125,6 +130,6 @@ Initial coverage targets **minor compaction** and the current read path across m
 
 - Add tombstone pruning safety tests and MVCC watermark checks.
 - Extend coverage to major compaction, manifest updates, and GC integration.
-- Enable CI gating and nightly fuzzing once test stability is confirmed.
+- Promote expanded randomized coverage from optional to required once SST/page-index stability is complete.
 - Add crash/reopen validation as part of the gate.
 - Add range tombstone semantics when supported.
