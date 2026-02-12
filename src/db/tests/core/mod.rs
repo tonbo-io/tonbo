@@ -6,5 +6,6 @@ mod ingest;
 mod metadata;
 mod recovery;
 mod scan;
+mod seal_policy;
 mod wal;
 mod wal_pruning;

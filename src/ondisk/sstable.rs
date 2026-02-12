@@ -2208,4 +2208,26 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
     }
+
+    #[test]
+    fn validate_page_indexes_accepts_zero_row_groups() {
+        use parquet::{
+            file::metadata::{FileMetaData, ParquetMetaData},
+            schema::types::{SchemaDescriptor, Type as SchemaType},
+        };
+
+        let parquet_schema = SchemaType::group_type_builder("schema")
+            .build()
+            .expect("parquet schema");
+        let schema_descr = Arc::new(SchemaDescriptor::new(Arc::new(parquet_schema)));
+        let file_meta = FileMetaData::new(2, 0, None, None, schema_descr, None);
+        let metadata = ParquetMetaData::new(file_meta, vec![]);
+
+        let path = Path::from("test/empty.parquet");
+        let result = validate_page_indexes(&path, &metadata);
+        assert!(
+            result.is_ok(),
+            "validate_page_indexes should accept files with 0 row groups"
+        );
+    }
 }
