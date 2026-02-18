@@ -53,6 +53,7 @@ const DEFAULT_ENABLE_READ_WHILE_COMPACTION: bool = true;
 const DEFAULT_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY: bool = true;
 const INGEST_RETRY_MAX_ATTEMPTS: usize = 8;
 const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
+const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
 
 pub(crate) type BenchmarkDb = DB<ProbedLocalFs, TokioExecutor>;
 
@@ -313,6 +314,8 @@ pub(crate) enum BenchError {
     Db(#[from] DBError),
     #[error("{0}")]
     Message(String),
+    #[error("scenario `{scenario_id}` skipped: {reason}")]
+    ScenarioSkipped { scenario_id: String, reason: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -404,6 +407,12 @@ impl ResolvedConfig {
         if rows_per_batch == 0 {
             return Err(BenchError::InvalidEnv {
                 name: "TONBO_COMPACTION_BENCH_ROWS_PER_BATCH",
+                value: "must be > 0".to_string(),
+            });
+        }
+        if ingest_batches == 0 {
+            return Err(BenchError::InvalidEnv {
+                name: "TONBO_COMPACTION_BENCH_INGEST_BATCHES",
                 value: "must be > 0".to_string(),
             });
         }
@@ -976,23 +985,29 @@ fn deterministic_value(global_idx: usize, seed: u64) -> i64 {
     (mixed >> 1) as i64
 }
 
-pub(crate) async fn latest_version_summary(db: &BenchmarkDb) -> Result<VersionSummary, BenchError> {
+pub(crate) async fn latest_version_summary_if_any(
+    db: &BenchmarkDb,
+) -> Result<Option<VersionSummary>, BenchError> {
     let versions = db
         .list_versions(1)
         .await
         .map_err(|err| BenchError::Message(format!("list_versions failed: {err}")))?;
-    let Some(version) = versions.into_iter().next() else {
+    Ok(versions.into_iter().next().map(|version| VersionSummary {
+        sst_count: version.sst_count,
+        level_count: version.level_count,
+    }))
+}
+
+pub(crate) async fn latest_version_summary(db: &BenchmarkDb) -> Result<VersionSummary, BenchError> {
+    let Some(version) = latest_version_summary_if_any(db).await? else {
         return Err(BenchError::Message(
             "list_versions returned no versions".to_string(),
         ));
     };
-    Ok(VersionSummary {
-        sst_count: version.sst_count,
-        level_count: version.level_count,
-    })
+    Ok(version)
 }
 
-pub(crate) async fn wait_for_compaction(
+pub(crate) async fn wait_for_first_compaction_observed(
     db: &BenchmarkDb,
     before: VersionSummary,
     config: &ResolvedConfig,
@@ -1014,6 +1029,60 @@ pub(crate) async fn wait_for_compaction(
                 before.level_count,
                 current.sst_count,
                 current.level_count,
+                config.compaction_wait_timeout_ms
+            )));
+        }
+        sleep(poll).await;
+    }
+}
+
+pub(crate) async fn wait_for_compaction_quiesced(
+    db: &BenchmarkDb,
+    before: VersionSummary,
+    config: &ResolvedConfig,
+) -> Result<(), BenchError> {
+    let timeout = Duration::from_millis(config.compaction_wait_timeout_ms);
+    let poll = Duration::from_millis(config.compaction_poll_interval_ms);
+    let started = Instant::now();
+    let mut observed_compaction = false;
+    let mut last_after_observed = before;
+    let mut stable_polls = 0usize;
+
+    loop {
+        let current = latest_version_summary(db).await?;
+        let changed =
+            current.sst_count < before.sst_count || current.level_count > before.level_count;
+
+        if !observed_compaction {
+            if changed {
+                observed_compaction = true;
+                last_after_observed = current;
+                stable_polls = 0;
+            }
+        } else {
+            if current.sst_count == last_after_observed.sst_count
+                && current.level_count == last_after_observed.level_count
+            {
+                stable_polls = stable_polls.saturating_add(1);
+                if stable_polls >= COMPACTION_QUIESCED_STABLE_POLLS {
+                    return Ok(());
+                }
+            } else {
+                stable_polls = 0;
+                last_after_observed = current;
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(BenchError::Message(format!(
+                "timed out waiting for compaction quiescence: before(ssts={}, levels={}) \
+                 current(ssts={}, levels={}) observed={} stable_polls={} timeout_ms={}",
+                before.sst_count,
+                before.level_count,
+                current.sst_count,
+                current.level_count,
+                observed_compaction,
+                stable_polls,
                 config.compaction_wait_timeout_ms
             )));
         }

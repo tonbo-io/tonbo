@@ -11,8 +11,9 @@ use common::{
     BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning, ResolvedConfig,
     ScenarioDimensionsArtifact, ScenarioState, ScenarioWorkload, VersionSummary,
     WriteWorkloadState, artifact_path, benchmark_schema, build_artifact, build_run_id,
-    build_runtime, ingest_workload, latest_version_summary, open_benchmark_db, read_all_rows,
-    run_criterion, scenario_root, wait_for_compaction, write_artifact_json,
+    build_runtime, ingest_workload, latest_version_summary, latest_version_summary_if_any,
+    open_benchmark_db, read_all_rows, run_criterion, scenario_root, wait_for_compaction_quiesced,
+    wait_for_first_compaction_observed, write_artifact_json,
 };
 
 fn compaction_local(c: &mut Criterion) {
@@ -49,32 +50,67 @@ async fn prepare_scenarios(
     run_id: &str,
 ) -> Result<Vec<ScenarioState>, BenchError> {
     let mut scenarios = Vec::new();
-    scenarios.push(prepare_read_baseline(config, run_id).await?);
-    scenarios.push(prepare_read_post_compaction(config, run_id).await?);
+    push_prepared_scenario(&mut scenarios, prepare_read_baseline(config, run_id).await)?;
+    push_prepared_scenario(
+        &mut scenarios,
+        prepare_read_after_first_compaction_observed(config, run_id).await,
+    )?;
+    push_prepared_scenario(
+        &mut scenarios,
+        prepare_read_compaction_quiesced(config, run_id).await,
+    )?;
 
     let sweep_points = config.compaction_sweep_points();
     if config.enable_read_while_compaction {
         for point in &sweep_points {
-            let scenario = prepare_read_while_compaction(config, run_id, point).await?;
-            scenarios.push(scenario);
+            push_prepared_scenario(
+                &mut scenarios,
+                prepare_read_while_compaction(config, run_id, point).await,
+            )?;
         }
     }
     if config.enable_write_throughput_vs_compaction_frequency {
         for &periodic_tick_ms in &config.write_frequency_periodic_ticks_ms {
             for point in &sweep_points {
-                let scenario = prepare_write_throughput_vs_compaction_frequency(
-                    config,
-                    run_id,
-                    point,
-                    periodic_tick_ms,
-                )
-                .await?;
-                scenarios.push(scenario);
+                push_prepared_scenario(
+                    &mut scenarios,
+                    prepare_write_throughput_vs_compaction_frequency(
+                        config,
+                        run_id,
+                        point,
+                        periodic_tick_ms,
+                    )
+                    .await,
+                )?;
             }
         }
     }
 
+    if scenarios.is_empty() {
+        return Err(BenchError::Message(
+            "no benchmark scenarios prepared; adjust TONBO_COMPACTION_BENCH_* configuration"
+                .to_string(),
+        ));
+    }
+
     Ok(scenarios)
+}
+
+fn push_prepared_scenario(
+    scenarios: &mut Vec<ScenarioState>,
+    prepared: Result<ScenarioState, BenchError>,
+) -> Result<(), BenchError> {
+    match prepared {
+        Ok(scenario) => scenarios.push(scenario),
+        Err(BenchError::ScenarioSkipped {
+            scenario_id,
+            reason,
+        }) => {
+            eprintln!("tonbo benchmark: skipping scenario `{scenario_id}`: {reason}");
+        }
+        Err(err) => return Err(err),
+    }
+    Ok(())
 }
 
 async fn prepare_read_baseline(
@@ -98,7 +134,12 @@ async fn prepare_read_baseline(
 
     ingest_workload(&db, &schema, config).await?;
 
-    let version_ready = latest_version_summary(&db).await?;
+    let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
     ensure_ssts_present(scenario_id, version_ready)?;
     let rows_per_scan = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
@@ -123,11 +164,41 @@ async fn prepare_read_baseline(
     })
 }
 
-async fn prepare_read_post_compaction(
+async fn prepare_read_after_first_compaction_observed(
     config: &ResolvedConfig,
     run_id: &str,
 ) -> Result<ScenarioState, BenchError> {
-    let scenario_id = "read_post_compaction";
+    prepare_read_compaction_state(
+        config,
+        run_id,
+        "read_after_first_compaction_observed",
+        "Read After First Compaction Observed",
+        false,
+    )
+    .await
+}
+
+async fn prepare_read_compaction_quiesced(
+    config: &ResolvedConfig,
+    run_id: &str,
+) -> Result<ScenarioState, BenchError> {
+    prepare_read_compaction_state(
+        config,
+        run_id,
+        "read_compaction_quiesced",
+        "Read Compaction Quiesced",
+        true,
+    )
+    .await
+}
+
+async fn prepare_read_compaction_state(
+    config: &ResolvedConfig,
+    run_id: &str,
+    scenario_id: &'static str,
+    scenario_name: &'static str,
+    wait_for_quiesced: bool,
+) -> Result<ScenarioState, BenchError> {
     let scenario_variant_id = "default".to_string();
     let benchmark_id = scenario_id.to_string();
     let root = scenario_root(run_id, &benchmark_id);
@@ -143,7 +214,13 @@ async fn prepare_read_post_compaction(
     )
     .await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
-    let version_before_compaction = latest_version_summary(&ingest_only_db).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
+    else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
@@ -157,14 +234,18 @@ async fn prepare_read_post_compaction(
         &io_probe,
     )
     .await?;
-    wait_for_compaction(&db, version_before_compaction, config).await?;
+    if wait_for_quiesced {
+        wait_for_compaction_quiesced(&db, version_before_compaction, config).await?;
+    } else {
+        wait_for_first_compaction_observed(&db, version_before_compaction, config).await?;
+    }
     let version_ready = latest_version_summary(&db).await?;
     let rows_per_scan = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
 
     Ok(ScenarioState {
         scenario_id,
-        scenario_name: "Read Post Compaction".to_string(),
+        scenario_name: scenario_name.to_string(),
         scenario_variant_id: scenario_variant_id.clone(),
         benchmark_id,
         workload: ScenarioWorkload::ReadOnly,
@@ -204,7 +285,13 @@ async fn prepare_read_while_compaction(
     )
     .await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
-    let version_before_compaction = latest_version_summary(&ingest_only_db).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
+    else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
@@ -216,7 +303,12 @@ async fn prepare_read_while_compaction(
         &io_probe,
     )
     .await?;
-    let version_ready = latest_version_summary(&db).await?;
+    let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
+        return scenario_skipped(
+            scenario_id,
+            "reopened database has no manifest versions to benchmark",
+        );
+    };
     let rows_per_scan = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
     let write_state = WriteWorkloadState::new(
@@ -277,7 +369,13 @@ async fn prepare_write_throughput_vs_compaction_frequency(
     )
     .await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
-    let version_before_compaction = latest_version_summary(&ingest_only_db).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
+    else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
@@ -289,7 +387,12 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         &io_probe,
     )
     .await?;
-    let version_ready = latest_version_summary(&db).await?;
+    let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
+        return scenario_skipped(
+            scenario_id,
+            "reopened database has no manifest versions to benchmark",
+        );
+    };
     let setup_io = io_probe.snapshot();
     let write_state = WriteWorkloadState::new(
         Arc::clone(&schema),
@@ -355,11 +458,19 @@ fn format_max_task_bytes(value: Option<usize>) -> String {
 
 fn ensure_ssts_present(scenario_id: &str, summary: VersionSummary) -> Result<(), BenchError> {
     if summary.sst_count == 0 {
-        return Err(BenchError::Message(format!(
-            "{scenario_id} setup produced no SSTs; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES"
-        )));
+        return scenario_skipped(
+            scenario_id,
+            "setup produced no SSTs; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
     }
     Ok(())
+}
+
+fn scenario_skipped<T>(scenario_id: &str, reason: impl Into<String>) -> Result<T, BenchError> {
+    Err(BenchError::ScenarioSkipped {
+        scenario_id: scenario_id.to_string(),
+        reason: reason.into(),
+    })
 }
 
 criterion_group!(benches, compaction_local);
