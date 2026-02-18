@@ -28,10 +28,13 @@ use fusio_manifest::ObjectHead;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
-use tonbo::db::{CompactionOptions, DB, DBError, DbBuildError, DbBuilder, WalSyncPolicy};
+use tonbo::db::{
+    CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder,
+    LeveledPlannerConfig, WalSyncPolicy,
+};
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 2;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 3;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_ROWS_PER_BATCH: usize = 64;
@@ -42,6 +45,14 @@ const DEFAULT_COMPACTION_WAIT_TIMEOUT_MS: u64 = 20_000;
 const DEFAULT_COMPACTION_POLL_INTERVAL_MS: u64 = 50;
 const DEFAULT_COMPACTION_PERIODIC_TICK_MS: u64 = 200;
 const DEFAULT_SEED: u64 = 584;
+const DEFAULT_SWEEP_L0_TRIGGERS: &[usize] = &[8];
+const DEFAULT_SWEEP_MAX_INPUTS: &[usize] = &[6];
+const DEFAULT_SWEEP_MAX_TASK_BYTES: &[Option<usize>] = &[None];
+const DEFAULT_WRITE_FREQUENCY_PERIODIC_TICKS_MS: &[u64] = &[50, 200];
+const DEFAULT_ENABLE_READ_WHILE_COMPACTION: bool = true;
+const DEFAULT_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY: bool = true;
+const INGEST_RETRY_MAX_ATTEMPTS: usize = 8;
+const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
 
 pub(crate) type BenchmarkDb = DB<ProbedLocalFs, TokioExecutor>;
 
@@ -304,6 +315,13 @@ pub(crate) enum BenchError {
     Message(String),
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CompactionSweepPoint {
+    pub(crate) l0_trigger: usize,
+    pub(crate) max_inputs: usize,
+    pub(crate) max_task_bytes: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedConfig {
     pub(crate) ingest_batches: usize,
@@ -317,6 +335,12 @@ pub(crate) struct ResolvedConfig {
     pub(crate) seed: u64,
     pub(crate) wal_sync_policy: WalSyncPolicy,
     pub(crate) wal_sync_policy_name: String,
+    pub(crate) sweep_l0_triggers: Vec<usize>,
+    pub(crate) sweep_max_inputs: Vec<usize>,
+    pub(crate) sweep_max_task_bytes: Vec<Option<usize>>,
+    pub(crate) write_frequency_periodic_ticks_ms: Vec<u64>,
+    pub(crate) enable_read_while_compaction: bool,
+    pub(crate) enable_write_throughput_vs_compaction_frequency: bool,
 }
 
 impl ResolvedConfig {
@@ -352,6 +376,30 @@ impl ResolvedConfig {
         )?;
         let seed = env_u64("TONBO_COMPACTION_BENCH_SEED", DEFAULT_SEED)?;
         let (wal_sync_policy, wal_sync_policy_name) = env_wal_sync_policy()?;
+        let sweep_l0_triggers = env_usize_list(
+            "TONBO_COMPACTION_BENCH_SWEEP_L0_TRIGGERS",
+            DEFAULT_SWEEP_L0_TRIGGERS,
+        )?;
+        let sweep_max_inputs = env_usize_list(
+            "TONBO_COMPACTION_BENCH_SWEEP_MAX_INPUTS",
+            DEFAULT_SWEEP_MAX_INPUTS,
+        )?;
+        let sweep_max_task_bytes = env_optional_usize_list(
+            "TONBO_COMPACTION_BENCH_SWEEP_MAX_TASK_BYTES",
+            DEFAULT_SWEEP_MAX_TASK_BYTES,
+        )?;
+        let write_frequency_periodic_ticks_ms = env_u64_list(
+            "TONBO_COMPACTION_BENCH_WRITE_FREQUENCY_PERIODIC_TICKS_MS",
+            DEFAULT_WRITE_FREQUENCY_PERIODIC_TICKS_MS,
+        )?;
+        let enable_read_while_compaction = env_bool(
+            "TONBO_COMPACTION_BENCH_ENABLE_READ_WHILE_COMPACTION",
+            DEFAULT_ENABLE_READ_WHILE_COMPACTION,
+        )?;
+        let enable_write_throughput_vs_compaction_frequency = env_bool(
+            "TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY",
+            DEFAULT_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY,
+        )?;
 
         if rows_per_batch == 0 {
             return Err(BenchError::InvalidEnv {
@@ -408,7 +456,29 @@ impl ResolvedConfig {
             seed,
             wal_sync_policy,
             wal_sync_policy_name,
+            sweep_l0_triggers,
+            sweep_max_inputs,
+            sweep_max_task_bytes,
+            write_frequency_periodic_ticks_ms,
+            enable_read_while_compaction,
+            enable_write_throughput_vs_compaction_frequency,
         })
+    }
+
+    pub(crate) fn compaction_sweep_points(&self) -> Vec<CompactionSweepPoint> {
+        let mut points = Vec::new();
+        for &l0_trigger in &self.sweep_l0_triggers {
+            for &max_inputs in &self.sweep_max_inputs {
+                for &max_task_bytes in &self.sweep_max_task_bytes {
+                    points.push(CompactionSweepPoint {
+                        l0_trigger,
+                        max_inputs,
+                        max_task_bytes,
+                    });
+                }
+            }
+        }
+        points
     }
 
     pub(crate) fn artifact(&self) -> ResolvedConfigArtifact {
@@ -423,6 +493,13 @@ impl ResolvedConfig {
             compaction_periodic_tick_ms: self.compaction_periodic_tick_ms,
             seed: self.seed,
             wal_sync_policy: self.wal_sync_policy_name.clone(),
+            sweep_l0_triggers: self.sweep_l0_triggers.clone(),
+            sweep_max_inputs: self.sweep_max_inputs.clone(),
+            sweep_max_task_bytes: self.sweep_max_task_bytes.clone(),
+            write_frequency_periodic_ticks_ms: self.write_frequency_periodic_ticks_ms.clone(),
+            enable_read_while_compaction: self.enable_read_while_compaction,
+            enable_write_throughput_vs_compaction_frequency: self
+                .enable_write_throughput_vs_compaction_frequency,
         }
     }
 }
@@ -433,16 +510,71 @@ pub(crate) struct VersionSummary {
     pub(crate) level_count: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum CompactionProfile {
+    Disabled,
+    Default { periodic_tick_ms: u64 },
+    Swept(CompactionTuning),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CompactionTuning {
+    pub(crate) l0_trigger: usize,
+    pub(crate) max_inputs: usize,
+    pub(crate) max_task_bytes: Option<usize>,
+    pub(crate) periodic_tick_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ScenarioWorkload {
+    ReadOnly,
+    ReadWhileCompaction,
+    WriteThroughput,
+}
+
+#[derive(Clone)]
+pub(crate) struct WriteWorkloadState {
+    schema: SchemaRef,
+    rows_per_batch: usize,
+    key_space: usize,
+    seed: u64,
+    next_batch: Arc<AtomicU64>,
+}
+
+impl WriteWorkloadState {
+    pub(crate) fn new(
+        schema: SchemaRef,
+        rows_per_batch: usize,
+        key_space: usize,
+        seed: u64,
+        start_batch: u64,
+    ) -> Self {
+        Self {
+            schema,
+            rows_per_batch,
+            key_space,
+            seed,
+            next_batch: Arc::new(AtomicU64::new(start_batch)),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ScenarioState {
     pub(crate) scenario_id: &'static str,
-    pub(crate) scenario_name: &'static str,
+    pub(crate) scenario_name: String,
+    pub(crate) scenario_variant_id: String,
+    pub(crate) benchmark_id: String,
+    pub(crate) workload: ScenarioWorkload,
+    pub(crate) dimensions: ScenarioDimensionsArtifact,
     pub(crate) db: BenchmarkDb,
     pub(crate) io_probe: IoProbe,
     pub(crate) setup_io: IoCountersArtifact,
-    pub(crate) rows_per_scan: usize,
+    pub(crate) rows_per_op_hint: usize,
     pub(crate) version_before_compaction: VersionSummary,
     pub(crate) version_ready: VersionSummary,
+    pub(crate) write_state: Option<WriteWorkloadState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -467,14 +599,37 @@ pub(crate) struct ResolvedConfigArtifact {
     compaction_periodic_tick_ms: u64,
     seed: u64,
     wal_sync_policy: String,
+    sweep_l0_triggers: Vec<usize>,
+    sweep_max_inputs: Vec<usize>,
+    sweep_max_task_bytes: Vec<Option<usize>>,
+    write_frequency_periodic_ticks_ms: Vec<u64>,
+    enable_read_while_compaction: bool,
+    enable_write_throughput_vs_compaction_frequency: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ScenarioArtifact {
     scenario_id: String,
     scenario_name: String,
+    scenario_variant_id: String,
+    dimensions: ScenarioDimensionsArtifact,
     setup: ScenarioSetupArtifact,
     summary: ScenarioSummaryArtifact,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ScenarioDimensionsArtifact {
+    scenario_variant_id: String,
+    workload: ScenarioWorkload,
+    sweep: CompactionSweepArtifact,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CompactionSweepArtifact {
+    l0_trigger: Option<usize>,
+    max_inputs: Option<usize>,
+    max_task_bytes: Option<usize>,
+    periodic_tick_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,6 +646,7 @@ struct ScenarioSetupArtifact {
 struct ScenarioSummaryArtifact {
     iterations: usize,
     total_elapsed_ns: u64,
+    rows_processed: u64,
     throughput: ThroughputSummary,
     latency_ns: LatencySummary,
     io: IoCountersArtifact,
@@ -515,7 +671,107 @@ struct ScenarioMeasurement {
     iterations: usize,
     total_elapsed_ns: u64,
     latencies_ns: Vec<u64>,
+    rows_processed: u64,
     io: IoCountersArtifact,
+}
+
+impl ScenarioDimensionsArtifact {
+    pub(crate) fn baseline(variant_id: impl Into<String>, workload: ScenarioWorkload) -> Self {
+        Self {
+            scenario_variant_id: variant_id.into(),
+            workload,
+            sweep: CompactionSweepArtifact {
+                l0_trigger: None,
+                max_inputs: None,
+                max_task_bytes: None,
+                periodic_tick_ms: None,
+            },
+        }
+    }
+
+    pub(crate) fn swept(
+        variant_id: impl Into<String>,
+        workload: ScenarioWorkload,
+        tuning: &CompactionTuning,
+    ) -> Self {
+        Self {
+            scenario_variant_id: variant_id.into(),
+            workload,
+            sweep: CompactionSweepArtifact {
+                l0_trigger: Some(tuning.l0_trigger),
+                max_inputs: Some(tuning.max_inputs),
+                max_task_bytes: tuning.max_task_bytes,
+                periodic_tick_ms: Some(tuning.periodic_tick_ms),
+            },
+        }
+    }
+}
+
+async fn run_scenario_operation(scenario: &ScenarioState) -> Result<usize, BenchError> {
+    match scenario.workload {
+        ScenarioWorkload::ReadOnly => read_all_rows(&scenario.db).await,
+        ScenarioWorkload::ReadWhileCompaction => {
+            let write_state = scenario.write_state.as_ref().ok_or_else(|| {
+                BenchError::Message(format!(
+                    "scenario `{}` missing write workload state",
+                    scenario.benchmark_id
+                ))
+            })?;
+            let write_future = ingest_next_write_batch(&scenario.db, write_state);
+            let read_future = read_all_rows(&scenario.db);
+            let (write_result, read_result) = tokio::join!(write_future, read_future);
+            let _ = write_result?;
+            read_result
+        }
+        ScenarioWorkload::WriteThroughput => {
+            let write_state = scenario.write_state.as_ref().ok_or_else(|| {
+                BenchError::Message(format!(
+                    "scenario `{}` missing write workload state",
+                    scenario.benchmark_id
+                ))
+            })?;
+            ingest_next_write_batch(&scenario.db, write_state).await
+        }
+    }
+}
+
+async fn ingest_next_write_batch(
+    db: &BenchmarkDb,
+    write_state: &WriteWorkloadState,
+) -> Result<usize, BenchError> {
+    let batch_idx_u64 = write_state.next_batch.fetch_add(1, Ordering::Relaxed);
+    let batch_idx = usize::try_from(batch_idx_u64).unwrap_or(usize::MAX);
+    for attempt in 1..=INGEST_RETRY_MAX_ATTEMPTS {
+        let batch = build_batch(
+            &write_state.schema,
+            write_state.rows_per_batch,
+            write_state.key_space,
+            write_state.seed,
+            batch_idx,
+        )?;
+        match db.ingest(batch).await {
+            Ok(()) => {
+                return Ok(write_state.rows_per_batch);
+            }
+            Err(err) => {
+                if !is_retryable_ingest_error(&err) || attempt == INGEST_RETRY_MAX_ATTEMPTS {
+                    return Err(BenchError::Db(err));
+                }
+                let delay_ms = (attempt as u64).saturating_mul(INGEST_RETRY_BACKOFF_BASE_MS);
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    Err(BenchError::Message(
+        "ingest retry loop exited unexpectedly".to_string(),
+    ))
+}
+
+fn is_retryable_ingest_error(err: &DBError) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("precondition failed")
+        || text.contains("cas conflict")
+        || text.contains("compare-and-swap")
 }
 
 pub(crate) fn build_runtime() -> Result<Runtime, BenchError> {
@@ -545,24 +801,29 @@ pub(crate) fn run_criterion(
     group.sample_size(sample_size);
 
     for scenario in scenarios {
-        group.throughput(Throughput::Elements(usize_to_u64(scenario.rows_per_scan)));
-
-        let db = scenario.db.clone();
+        group.throughput(Throughput::Elements(usize_to_u64(
+            scenario.rows_per_op_hint,
+        )));
+        let scenario = scenario.clone();
         let runtime = Arc::clone(runtime);
-        let scenario_id = scenario.scenario_id;
-        group.bench_function(scenario_id, move |b| {
-            let db = db.clone();
+        let benchmark_id = scenario.benchmark_id.clone();
+        group.bench_function(&benchmark_id, move |b| {
+            let scenario = scenario.clone();
             let runtime = Arc::clone(&runtime);
             b.iter_custom(move |iters| {
+                let scenario = scenario.clone();
                 let started = Instant::now();
                 runtime.block_on(async {
                     for _ in 0..iters {
-                        match read_all_rows(&db).await {
+                        match run_scenario_operation(&scenario).await {
                             Ok(rows) => {
                                 black_box(rows);
                             }
                             Err(err) => {
-                                panic!("scenario `{scenario_id}` read failed: {err}");
+                                panic!(
+                                    "scenario `{}` operation failed: {err}",
+                                    scenario.benchmark_id
+                                );
                             }
                         }
                     }
@@ -612,7 +873,7 @@ pub(crate) async fn open_benchmark_db(
     schema: &SchemaRef,
     root: &Path,
     config: &ResolvedConfig,
-    enable_major_compaction: bool,
+    compaction_profile: &CompactionProfile,
     io_probe: &IoProbe,
 ) -> Result<BenchmarkDb, BenchError> {
     let root_string = absolutize(root)?.to_string_lossy().into_owned();
@@ -622,13 +883,33 @@ pub(crate) async fn open_benchmark_db(
         .wal_sync_policy(config.wal_sync_policy.clone())
         .with_minor_compaction(1, 0);
 
-    if enable_major_compaction {
-        let options = CompactionOptions::new()
-            .periodic_tick(Duration::from_millis(config.compaction_periodic_tick_ms));
-        builder = builder.with_compaction_options(options);
+    match compaction_profile {
+        CompactionProfile::Disabled => {}
+        CompactionProfile::Default { periodic_tick_ms } => {
+            let options =
+                CompactionOptions::new().periodic_tick(Duration::from_millis(*periodic_tick_ms));
+            builder = builder.with_compaction_options(options);
+        }
+        CompactionProfile::Swept(tuning) => {
+            let options = build_swept_compaction_options(tuning);
+            builder = builder.with_compaction_options(options);
+        }
     }
 
     builder.open().await.map_err(BenchError::from)
+}
+
+fn build_swept_compaction_options(tuning: &CompactionTuning) -> CompactionOptions {
+    let planner = LeveledPlannerConfig {
+        l0_trigger: tuning.l0_trigger.max(1),
+        l0_max_inputs: tuning.max_inputs.max(1),
+        max_inputs_per_task: tuning.max_inputs.max(1),
+        max_task_bytes: tuning.max_task_bytes,
+        ..LeveledPlannerConfig::default()
+    };
+    CompactionOptions::new()
+        .strategy(CompactionStrategy::Leveled(planner))
+        .periodic_tick(Duration::from_millis(tuning.periodic_tick_ms.max(1)))
 }
 
 pub(crate) async fn ingest_workload(
@@ -637,7 +918,13 @@ pub(crate) async fn ingest_workload(
     config: &ResolvedConfig,
 ) -> Result<(), BenchError> {
     for batch_idx in 0..config.ingest_batches {
-        let batch = build_batch(schema, config, batch_idx)?;
+        let batch = build_batch(
+            schema,
+            config.rows_per_batch,
+            config.key_space,
+            config.seed,
+            batch_idx,
+        )?;
         db.ingest(batch).await?;
     }
     Ok(())
@@ -645,19 +932,21 @@ pub(crate) async fn ingest_workload(
 
 fn build_batch(
     schema: &SchemaRef,
-    config: &ResolvedConfig,
+    rows_per_batch: usize,
+    key_space: usize,
+    seed: u64,
     batch_idx: usize,
 ) -> Result<RecordBatch, BenchError> {
-    let mut ids = Vec::with_capacity(config.rows_per_batch);
-    let mut values = Vec::with_capacity(config.rows_per_batch);
+    let mut ids = Vec::with_capacity(rows_per_batch);
+    let mut values = Vec::with_capacity(rows_per_batch);
 
-    for row_idx in 0..config.rows_per_batch {
+    for row_idx in 0..rows_per_batch {
         let global_idx = batch_idx
-            .saturating_mul(config.rows_per_batch)
+            .saturating_mul(rows_per_batch)
             .saturating_add(row_idx);
-        let key_idx = deterministic_key_slot(global_idx, config.key_space, config.seed);
+        let key_idx = deterministic_key_slot(global_idx, key_space, seed);
         ids.push(format!("k{key_idx:08}"));
-        values.push(deterministic_value(global_idx, config.seed));
+        values.push(deterministic_value(global_idx, seed));
     }
 
     RecordBatch::try_new(
@@ -762,10 +1051,12 @@ fn measure_scenario(
     scenario.io_probe.reset();
     runtime.block_on(async {
         let mut latencies_ns = Vec::with_capacity(iterations);
+        let mut rows_processed = 0u64;
         let started = Instant::now();
         for _ in 0..iterations {
             let op_started = Instant::now();
-            let rows = read_all_rows(&scenario.db).await?;
+            let rows = run_scenario_operation(scenario).await?;
+            rows_processed = rows_processed.saturating_add(usize_to_u64(rows));
             black_box(rows);
             latencies_ns.push(duration_ns_u64(op_started.elapsed()));
         }
@@ -773,6 +1064,7 @@ fn measure_scenario(
             iterations,
             total_elapsed_ns: duration_ns_u64(started.elapsed()),
             latencies_ns,
+            rows_processed,
             io: scenario.io_probe.snapshot(),
         })
     })
@@ -783,9 +1075,7 @@ fn to_scenario_artifact(
     measurement: ScenarioMeasurement,
 ) -> ScenarioArtifact {
     let latency = latency_summary(&measurement.latencies_ns);
-    let total_rows = scenario
-        .rows_per_scan
-        .saturating_mul(measurement.iterations);
+    let total_rows = measurement.rows_processed as f64;
     let total_elapsed_secs = if measurement.total_elapsed_ns == 0 {
         0.0
     } else {
@@ -794,7 +1084,7 @@ fn to_scenario_artifact(
     let throughput = if total_elapsed_secs > 0.0 {
         ThroughputSummary {
             ops_per_sec: measurement.iterations as f64 / total_elapsed_secs,
-            rows_per_sec: total_rows as f64 / total_elapsed_secs,
+            rows_per_sec: total_rows / total_elapsed_secs,
         }
     } else {
         ThroughputSummary {
@@ -805,9 +1095,11 @@ fn to_scenario_artifact(
 
     ScenarioArtifact {
         scenario_id: scenario.scenario_id.to_string(),
-        scenario_name: scenario.scenario_name.to_string(),
+        scenario_name: scenario.scenario_name.clone(),
+        scenario_variant_id: scenario.scenario_variant_id.clone(),
+        dimensions: scenario.dimensions.clone(),
         setup: ScenarioSetupArtifact {
-            rows_per_scan: scenario.rows_per_scan,
+            rows_per_scan: scenario.rows_per_op_hint,
             sst_count_before_compaction: scenario.version_before_compaction.sst_count,
             level_count_before_compaction: scenario.version_before_compaction.level_count,
             sst_count_ready: scenario.version_ready.sst_count,
@@ -817,6 +1109,7 @@ fn to_scenario_artifact(
         summary: ScenarioSummaryArtifact {
             iterations: measurement.iterations,
             total_elapsed_ns: measurement.total_elapsed_ns,
+            rows_processed: measurement.rows_processed,
             throughput,
             latency_ns: latency,
             io: measurement.io,
@@ -956,6 +1249,144 @@ fn env_u64(name: &'static str, default: u64) -> Result<u64, BenchError> {
             "failed reading environment variable `{name}`: {err}"
         ))),
     }
+}
+
+fn env_usize_list(name: &'static str, default: &[usize]) -> Result<Vec<usize>, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let mut values = Vec::new();
+            for token in raw.split(',') {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let value = trimmed
+                    .parse::<usize>()
+                    .map_err(|_| BenchError::InvalidEnv {
+                        name,
+                        value: raw.clone(),
+                    })?;
+                if value == 0 {
+                    return Err(BenchError::InvalidEnv { name, value: raw });
+                }
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+            if values.is_empty() {
+                return Err(BenchError::InvalidEnv { name, value: raw });
+            }
+            Ok(values)
+        }
+        Err(env::VarError::NotPresent) => Ok(default.to_vec()),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn env_u64_list(name: &'static str, default: &[u64]) -> Result<Vec<u64>, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let mut values = Vec::new();
+            for token in raw.split(',') {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let value = trimmed.parse::<u64>().map_err(|_| BenchError::InvalidEnv {
+                    name,
+                    value: raw.clone(),
+                })?;
+                if value == 0 {
+                    return Err(BenchError::InvalidEnv { name, value: raw });
+                }
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+            if values.is_empty() {
+                return Err(BenchError::InvalidEnv { name, value: raw });
+            }
+            Ok(values)
+        }
+        Err(env::VarError::NotPresent) => Ok(default.to_vec()),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn env_optional_usize_list(
+    name: &'static str,
+    default: &[Option<usize>],
+) -> Result<Vec<Option<usize>>, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let mut values = Vec::new();
+            for token in raw.split(',') {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let parsed = if matches_ignore_ascii_case(trimmed, &["none", "off", "null"])
+                    || trimmed == "0"
+                {
+                    None
+                } else {
+                    let value = trimmed
+                        .parse::<usize>()
+                        .map_err(|_| BenchError::InvalidEnv {
+                            name,
+                            value: raw.clone(),
+                        })?;
+                    if value == 0 {
+                        return Err(BenchError::InvalidEnv { name, value: raw });
+                    }
+                    Some(value)
+                };
+                if !values.contains(&parsed) {
+                    values.push(parsed);
+                }
+            }
+            if values.is_empty() {
+                return Err(BenchError::InvalidEnv { name, value: raw });
+            }
+            Ok(values)
+        }
+        Err(env::VarError::NotPresent) => Ok(default.to_vec()),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn env_bool(name: &'static str, default: bool) -> Result<bool, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            parse_bool(raw.trim()).ok_or_else(|| BenchError::InvalidEnv { name, value: raw })
+        }
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    if matches_ignore_ascii_case(raw, &["1", "true", "yes", "on"]) {
+        return Some(true);
+    }
+    if matches_ignore_ascii_case(raw, &["0", "false", "no", "off"]) {
+        return Some(false);
+    }
+    None
+}
+
+fn matches_ignore_ascii_case(input: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| input.eq_ignore_ascii_case(candidate))
 }
 
 fn env_wal_sync_policy() -> Result<(WalSyncPolicy, String), BenchError> {

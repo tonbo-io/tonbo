@@ -42,6 +42,15 @@ pub use error::DBError;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
+pub use crate::{
+    compaction::planner::{CompactionStrategy, LeveledPlannerConfig},
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+    mode::DynModeConfig,
+    query::{Expr, ScalarValue},
+    schema::SchemaBuilder,
+    transaction::{CommitAckMode, Transaction},
+    wal::WalSyncPolicy,
+};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
@@ -62,14 +71,6 @@ use crate::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
         replay::Replayer, state::WalStateHandle,
     },
-};
-pub use crate::{
-    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
-    mode::DynModeConfig,
-    query::{Expr, ScalarValue},
-    schema::SchemaBuilder,
-    transaction::{CommitAckMode, Transaction},
-    wal::WalSyncPolicy,
 };
 
 /// Internal shared handle for the database backed by an `Arc`.
