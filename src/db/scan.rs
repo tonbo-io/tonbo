@@ -6,7 +6,7 @@ use std::{
 
 use aisle::PruneRequest;
 use arrow_array::RecordBatch;
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::{DataType, Schema, SchemaRef};
 use fusio::{
     DynFs,
     executor::{Executor, Mutex, Timer},
@@ -1175,10 +1175,14 @@ fn split_predicate_for_non_sst(predicate: &Expr, key_schema: &SchemaRef) -> NonS
             residual: Some(predicate.clone()),
         };
     };
-    split_predicate_for_non_sst_inner(predicate, key_field.name())
+    split_predicate_for_non_sst_inner(predicate, key_field.name(), key_field.data_type())
 }
 
-fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonSstPredicateSplit {
+fn split_predicate_for_non_sst_inner(
+    predicate: &Expr,
+    key_column: &str,
+    key_type: &DataType,
+) -> NonSstPredicateSplit {
     match predicate {
         Expr::True => NonSstPredicateSplit {
             pushdown: None,
@@ -1213,7 +1217,7 @@ fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonS
             }
         }
         Expr::StartsWith { column, prefix } => {
-            if column != key_column || prefix.is_empty() {
+            if column != key_column || prefix.is_empty() || !is_string_key_type(key_type) {
                 return NonSstPredicateSplit {
                     pushdown: None,
                     residual: Some(predicate.clone()),
@@ -1236,7 +1240,7 @@ fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonS
             let mut pushdown = Vec::new();
             let mut residual = Vec::new();
             for child in children {
-                let split = split_predicate_for_non_sst_inner(child, key_column);
+                let split = split_predicate_for_non_sst_inner(child, key_column, key_type);
                 if let Some(expr) = split.pushdown {
                     pushdown.push(expr);
                 }
@@ -1254,6 +1258,13 @@ fn split_predicate_for_non_sst_inner(predicate: &Expr, key_column: &str) -> NonS
             residual: Some(predicate.clone()),
         },
     }
+}
+
+fn is_string_key_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 fn combine_and_parts(mut predicates: Vec<Expr>) -> Option<Expr> {
@@ -1315,5 +1326,18 @@ mod tests {
         let split = split_predicate_for_non_sst(&predicate, &key_schema);
         assert!(split.pushdown.is_some());
         assert!(split.residual.is_none());
+    }
+
+    #[test]
+    fn split_non_sst_starts_with_on_non_string_key_requires_residual() {
+        let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let predicate = Expr::StartsWith {
+            column: "id".to_string(),
+            prefix: "12".to_string(),
+        };
+
+        let split = split_predicate_for_non_sst(&predicate, &key_schema);
+        assert!(split.pushdown.is_none());
+        assert!(split.residual.is_some());
     }
 }
