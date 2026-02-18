@@ -99,6 +99,12 @@ impl ResolvedConfig {
         let seed = env_u64("TONBO_COMPACTION_BENCH_SEED", DEFAULT_SEED)?;
         let (wal_sync_policy, wal_sync_policy_name) = env_wal_sync_policy()?;
 
+        if ingest_batches == 0 {
+            return Err(BenchError::InvalidEnv {
+                name: "TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+                value: "must be > 0".to_string(),
+            });
+        }
         if rows_per_batch == 0 {
             return Err(BenchError::InvalidEnv {
                 name: "TONBO_COMPACTION_BENCH_ROWS_PER_BATCH",
