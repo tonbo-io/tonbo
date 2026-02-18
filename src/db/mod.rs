@@ -1091,6 +1091,9 @@ where
         };
         let mut builder = SsTableBuilder::new(config, descriptor);
         for seg in &immutables_snapshot {
+            // Immutables are captured in seal order (oldest..newest); the SST writer
+            // canonicalizes rows to key/timestamp order before persisting so scan-level
+            // dedup remains deterministic across reopen/recovery boundaries.
             builder.add_immutable(seg)?;
         }
         let existing_floor = self.manifest_wal_floor().await;
