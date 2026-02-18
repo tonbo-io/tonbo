@@ -232,7 +232,7 @@ where
                             let mut batch = Vec::with_capacity(8);
                             batch.push((command, enqueued_at, ack_tx));
                             let mut deferred: Option<WriterMsg> = None;
-                            while let Ok(Some(next)) = receiver.try_next() {
+                            while let Some(next) = receiver.next().now_or_never().flatten() {
                                 match next {
                                     WriterMsg::Enqueue { _submission_seq: _, command, enqueued_at, ack_tx } => {
                                         ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
@@ -341,7 +341,7 @@ where
                     let mut batch = Vec::with_capacity(8);
                     batch.push((command, enqueued_at, ack_tx));
                     let mut deferred: Option<WriterMsg> = None;
-                    while let Ok(Some(next)) = receiver.try_next() {
+                    while let Some(next) = receiver.next().now_or_never().flatten() {
                         match next {
                             WriterMsg::Enqueue {
                                 _submission_seq: _,
