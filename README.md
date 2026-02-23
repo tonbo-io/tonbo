@@ -197,6 +197,7 @@ Benchmark configuration is env-only via `TONBO_COMPACTION_BENCH_*`.
 For benchmark setup, scenario wiring, and JSON artifact schema/output, see:
 - `benches/compaction_local.rs`
 - `benches/compaction/common.rs`
+- `benches/compaction/results/compaction_local_baseline.md`
 
 ### Project status
 
