@@ -22,6 +22,7 @@ use fusio::{
     error::Error as FusioError,
     executor::tokio::TokioExecutor,
     fs::{CasCondition, FileMeta, FileSystemTag, Fs, FsCas, OpenOptions},
+    impls::remotes::aws::fs::AmazonS3,
     path::{Path as FusioPath, PathPart},
 };
 use fusio_manifest::ObjectHead;
@@ -29,14 +30,15 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
 use tonbo::db::{
-    CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder,
-    LeveledPlannerConfig, WalSyncPolicy,
+    AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder,
+    LeveledPlannerConfig, ObjectSpec, S3Spec, WalSyncPolicy,
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 3;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 4;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
+const DEFAULT_DATASET_SCALE: usize = 1;
 const DEFAULT_ROWS_PER_BATCH: usize = 64;
 const DEFAULT_KEY_SPACE: usize = 2_048;
 const DEFAULT_ARTIFACT_ITERATIONS: usize = 48;
@@ -51,11 +53,32 @@ const DEFAULT_SWEEP_MAX_TASK_BYTES: &[Option<usize>] = &[None];
 const DEFAULT_WRITE_FREQUENCY_PERIODIC_TICKS_MS: &[u64] = &[50, 200];
 const DEFAULT_ENABLE_READ_WHILE_COMPACTION: bool = true;
 const DEFAULT_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY: bool = true;
+const DEFAULT_BACKEND: BenchBackend = BenchBackend::Local;
 const INGEST_RETRY_MAX_ATTEMPTS: usize = 8;
 const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
 const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
 
-pub(crate) type BenchmarkDb = DB<ProbedLocalFs, TokioExecutor>;
+#[derive(Clone)]
+pub(crate) enum BenchmarkDb {
+    Local(DB<ProbedFs<LocalFs>, TokioExecutor>),
+    ObjectStore(DB<AmazonS3, TokioExecutor>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchBackend {
+    Local,
+    ObjectStore,
+}
+
+impl BenchBackend {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::ObjectStore => "object_store",
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct IoProbe {
@@ -145,25 +168,28 @@ fn is_sst_path(path: &FusioPath) -> bool {
     (raw.contains("/sst/") || raw.starts_with("sst/")) && raw.ends_with(".parquet")
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct ProbedLocalFs {
-    inner: LocalFs,
+#[derive(Clone)]
+pub(crate) struct ProbedFs<FS> {
+    inner: FS,
     probe: IoProbe,
 }
 
-impl ProbedLocalFs {
-    pub(crate) fn new(inner: LocalFs, probe: IoProbe) -> Self {
+impl<FS> ProbedFs<FS> {
+    pub(crate) fn new(inner: FS, probe: IoProbe) -> Self {
         Self { inner, probe }
     }
 }
 
-pub(crate) struct ProbedLocalFile {
-    inner: <LocalFs as Fs>::File,
+pub(crate) struct ProbedFile<F> {
+    inner: F,
     path: FusioPath,
     probe: IoProbe,
 }
 
-impl Read for ProbedLocalFile {
+impl<F> Read for ProbedFile<F>
+where
+    F: Read,
+{
     async fn read_exact_at<B: IoBufMut>(
         &mut self,
         buf: B,
@@ -197,7 +223,10 @@ impl Read for ProbedLocalFile {
     }
 }
 
-impl Write for ProbedLocalFile {
+impl<F> Write for ProbedFile<F>
+where
+    F: Write,
+{
     async fn write_all<B: IoBuf>(&mut self, buf: B) -> (Result<(), FusioError>, B) {
         let bytes = u64::try_from(buf.bytes_init()).unwrap_or(u64::MAX);
         let (result, buf) = self.inner.write_all(buf).await;
@@ -216,14 +245,20 @@ impl Write for ProbedLocalFile {
     }
 }
 
-impl FileCommit for ProbedLocalFile {
+impl<F> FileCommit for ProbedFile<F>
+where
+    F: FileCommit,
+{
     async fn commit(&mut self) -> Result<(), FusioError> {
         self.inner.commit().await
     }
 }
 
-impl Fs for ProbedLocalFs {
-    type File = ProbedLocalFile;
+impl<FS> Fs for ProbedFs<FS>
+where
+    FS: Fs,
+{
+    type File = ProbedFile<<FS as Fs>::File>;
 
     fn file_system(&self) -> FileSystemTag {
         self.inner.file_system()
@@ -235,7 +270,7 @@ impl Fs for ProbedLocalFs {
         options: OpenOptions,
     ) -> Result<Self::File, FusioError> {
         let file = self.inner.open_options(path, options).await?;
-        Ok(ProbedLocalFile {
+        Ok(ProbedFile {
             inner: file,
             path: path.clone(),
             probe: self.probe.clone(),
@@ -243,7 +278,7 @@ impl Fs for ProbedLocalFs {
     }
 
     async fn create_dir_all(path: &FusioPath) -> Result<(), FusioError> {
-        LocalFs::create_dir_all(path).await
+        FS::create_dir_all(path).await
     }
 
     async fn list(
@@ -269,7 +304,10 @@ impl Fs for ProbedLocalFs {
     }
 }
 
-impl FsCas for ProbedLocalFs {
+impl<FS> FsCas for ProbedFs<FS>
+where
+    FS: FsCas,
+{
     fn load_with_tag(
         &self,
         path: &FusioPath,
@@ -291,7 +329,10 @@ impl FsCas for ProbedLocalFs {
     }
 }
 
-impl ObjectHead for ProbedLocalFs {
+impl<FS> ObjectHead for ProbedFs<FS>
+where
+    FS: ObjectHead,
+{
     fn head_metadata<'a>(
         &'a self,
         path: &'a FusioPath,
@@ -326,8 +367,93 @@ pub(crate) struct CompactionSweepPoint {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ObjectStoreBenchConfig {
+    pub(crate) endpoint: Option<String>,
+    pub(crate) bucket: String,
+    pub(crate) region: String,
+    pub(crate) access_key: String,
+    pub(crate) secret_key: String,
+    pub(crate) session_token: Option<String>,
+    pub(crate) prefix_base: String,
+}
+
+impl ObjectStoreBenchConfig {
+    pub(crate) fn from_env() -> Result<Self, String> {
+        let required = [
+            ("TONBO_S3_BUCKET", "bucket name"),
+            ("TONBO_S3_REGION", "region"),
+            ("TONBO_S3_ACCESS_KEY", "access key"),
+            ("TONBO_S3_SECRET_KEY", "secret key"),
+        ];
+        let mut missing = Vec::new();
+        for &(var, _) in &required {
+            let value = env::var(var).ok();
+            let absent = match value.as_deref() {
+                Some(v) => v.is_empty(),
+                None => true,
+            };
+            if absent {
+                missing.push(var);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "object_store backend requires {}",
+                missing.join(", ")
+            ));
+        }
+
+        let bucket = env::var("TONBO_S3_BUCKET")
+            .map_err(|err| format!("failed reading TONBO_S3_BUCKET: {err}"))?;
+        let region = env::var("TONBO_S3_REGION")
+            .map_err(|err| format!("failed reading TONBO_S3_REGION: {err}"))?;
+        let access_key = env::var("TONBO_S3_ACCESS_KEY")
+            .map_err(|err| format!("failed reading TONBO_S3_ACCESS_KEY: {err}"))?;
+        let secret_key = env::var("TONBO_S3_SECRET_KEY")
+            .map_err(|err| format!("failed reading TONBO_S3_SECRET_KEY: {err}"))?;
+        let endpoint = env::var("TONBO_S3_ENDPOINT").ok();
+        let session_token = env::var("TONBO_S3_SESSION_TOKEN").ok();
+        let prefix_base =
+            env::var("TONBO_BENCH_OBJECT_PREFIX").unwrap_or_else(|_| "tonbo-bench".to_string());
+
+        Ok(Self {
+            endpoint,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            session_token,
+            prefix_base,
+        })
+    }
+
+    pub(crate) fn object_spec(&self, run_id: &str, scenario_id: &str) -> ObjectSpec {
+        let credentials = match &self.session_token {
+            Some(token) => AwsCreds::with_session_token(
+                self.access_key.clone(),
+                self.secret_key.clone(),
+                token.clone(),
+            ),
+            None => AwsCreds::new(self.access_key.clone(), self.secret_key.clone()),
+        };
+        let mut s3 = S3Spec::new(
+            self.bucket.clone(),
+            format!("{}/{run_id}/{scenario_id}", self.prefix_base),
+            credentials,
+        );
+        s3.region = Some(self.region.clone());
+        s3.endpoint = self.endpoint.clone();
+        s3.sign_payload = Some(true);
+        ObjectSpec::s3(s3)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ResolvedConfig {
     pub(crate) ingest_batches: usize,
+    pub(crate) ingest_batches_base: usize,
+    pub(crate) dataset_scale: usize,
+    pub(crate) backend: BenchBackend,
     pub(crate) rows_per_batch: usize,
     pub(crate) key_space: usize,
     pub(crate) artifact_iterations: usize,
@@ -348,10 +474,12 @@ pub(crate) struct ResolvedConfig {
 
 impl ResolvedConfig {
     pub(crate) fn from_env() -> Result<Self, BenchError> {
-        let ingest_batches = env_usize(
+        let ingest_batches_base = env_usize(
             "TONBO_COMPACTION_BENCH_INGEST_BATCHES",
             DEFAULT_INGEST_BATCHES,
         )?;
+        let dataset_scale = env_usize("TONBO_BENCH_DATASET_SCALE", DEFAULT_DATASET_SCALE)?;
+        let backend = env_backend("TONBO_BENCH_BACKEND", DEFAULT_BACKEND)?;
         let rows_per_batch = env_usize(
             "TONBO_COMPACTION_BENCH_ROWS_PER_BATCH",
             DEFAULT_ROWS_PER_BATCH,
@@ -410,9 +538,15 @@ impl ResolvedConfig {
                 value: "must be > 0".to_string(),
             });
         }
-        if ingest_batches == 0 {
+        if ingest_batches_base == 0 {
             return Err(BenchError::InvalidEnv {
                 name: "TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+                value: "must be > 0".to_string(),
+            });
+        }
+        if dataset_scale == 0 {
+            return Err(BenchError::InvalidEnv {
+                name: "TONBO_BENCH_DATASET_SCALE",
                 value: "must be > 0".to_string(),
             });
         }
@@ -452,9 +586,21 @@ impl ResolvedConfig {
                 value: "must be >= TONBO_COMPACTION_BENCH_COMPACTION_POLL_INTERVAL_MS".to_string(),
             });
         }
+        let ingest_batches =
+            ingest_batches_base
+                .checked_mul(dataset_scale)
+                .ok_or(BenchError::InvalidEnv {
+                    name: "TONBO_BENCH_DATASET_SCALE",
+                    value: format!(
+                        "scaled ingest batches overflowed: {ingest_batches_base} * {dataset_scale}"
+                    ),
+                })?;
 
         Ok(Self {
             ingest_batches,
+            ingest_batches_base,
+            dataset_scale,
+            backend,
             rows_per_batch,
             key_space,
             artifact_iterations,
@@ -493,6 +639,9 @@ impl ResolvedConfig {
     pub(crate) fn artifact(&self) -> ResolvedConfigArtifact {
         ResolvedConfigArtifact {
             ingest_batches: self.ingest_batches,
+            ingest_batches_base: self.ingest_batches_base,
+            dataset_scale: self.dataset_scale,
+            backend: self.backend.as_str().to_string(),
             rows_per_batch: self.rows_per_batch,
             key_space: self.key_space,
             artifact_iterations: self.artifact_iterations,
@@ -599,6 +748,9 @@ pub(crate) struct BenchmarkArtifact {
 #[derive(Debug, Serialize)]
 pub(crate) struct ResolvedConfigArtifact {
     ingest_batches: usize,
+    ingest_batches_base: usize,
+    dataset_scale: usize,
+    backend: String,
     rows_per_batch: usize,
     key_space: usize,
     artifact_iterations: usize,
@@ -672,6 +824,7 @@ struct LatencySummary {
     min: u64,
     p50: u64,
     p95: u64,
+    p99: u64,
     max: u64,
     mean: f64,
 }
@@ -758,7 +911,11 @@ async fn ingest_next_write_batch(
             write_state.seed,
             batch_idx,
         )?;
-        match db.ingest(batch).await {
+        let ingest_result = match db {
+            BenchmarkDb::Local(inner) => inner.ingest(batch).await,
+            BenchmarkDb::ObjectStore(inner) => inner.ingest(batch).await,
+        };
+        match ingest_result {
             Ok(()) => {
                 return Ok(write_state.rows_per_batch);
             }
@@ -863,6 +1020,75 @@ pub(crate) fn build_artifact(
     })
 }
 
+pub(crate) fn print_directional_report(artifact: &BenchmarkArtifact, config: &ResolvedConfig) {
+    let baseline = artifact
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.scenario_id == "read_baseline");
+    let quiesced = artifact
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.scenario_id == "read_compaction_quiesced");
+    let (Some(baseline), Some(quiesced)) = (baseline, quiesced) else {
+        return;
+    };
+
+    let read_ops_drop = pct_drop(baseline.summary.io.read_ops, quiesced.summary.io.read_ops);
+    let bytes_drop = pct_drop(
+        baseline.summary.io.bytes_read,
+        quiesced.summary.io.bytes_read,
+    );
+    let mean_improve = pct_drop_float(
+        baseline.summary.latency_ns.mean,
+        quiesced.summary.latency_ns.mean,
+    );
+    let p99_improve = pct_drop(
+        baseline.summary.latency_ns.p99,
+        quiesced.summary.latency_ns.p99,
+    );
+
+    let observed = format!(
+        "read_ops_delta={}, bytes_delta={}, mean_delta={}, p99_delta={}",
+        fmt_pct_opt(read_ops_drop),
+        fmt_pct_opt(bytes_drop),
+        fmt_pct_opt(mean_improve),
+        fmt_pct_opt(p99_improve)
+    );
+    let baseline_latency = &baseline.summary.latency_ns;
+    let quiesced_latency = &quiesced.summary.latency_ns;
+    let interpretation = build_interpretation(
+        config.backend,
+        read_ops_drop,
+        bytes_drop,
+        mean_improve,
+        p99_improve,
+    );
+
+    eprintln!("tonbo benchmark directional report");
+    eprintln!("  Directional Question: CPU vs I/O bound?");
+    eprintln!("  Scenario Set: compaction.read_baseline vs compaction.read_quiesced");
+    eprintln!("  Dataset Scale: {}", config.dataset_scale);
+    eprintln!("  Backend: {}", config.backend.as_str());
+    eprintln!(
+        "  Latency (ns): baseline(mean={:.2}, p50={}, p95={}, p99={}) quiesced(mean={:.2}, \
+         p50={}, p95={}, p99={})",
+        baseline_latency.mean,
+        baseline_latency.p50,
+        baseline_latency.p95,
+        baseline_latency.p99,
+        quiesced_latency.mean,
+        quiesced_latency.p50,
+        quiesced_latency.p95,
+        quiesced_latency.p99,
+    );
+    eprintln!("  Observed: {observed}");
+    eprintln!("  Interpretation: {interpretation}");
+    eprintln!(
+        "  Implication: rerun with larger TONBO_BENCH_DATASET_SCALE, compare local vs \
+         object_store, and track p99 alongside mean."
+    );
+}
+
 pub(crate) fn benchmark_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -886,7 +1112,7 @@ pub(crate) async fn open_benchmark_db(
     io_probe: &IoProbe,
 ) -> Result<BenchmarkDb, BenchError> {
     let root_string = absolutize(root)?.to_string_lossy().into_owned();
-    let fs = Arc::new(ProbedLocalFs::new(LocalFs {}, io_probe.clone()));
+    let fs = Arc::new(ProbedFs::new(LocalFs {}, io_probe.clone()));
     let mut builder = DbBuilder::from_schema_key_name(Arc::clone(schema), "id")?
         .on_durable_fs(fs, root_string)?
         .wal_sync_policy(config.wal_sync_policy.clone())
@@ -905,7 +1131,39 @@ pub(crate) async fn open_benchmark_db(
         }
     }
 
-    builder.open().await.map_err(BenchError::from)
+    let db = builder.open().await.map_err(BenchError::from)?;
+    Ok(BenchmarkDb::Local(db))
+}
+
+pub(crate) async fn open_object_store_benchmark_db(
+    schema: &SchemaRef,
+    object_spec: &ObjectSpec,
+    config: &ResolvedConfig,
+    compaction_profile: &CompactionProfile,
+    io_probe: &IoProbe,
+) -> Result<BenchmarkDb, BenchError> {
+    let fs_spec = object_spec.clone();
+    let mut builder = DbBuilder::from_schema_key_name(Arc::clone(schema), "id")?
+        .object_store(fs_spec)?
+        .wal_sync_policy(config.wal_sync_policy.clone())
+        .with_minor_compaction(1, 0);
+
+    match compaction_profile {
+        CompactionProfile::Disabled => {}
+        CompactionProfile::Default { periodic_tick_ms } => {
+            let options =
+                CompactionOptions::new().periodic_tick(Duration::from_millis(*periodic_tick_ms));
+            builder = builder.with_compaction_options(options);
+        }
+        CompactionProfile::Swept(tuning) => {
+            let options = build_swept_compaction_options(tuning);
+            builder = builder.with_compaction_options(options);
+        }
+    }
+
+    let _ = io_probe; // object-store backend currently has no low-level IO probe wrapper.
+    let db = builder.open().await.map_err(BenchError::from)?;
+    Ok(BenchmarkDb::ObjectStore(db))
 }
 
 fn build_swept_compaction_options(tuning: &CompactionTuning) -> CompactionOptions {
@@ -934,7 +1192,10 @@ pub(crate) async fn ingest_workload(
             config.seed,
             batch_idx,
         )?;
-        db.ingest(batch).await?;
+        match db {
+            BenchmarkDb::Local(inner) => inner.ingest(batch).await?,
+            BenchmarkDb::ObjectStore(inner) => inner.ingest(batch).await?,
+        }
     }
     Ok(())
 }
@@ -988,10 +1249,11 @@ fn deterministic_value(global_idx: usize, seed: u64) -> i64 {
 pub(crate) async fn latest_version_summary_if_any(
     db: &BenchmarkDb,
 ) -> Result<Option<VersionSummary>, BenchError> {
-    let versions = db
-        .list_versions(1)
-        .await
-        .map_err(|err| BenchError::Message(format!("list_versions failed: {err}")))?;
+    let versions = match db {
+        BenchmarkDb::Local(inner) => inner.list_versions(1).await,
+        BenchmarkDb::ObjectStore(inner) => inner.list_versions(1).await,
+    }
+    .map_err(|err| BenchError::Message(format!("list_versions failed: {err}")))?;
     Ok(versions.into_iter().next().map(|version| VersionSummary {
         sst_count: version.sst_count,
         level_count: version.level_count,
@@ -1091,11 +1353,11 @@ pub(crate) async fn wait_for_compaction_quiesced(
 }
 
 pub(crate) async fn read_all_rows(db: &BenchmarkDb) -> Result<usize, BenchError> {
-    let batches = db
-        .scan()
-        .collect()
-        .await
-        .map_err(|err| BenchError::Message(format!("scan collect failed: {err}")))?;
+    let batches = match db {
+        BenchmarkDb::Local(inner) => inner.scan().collect().await,
+        BenchmarkDb::ObjectStore(inner) => inner.scan().collect().await,
+    }
+    .map_err(|err| BenchError::Message(format!("scan collect failed: {err}")))?;
     Ok(batches.iter().map(RecordBatch::num_rows).sum())
 }
 
@@ -1192,6 +1454,7 @@ fn latency_summary(samples: &[u64]) -> LatencySummary {
             min: 0,
             p50: 0,
             p95: 0,
+            p99: 0,
             max: 0,
             mean: 0.0,
         };
@@ -1208,6 +1471,7 @@ fn latency_summary(samples: &[u64]) -> LatencySummary {
         min: sorted.first().copied().unwrap_or(0),
         p50: percentile(&sorted, 50),
         p95: percentile(&sorted, 95),
+        p99: percentile(&sorted, 99),
         max: sorted.last().copied().unwrap_or(0),
         mean,
     }
@@ -1442,6 +1706,23 @@ fn env_bool(name: &'static str, default: bool) -> Result<bool, BenchError> {
     }
 }
 
+fn env_backend(name: &'static str, default: BenchBackend) -> Result<BenchBackend, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "local" => Ok(BenchBackend::Local),
+                "object_store" => Ok(BenchBackend::ObjectStore),
+                _ => Err(BenchError::InvalidEnv { name, value: raw }),
+            }
+        }
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
 fn parse_bool(raw: &str) -> Option<bool> {
     if matches_ignore_ascii_case(raw, &["1", "true", "yes", "on"]) {
         return Some(true);
@@ -1475,6 +1756,67 @@ fn env_wal_sync_policy() -> Result<(WalSyncPolicy, String), BenchError> {
         "disabled" => Ok((WalSyncPolicy::Disabled, normalized)),
         _ => Err(BenchError::InvalidEnv { name, value: raw }),
     }
+}
+
+fn pct_drop(baseline: u64, current: u64) -> Option<f64> {
+    if baseline == 0 {
+        return None;
+    }
+    Some(((baseline as f64 - current as f64) / baseline as f64) * 100.0)
+}
+
+fn pct_drop_float(baseline: f64, current: f64) -> Option<f64> {
+    if baseline <= f64::EPSILON {
+        return None;
+    }
+    Some(((baseline - current) / baseline) * 100.0)
+}
+
+fn fmt_pct_opt(value: Option<f64>) -> String {
+    match value {
+        Some(v) => format!("{v:+.2}%"),
+        None => "n/a".to_string(),
+    }
+}
+
+fn build_interpretation(
+    backend: BenchBackend,
+    read_ops_drop: Option<f64>,
+    bytes_drop: Option<f64>,
+    mean_improve: Option<f64>,
+    p99_improve: Option<f64>,
+) -> String {
+    let io_drop_large = read_ops_drop.is_some_and(|value| value > 50.0)
+        || bytes_drop.is_some_and(|value| value > 50.0);
+    let mean_small = mean_improve.is_some_and(|value| value < 10.0);
+    let p99_small = p99_improve.is_some_and(|value| value < 10.0);
+    let tail_benefit = match (p99_improve, mean_improve) {
+        (Some(p99), Some(mean)) => p99 > mean + 10.0,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let remote_latency_delta_large = backend == BenchBackend::ObjectStore
+        && (mean_improve.is_some_and(|value| value > 20.0)
+            || p99_improve.is_some_and(|value| value > 20.0));
+
+    if io_drop_large && mean_small && p99_small {
+        return "latency is not strongly correlated with reduced I/O at this setting; workload \
+                may still be CPU/cache-bound."
+            .to_string();
+    }
+    if remote_latency_delta_large {
+        return "object-store run shows a larger latency delta, suggesting stronger remote I/O \
+                sensitivity in this profile."
+            .to_string();
+    }
+    if tail_benefit {
+        return "p99 improves notably more than mean, indicating compaction benefits are \
+                concentrated in tail latency."
+            .to_string();
+    }
+    "signals are mixed; gather larger-scale and cross-backend runs before concluding CPU-bound vs \
+     I/O-bound."
+        .to_string()
 }
 
 fn duration_ns_u64(duration: Duration) -> u64 {

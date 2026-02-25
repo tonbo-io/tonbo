@@ -8,13 +8,20 @@ use criterion::{Criterion, criterion_group, criterion_main};
 mod common;
 
 use common::{
-    BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning, ResolvedConfig,
-    ScenarioDimensionsArtifact, ScenarioState, ScenarioWorkload, VersionSummary,
-    WriteWorkloadState, artifact_path, benchmark_schema, build_artifact, build_run_id,
-    build_runtime, ingest_workload, latest_version_summary, latest_version_summary_if_any,
-    open_benchmark_db, read_all_rows, run_criterion, scenario_root, wait_for_compaction_quiesced,
-    wait_for_first_compaction_observed, write_artifact_json,
+    BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
+    ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
+    ScenarioWorkload, VersionSummary, WriteWorkloadState, artifact_path, benchmark_schema,
+    build_artifact, build_run_id, build_runtime, ingest_workload, latest_version_summary,
+    latest_version_summary_if_any, open_benchmark_db, open_object_store_benchmark_db,
+    print_directional_report, read_all_rows, run_criterion, scenario_root,
+    wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
 };
+
+#[derive(Clone)]
+struct ScenarioStorage {
+    backend: BenchBackend,
+    object_store: Option<ObjectStoreBenchConfig>,
+}
 
 fn compaction_local(c: &mut Criterion) {
     let runtime = match build_runtime() {
@@ -26,11 +33,38 @@ fn compaction_local(c: &mut Criterion) {
         Err(err) => panic!("failed to resolve benchmark config: {err}"),
     };
     let run_id = build_run_id();
+    let storage = match config.backend {
+        BenchBackend::Local => ScenarioStorage {
+            backend: BenchBackend::Local,
+            object_store: None,
+        },
+        BenchBackend::ObjectStore => match ObjectStoreBenchConfig::from_env() {
+            Ok(object_store) => ScenarioStorage {
+                backend: BenchBackend::ObjectStore,
+                object_store: Some(object_store),
+            },
+            Err(reason) => {
+                eprintln!(
+                    "tonbo benchmark: backend `object_store` requested but unsupported in this \
+                     environment: {reason}"
+                );
+                eprintln!(
+                    "tonbo benchmark: skipping run (set TONBO_BENCH_BACKEND=local or configure \
+                     TONBO_S3_* variables)"
+                );
+                return;
+            }
+        },
+    };
 
-    let scenarios = match runtime.block_on(prepare_scenarios(&config, &run_id)) {
+    let scenarios = match runtime.block_on(prepare_scenarios(&config, &run_id, &storage)) {
         Ok(scenarios) => scenarios,
         Err(err) => panic!("scenario preparation failed: {err}"),
     };
+    if scenarios.is_empty() {
+        eprintln!("tonbo benchmark: no scenarios were prepared; skipping run");
+        return;
+    }
 
     let artifact = match build_artifact(&config, &run_id, runtime.as_ref(), &scenarios) {
         Ok(artifact) => artifact,
@@ -41,6 +75,7 @@ fn compaction_local(c: &mut Criterion) {
         panic!("failed to persist benchmark artifact: {err}");
     }
     eprintln!("tonbo benchmark artifact: {}", artifact_path.display());
+    print_directional_report(&artifact, &config);
 
     run_criterion(c, &runtime, &scenarios, config.criterion_sample_size);
 }
@@ -48,16 +83,20 @@ fn compaction_local(c: &mut Criterion) {
 async fn prepare_scenarios(
     config: &ResolvedConfig,
     run_id: &str,
+    storage: &ScenarioStorage,
 ) -> Result<Vec<ScenarioState>, BenchError> {
     let mut scenarios = Vec::new();
-    push_prepared_scenario(&mut scenarios, prepare_read_baseline(config, run_id).await)?;
     push_prepared_scenario(
         &mut scenarios,
-        prepare_read_after_first_compaction_observed(config, run_id).await,
+        prepare_read_baseline(config, run_id, storage).await,
     )?;
     push_prepared_scenario(
         &mut scenarios,
-        prepare_read_compaction_quiesced(config, run_id).await,
+        prepare_read_after_first_compaction_observed(config, run_id, storage).await,
+    )?;
+    push_prepared_scenario(
+        &mut scenarios,
+        prepare_read_compaction_quiesced(config, run_id, storage).await,
     )?;
 
     let sweep_points = config.compaction_sweep_points();
@@ -65,7 +104,7 @@ async fn prepare_scenarios(
         for point in &sweep_points {
             push_prepared_scenario(
                 &mut scenarios,
-                prepare_read_while_compaction(config, run_id, point).await,
+                prepare_read_while_compaction(config, run_id, point, storage).await,
             )?;
         }
     }
@@ -79,18 +118,12 @@ async fn prepare_scenarios(
                         run_id,
                         point,
                         periodic_tick_ms,
+                        storage,
                     )
                     .await,
                 )?;
             }
         }
-    }
-
-    if scenarios.is_empty() {
-        return Err(BenchError::Message(
-            "no benchmark scenarios prepared; adjust TONBO_COMPACTION_BENCH_* configuration"
-                .to_string(),
-        ));
     }
 
     Ok(scenarios)
@@ -116,16 +149,18 @@ fn push_prepared_scenario(
 async fn prepare_read_baseline(
     config: &ResolvedConfig,
     run_id: &str,
+    storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
     let scenario_id = "read_baseline";
     let scenario_variant_id = "default".to_string();
     let benchmark_id = scenario_id.to_string();
-    let root = scenario_root(run_id, &benchmark_id);
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
-    let db = open_benchmark_db(
+    let db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Disabled,
         &io_probe,
@@ -167,10 +202,12 @@ async fn prepare_read_baseline(
 async fn prepare_read_after_first_compaction_observed(
     config: &ResolvedConfig,
     run_id: &str,
+    storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
     prepare_read_compaction_state(
         config,
         run_id,
+        storage,
         "read_after_first_compaction_observed",
         "Read After First Compaction Observed",
         false,
@@ -181,10 +218,12 @@ async fn prepare_read_after_first_compaction_observed(
 async fn prepare_read_compaction_quiesced(
     config: &ResolvedConfig,
     run_id: &str,
+    storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
     prepare_read_compaction_state(
         config,
         run_id,
+        storage,
         "read_compaction_quiesced",
         "Read Compaction Quiesced",
         true,
@@ -195,19 +234,21 @@ async fn prepare_read_compaction_quiesced(
 async fn prepare_read_compaction_state(
     config: &ResolvedConfig,
     run_id: &str,
+    storage: &ScenarioStorage,
     scenario_id: &'static str,
     scenario_name: &'static str,
     wait_for_quiesced: bool,
 ) -> Result<ScenarioState, BenchError> {
     let scenario_variant_id = "default".to_string();
     let benchmark_id = scenario_id.to_string();
-    let root = scenario_root(run_id, &benchmark_id);
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
 
-    let ingest_only_db = open_benchmark_db(
+    let ingest_only_db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Disabled,
         &io_probe,
@@ -224,9 +265,11 @@ async fn prepare_read_compaction_state(
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
-    let db = open_benchmark_db(
+    let db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Default {
             periodic_tick_ms: config.compaction_periodic_tick_ms,
@@ -267,18 +310,20 @@ async fn prepare_read_while_compaction(
     config: &ResolvedConfig,
     run_id: &str,
     point: &CompactionSweepPoint,
+    storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
     let scenario_id = "read_while_compaction";
     let tuning = compaction_tuning(point, config.compaction_periodic_tick_ms);
     let scenario_variant_id = sweep_variant_id(point, tuning.periodic_tick_ms);
     let benchmark_id = format!("{scenario_id}__{scenario_variant_id}");
-    let root = scenario_root(run_id, &benchmark_id);
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
 
-    let ingest_only_db = open_benchmark_db(
+    let ingest_only_db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Disabled,
         &io_probe,
@@ -295,9 +340,11 @@ async fn prepare_read_while_compaction(
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
-    let db = open_benchmark_db(
+    let db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Swept(tuning.clone()),
         &io_probe,
@@ -351,18 +398,20 @@ async fn prepare_write_throughput_vs_compaction_frequency(
     run_id: &str,
     point: &CompactionSweepPoint,
     periodic_tick_ms: u64,
+    storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
     let scenario_id = "write_throughput_vs_compaction_frequency";
     let tuning = compaction_tuning(point, periodic_tick_ms);
     let scenario_variant_id = sweep_variant_id(point, periodic_tick_ms);
     let benchmark_id = format!("{scenario_id}__{scenario_variant_id}");
-    let root = scenario_root(run_id, &benchmark_id);
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
 
-    let ingest_only_db = open_benchmark_db(
+    let ingest_only_db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Disabled,
         &io_probe,
@@ -379,9 +428,11 @@ async fn prepare_write_throughput_vs_compaction_frequency(
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
-    let db = open_benchmark_db(
+    let db = open_scenario_db(
+        storage,
         &schema,
-        &root,
+        run_id,
+        &benchmark_id,
         config,
         &CompactionProfile::Swept(tuning.clone()),
         &io_probe,
@@ -428,6 +479,33 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         version_ready,
         write_state: Some(write_state),
     })
+}
+
+async fn open_scenario_db(
+    storage: &ScenarioStorage,
+    schema: &arrow_schema::SchemaRef,
+    run_id: &str,
+    benchmark_id: &str,
+    config: &ResolvedConfig,
+    profile: &CompactionProfile,
+    io_probe: &common::IoProbe,
+) -> Result<common::BenchmarkDb, BenchError> {
+    match storage.backend {
+        BenchBackend::Local => {
+            let root = scenario_root(run_id, benchmark_id);
+            open_benchmark_db(schema, &root, config, profile, io_probe).await
+        }
+        BenchBackend::ObjectStore => {
+            let Some(object_store) = &storage.object_store else {
+                return scenario_skipped(
+                    benchmark_id,
+                    "object_store backend selected without resolved object-store config",
+                );
+            };
+            let spec = object_store.object_spec(run_id, benchmark_id);
+            open_object_store_benchmark_db(schema, &spec, config, profile, io_probe).await
+        }
+    }
 }
 
 fn compaction_tuning(point: &CompactionSweepPoint, periodic_tick_ms: u64) -> CompactionTuning {
