@@ -859,6 +859,27 @@ impl DbBuilder<Unconfigured> {
         })
     }
 
+    /// Select an object-store filesystem backend with an explicit logical root.
+    ///
+    /// This is intended for advanced harnesses that wrap object-store filesystems
+    /// (for metrics/probing) while preserving object-store path semantics.
+    #[must_use = "use the returned DbBuilder to continue configuration"]
+    pub fn object_store_with_fs<FS>(
+        self,
+        fs: Arc<FS>,
+        root: Path,
+    ) -> Result<DbBuilder<StorageConfig<FS>>, DbBuildError>
+    where
+        FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
+    {
+        Ok(DbBuilder {
+            mode_config: self.mode_config,
+            state: StorageConfig::new(fs, root, DurabilityClass::Durable),
+            compaction_options: self.compaction_options,
+            minor_compaction: self.minor_compaction,
+        })
+    }
+
     /// Create a builder from an Arrow schema and single key column name.
     pub fn from_schema_key_name(
         schema: arrow_schema::SchemaRef,

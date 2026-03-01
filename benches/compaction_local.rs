@@ -176,7 +176,7 @@ async fn prepare_read_baseline(
         );
     };
     ensure_ssts_present(scenario_id, version_ready)?;
-    let rows_per_scan = read_all_rows(&db).await?;
+    let (rows_per_scan, _) = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
 
     Ok(ScenarioState {
@@ -283,7 +283,7 @@ async fn prepare_read_compaction_state(
         wait_for_first_compaction_observed(&db, version_before_compaction, config).await?;
     }
     let version_ready = latest_version_summary(&db).await?;
-    let rows_per_scan = read_all_rows(&db).await?;
+    let (rows_per_scan, _) = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
 
     Ok(ScenarioState {
@@ -356,7 +356,7 @@ async fn prepare_read_while_compaction(
             "reopened database has no manifest versions to benchmark",
         );
     };
-    let rows_per_scan = read_all_rows(&db).await?;
+    let (rows_per_scan, _) = read_all_rows(&db).await?;
     let setup_io = io_probe.snapshot();
     let write_state = WriteWorkloadState::new(
         Arc::clone(&schema),

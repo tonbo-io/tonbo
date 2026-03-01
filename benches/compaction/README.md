@@ -56,6 +56,64 @@ Object store (if configured):
 TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=10 cargo bench -p tonbo -- <...>
 ```
 
+## S3 Execution Guide
+
+Use short-lived credentials from your AWS profile:
+
+```bash
+eval "$(aws configure export-credentials --profile tonbo --format env)"
+export TONBO_S3_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
+export TONBO_S3_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+export TONBO_S3_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+```
+
+Set S3 target:
+
+```bash
+export TONBO_S3_BUCKET=tonbo-smoke-euc1-232814779190-1772115011
+export TONBO_S3_REGION=eu-central-1
+```
+
+Run a directional cell:
+
+```bash
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s1-$(date +%s) \
+TONBO_COMPACTION_BENCH_ENABLE_READ_WHILE_COMPACTION=0 \
+TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY=0 \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+```
+
+Recommended matrix (same ingest base across cells):
+
+```bash
+# local
+TONBO_BENCH_BACKEND=local TONBO_BENCH_DATASET_SCALE=1  TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+TONBO_BENCH_BACKEND=local TONBO_BENCH_DATASET_SCALE=10 TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+
+# object store
+TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=1  TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s1-$(date +%s)  cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=10 TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s10-$(date +%s) cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+```
+
+## Compaction Eligibility and Skips
+
+`read_after_first_compaction_observed` and `read_compaction_quiesced` wait for compaction-state transitions. If compaction never triggers, those scenarios can time out; increase `TONBO_COMPACTION_BENCH_INGEST_BATCHES` or `TONBO_BENCH_DATASET_SCALE` in that case.
+
+## Troubleshooting Notes
+
+- If object-store run fails before artifact with:
+  - `failed to persist wal state: error sending request for url (...)`
+  - treat the cell as failed infra/transport setup and rerun with a fresh prefix.
+- If object-store `read_ops` / `bytes_read` are `0` in artifact:
+  - this indicates probe wiring/regression; current harness instruments both local and object-store filesystem paths.
+- If object-store post-compaction read scenarios report `rows_per_scan=0`:
+  - treat directional CPU-vs-I/O conclusions as invalid for that run; first fix/read-verify data visibility for those scenarios.
+- To avoid cross-run contamination:
+  - always use a unique `TONBO_BENCH_OBJECT_PREFIX` per run.
+
 ## Output Notes
 
 Each scenario summary includes latency fields in nanoseconds:
@@ -64,6 +122,16 @@ Each scenario summary includes latency fields in nanoseconds:
 - `p50`
 - `p95`
 - `p99`
+
+Read workloads also include a scan-phase breakdown:
+
+- `read_path_latency_ns.mean_prepare_ns`: scan planning + stream construction
+- `read_path_latency_ns.mean_consume_ns`: stream consumption/materialization
+- `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`: approximate dominance split
+
+Interpretation guideline:
+
+- If `consume_share_pct` remains larger after compaction, prioritize execution-path optimizations (decode/merge/filter/materialization) before planning/setup tweaks.
 
 After `read_baseline` and `read_compaction_quiesced` complete, the harness prints:
 
@@ -74,3 +142,12 @@ After `read_baseline` and `read_compaction_quiesced` complete, the harness print
 - Observed deltas (read ops, bytes, mean, p99)
 - Conservative interpretation
 - Suggested next tests
+
+## Report Files
+
+- Large read baseline (current branch format):
+  - `benches/compaction/results/compaction_local_baseline.md`
+- Directional matrix (ported from `feat/bench-cpu-vs-io-directional-loop`, reformatted):
+  - `benches/compaction/results/compaction_directional_matrix_2026-02-27.md`
+- Directional + latency phase split validation (new probe wiring + dominance view):
+  - `benches/compaction/results/compaction_directional_phase_split_2026-03-01.md`

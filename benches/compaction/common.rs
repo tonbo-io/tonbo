@@ -26,6 +26,7 @@ use fusio::{
     path::{Path as FusioPath, PathPart},
 };
 use fusio_manifest::ObjectHead;
+use futures::StreamExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
@@ -35,7 +36,7 @@ use tonbo::db::{
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 4;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 5;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -61,7 +62,7 @@ const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
 #[derive(Clone)]
 pub(crate) enum BenchmarkDb {
     Local(DB<ProbedFs<LocalFs>, TokioExecutor>),
-    ObjectStore(DB<AmazonS3, TokioExecutor>),
+    ObjectStore(DB<ProbedFs<AmazonS3>, TokioExecutor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -810,6 +811,7 @@ struct ScenarioSummaryArtifact {
     rows_processed: u64,
     throughput: ThroughputSummary,
     latency_ns: LatencySummary,
+    read_path_latency_ns: Option<ReadPathLatencySummary>,
     io: IoCountersArtifact,
 }
 
@@ -834,7 +836,79 @@ struct ScenarioMeasurement {
     total_elapsed_ns: u64,
     latencies_ns: Vec<u64>,
     rows_processed: u64,
+    read_path: Option<ReadPathAggregate>,
     io: IoCountersArtifact,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadPathLatencySummary {
+    mean_prepare_ns: f64,
+    mean_consume_ns: f64,
+    mean_total_ns: f64,
+    prepare_share_pct: f64,
+    consume_share_pct: f64,
+    mean_batches_per_scan: f64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReadPathBreakdown {
+    prepare_ns: u64,
+    consume_ns: u64,
+    batch_count: usize,
+}
+
+#[derive(Default)]
+struct ReadPathAggregate {
+    samples: usize,
+    prepare_ns_total: u128,
+    consume_ns_total: u128,
+    batch_count_total: u128,
+}
+
+impl ReadPathAggregate {
+    fn record(&mut self, breakdown: ReadPathBreakdown) {
+        self.samples = self.samples.saturating_add(1);
+        self.prepare_ns_total = self
+            .prepare_ns_total
+            .saturating_add(u128::from(breakdown.prepare_ns));
+        self.consume_ns_total = self
+            .consume_ns_total
+            .saturating_add(u128::from(breakdown.consume_ns));
+        self.batch_count_total = self
+            .batch_count_total
+            .saturating_add(breakdown.batch_count as u128);
+    }
+
+    fn to_summary(&self) -> Option<ReadPathLatencySummary> {
+        if self.samples == 0 {
+            return None;
+        }
+        let samples = self.samples as f64;
+        let mean_prepare_ns = self.prepare_ns_total as f64 / samples;
+        let mean_consume_ns = self.consume_ns_total as f64 / samples;
+        let mean_total_ns = mean_prepare_ns + mean_consume_ns;
+        let (prepare_share_pct, consume_share_pct) = if mean_total_ns > 0.0 {
+            (
+                (mean_prepare_ns / mean_total_ns) * 100.0,
+                (mean_consume_ns / mean_total_ns) * 100.0,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        Some(ReadPathLatencySummary {
+            mean_prepare_ns,
+            mean_consume_ns,
+            mean_total_ns,
+            prepare_share_pct,
+            consume_share_pct,
+            mean_batches_per_scan: self.batch_count_total as f64 / samples,
+        })
+    }
+}
+
+struct OperationResult {
+    rows: usize,
+    read_path: Option<ReadPathBreakdown>,
 }
 
 impl ScenarioDimensionsArtifact {
@@ -869,9 +943,15 @@ impl ScenarioDimensionsArtifact {
     }
 }
 
-async fn run_scenario_operation(scenario: &ScenarioState) -> Result<usize, BenchError> {
+async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationResult, BenchError> {
     match scenario.workload {
-        ScenarioWorkload::ReadOnly => read_all_rows(&scenario.db).await,
+        ScenarioWorkload::ReadOnly => {
+            let (rows, read_path) = read_all_rows(&scenario.db).await?;
+            Ok(OperationResult {
+                rows,
+                read_path: Some(read_path),
+            })
+        }
         ScenarioWorkload::ReadWhileCompaction => {
             let write_state = scenario.write_state.as_ref().ok_or_else(|| {
                 BenchError::Message(format!(
@@ -883,7 +963,11 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<usize, Bench
             let read_future = read_all_rows(&scenario.db);
             let (write_result, read_result) = tokio::join!(write_future, read_future);
             let _ = write_result?;
-            read_result
+            let (rows, read_path) = read_result?;
+            Ok(OperationResult {
+                rows,
+                read_path: Some(read_path),
+            })
         }
         ScenarioWorkload::WriteThroughput => {
             let write_state = scenario.write_state.as_ref().ok_or_else(|| {
@@ -892,7 +976,11 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<usize, Bench
                     scenario.benchmark_id
                 ))
             })?;
-            ingest_next_write_batch(&scenario.db, write_state).await
+            let rows = ingest_next_write_batch(&scenario.db, write_state).await?;
+            Ok(OperationResult {
+                rows,
+                read_path: None,
+            })
         }
     }
 }
@@ -982,8 +1070,8 @@ pub(crate) fn run_criterion(
                 runtime.block_on(async {
                     for _ in 0..iters {
                         match run_scenario_operation(&scenario).await {
-                            Ok(rows) => {
-                                black_box(rows);
+                            Ok(result) => {
+                                black_box(result.rows);
                             }
                             Err(err) => {
                                 panic!(
@@ -1142,9 +1230,9 @@ pub(crate) async fn open_object_store_benchmark_db(
     compaction_profile: &CompactionProfile,
     io_probe: &IoProbe,
 ) -> Result<BenchmarkDb, BenchError> {
-    let fs_spec = object_spec.clone();
+    let (fs, root) = build_probed_object_store_fs(object_spec, io_probe)?;
     let mut builder = DbBuilder::from_schema_key_name(Arc::clone(schema), "id")?
-        .object_store(fs_spec)?
+        .object_store_with_fs(fs, root)?
         .wal_sync_policy(config.wal_sync_policy.clone())
         .with_minor_compaction(1, 0);
 
@@ -1161,9 +1249,51 @@ pub(crate) async fn open_object_store_benchmark_db(
         }
     }
 
-    let _ = io_probe; // object-store backend currently has no low-level IO probe wrapper.
     let db = builder.open().await.map_err(BenchError::from)?;
     Ok(BenchmarkDb::ObjectStore(db))
+}
+
+fn build_probed_object_store_fs(
+    object_spec: &ObjectSpec,
+    io_probe: &IoProbe,
+) -> Result<(Arc<ProbedFs<AmazonS3>>, FusioPath), BenchError> {
+    let spec = match object_spec {
+        ObjectSpec::S3(spec) => spec,
+    };
+    use fusio::impls::remotes::aws::{credential::AwsCredential, fs::AmazonS3Builder};
+
+    let region = spec
+        .region
+        .clone()
+        .unwrap_or_else(|| "us-east-1".to_string());
+    let mut builder = AmazonS3Builder::new(spec.bucket.clone()).region(region);
+    if let Some(endpoint) = &spec.endpoint {
+        builder = builder.endpoint(endpoint.clone());
+    }
+    let credential = AwsCredential {
+        key_id: spec.credentials.access_key.clone(),
+        secret_key: spec.credentials.secret_key.clone(),
+        token: spec.credentials.session_token.clone(),
+    };
+    builder = builder.credential(credential);
+    if let Some(sign) = spec.sign_payload {
+        builder = builder.sign_payload(sign);
+    }
+    if let Some(checksum) = spec.checksum {
+        builder = builder.checksum(checksum);
+    }
+    let fs = Arc::new(ProbedFs::new(builder.build(), io_probe.clone()));
+    let root = if spec.prefix.is_empty() {
+        FusioPath::default()
+    } else {
+        FusioPath::parse(&spec.prefix).map_err(|err| {
+            BenchError::Message(format!(
+                "invalid object-store benchmark prefix `{}`: {err}",
+                spec.prefix
+            ))
+        })?
+    };
+    Ok((fs, root))
 }
 
 fn build_swept_compaction_options(tuning: &CompactionTuning) -> CompactionOptions {
@@ -1352,13 +1482,75 @@ pub(crate) async fn wait_for_compaction_quiesced(
     }
 }
 
-pub(crate) async fn read_all_rows(db: &BenchmarkDb) -> Result<usize, BenchError> {
-    let batches = match db {
-        BenchmarkDb::Local(inner) => inner.scan().collect().await,
-        BenchmarkDb::ObjectStore(inner) => inner.scan().collect().await,
+pub(crate) async fn read_all_rows(
+    db: &BenchmarkDb,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    match db {
+        BenchmarkDb::Local(inner) => read_all_rows_local(inner).await,
+        BenchmarkDb::ObjectStore(inner) => read_all_rows_object_store(inner).await,
     }
-    .map_err(|err| BenchError::Message(format!("scan collect failed: {err}")))?;
-    Ok(batches.iter().map(RecordBatch::num_rows).sum())
+}
+
+async fn read_all_rows_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let mut stream = db
+        .scan()
+        .stream()
+        .await
+        .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    let consume_ns = duration_ns_u64(consume_started.elapsed());
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns,
+            batch_count,
+        },
+    ))
+}
+
+async fn read_all_rows_object_store(
+    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let mut stream = db
+        .scan()
+        .stream()
+        .await
+        .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    let consume_ns = duration_ns_u64(consume_started.elapsed());
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns,
+            batch_count,
+        },
+    ))
 }
 
 fn measure_for_artifact(
@@ -1383,12 +1575,16 @@ fn measure_scenario(
     runtime.block_on(async {
         let mut latencies_ns = Vec::with_capacity(iterations);
         let mut rows_processed = 0u64;
+        let mut read_path = ReadPathAggregate::default();
         let started = Instant::now();
         for _ in 0..iterations {
             let op_started = Instant::now();
-            let rows = run_scenario_operation(scenario).await?;
-            rows_processed = rows_processed.saturating_add(usize_to_u64(rows));
-            black_box(rows);
+            let result = run_scenario_operation(scenario).await?;
+            rows_processed = rows_processed.saturating_add(usize_to_u64(result.rows));
+            if let Some(breakdown) = result.read_path {
+                read_path.record(breakdown);
+            }
+            black_box(result.rows);
             latencies_ns.push(duration_ns_u64(op_started.elapsed()));
         }
         Ok(ScenarioMeasurement {
@@ -1396,6 +1592,11 @@ fn measure_scenario(
             total_elapsed_ns: duration_ns_u64(started.elapsed()),
             latencies_ns,
             rows_processed,
+            read_path: if read_path.samples > 0 {
+                Some(read_path)
+            } else {
+                None
+            },
             io: scenario.io_probe.snapshot(),
         })
     })
@@ -1405,6 +1606,10 @@ fn to_scenario_artifact(
     scenario: &ScenarioState,
     measurement: ScenarioMeasurement,
 ) -> ScenarioArtifact {
+    let read_path_latency = measurement
+        .read_path
+        .as_ref()
+        .and_then(ReadPathAggregate::to_summary);
     let latency = latency_summary(&measurement.latencies_ns);
     let total_rows = measurement.rows_processed as f64;
     let total_elapsed_secs = if measurement.total_elapsed_ns == 0 {
@@ -1443,6 +1648,7 @@ fn to_scenario_artifact(
             rows_processed: measurement.rows_processed,
             throughput,
             latency_ns: latency,
+            read_path_latency_ns: read_path_latency,
             io: measurement.io,
         },
     }

@@ -306,7 +306,18 @@ impl CompactionExecutor for LocalCompactionExecutor {
             let merger = SsTableMerger::new(Arc::clone(&self.config), job.inputs.clone(), target)
                 .with_output_id_allocator(Arc::clone(&self.next_id))
                 .with_output_caps(max_rows, max_bytes);
-            let merged = merger.execute(fusio::executor::NoopExecutor).await?;
+            let merged = {
+                #[cfg(feature = "tokio")]
+                {
+                    merger
+                        .execute(fusio::executor::tokio::TokioExecutor::default())
+                        .await?
+                }
+                #[cfg(not(feature = "tokio"))]
+                {
+                    merger.execute(fusio::executor::NoopExecutor).await?
+                }
+            };
             let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
             let descriptors_for_outcome = {
                 #[cfg(test)]
