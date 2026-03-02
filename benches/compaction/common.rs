@@ -1154,7 +1154,7 @@ pub(crate) fn print_directional_report(artifact: &BenchmarkArtifact, config: &Re
 
     eprintln!("tonbo benchmark directional report");
     eprintln!("  Directional Question: CPU vs I/O bound?");
-    eprintln!("  Scenario Set: compaction.read_baseline vs compaction.read_quiesced");
+    eprintln!("  Scenario Set: compaction.read_baseline vs compaction.read_compaction_quiesced");
     eprintln!("  Dataset Scale: {}", config.dataset_scale);
     eprintln!("  Backend: {}", config.backend.as_str());
     eprintln!(

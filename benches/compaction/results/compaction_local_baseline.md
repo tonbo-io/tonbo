@@ -29,6 +29,28 @@ This report includes only the large read profile run:
   - `TONBO_COMPACTION_BENCH_ENABLE_READ_WHILE_COMPACTION=false`
   - `TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY=false`
 
+## Revalidated In This Checkout (2026-03-02)
+
+The large-read profile above was rerun in this branch workspace with the same workload knobs.
+
+- Artifact: `target/tonbo-bench/compaction_local-1772457810856-359404.json`
+- Schema version: `5` (current harness schema)
+- Backend: `local`
+- Workload shape: unchanged from the command below
+
+Measured summary from regenerated artifact:
+
+| Scenario | Ops/sec | Mean latency | Read ops/scan | Bytes/scan |
+| --- | ---: | ---: | ---: | ---: |
+| `read_baseline` | `4.142` | `241.443 ms` | `96.00` | `3,426,443` |
+| `read_after_first_compaction_observed` | `4.569` | `218.879 ms` | `21.38` | `1,275,615` |
+| `read_compaction_quiesced` | `4.609` | `216.949 ms` | `21.00` | `1,275,495` |
+
+Relative change vs `read_baseline` (regenerated artifact):
+
+- `read_after_first_compaction_observed`: mean `-9.35%`, read ops/scan `-77.73%`, bytes/scan `-62.77%`
+- `read_compaction_quiesced`: mean `-10.14%`, read ops/scan `-78.12%`, bytes/scan `-62.77%`
+
 Command:
 
 ```bash
