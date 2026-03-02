@@ -1,6 +1,8 @@
 #![cfg(feature = "tokio")]
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -85,19 +87,26 @@ async fn prepare_scenarios(
     run_id: &str,
     storage: &ScenarioStorage,
 ) -> Result<Vec<ScenarioState>, BenchError> {
+    let selected = selected_scenario_filter();
     let mut scenarios = Vec::new();
-    push_prepared_scenario(
-        &mut scenarios,
-        prepare_read_baseline(config, run_id, storage).await,
-    )?;
-    push_prepared_scenario(
-        &mut scenarios,
-        prepare_read_after_first_compaction_observed(config, run_id, storage).await,
-    )?;
-    push_prepared_scenario(
-        &mut scenarios,
-        prepare_read_compaction_quiesced(config, run_id, storage).await,
-    )?;
+    if should_prepare_scenario(&selected, "read_baseline") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_read_baseline(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "read_after_first_compaction_observed") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_read_after_first_compaction_observed(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "read_compaction_quiesced") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_read_compaction_quiesced(config, run_id, storage).await,
+        )?;
+    }
 
     let sweep_points = config.compaction_sweep_points();
     if config.enable_read_while_compaction {
@@ -129,6 +138,76 @@ async fn prepare_scenarios(
     Ok(scenarios)
 }
 
+fn selected_scenario_filter() -> Option<HashSet<&'static str>> {
+    const KNOWN_SCENARIOS: [&str; 5] = [
+        "read_baseline",
+        "read_after_first_compaction_observed",
+        "read_compaction_quiesced",
+        "read_while_compaction",
+        "write_throughput_vs_compaction_frequency",
+    ];
+    let mut selected = HashSet::new();
+    for arg in std::env::args().skip(1) {
+        for scenario in KNOWN_SCENARIOS {
+            if arg.contains(scenario) {
+                selected.insert(scenario);
+            }
+        }
+    }
+    if selected.is_empty() {
+        None
+    } else {
+        eprintln!(
+            "tonbo benchmark: scenario filter active: {}",
+            selected.iter().copied().collect::<Vec<_>>().join(", ")
+        );
+        Some(selected)
+    }
+}
+
+fn should_prepare_scenario(
+    selected: &Option<HashSet<&'static str>>,
+    scenario_id: &'static str,
+) -> bool {
+    match selected {
+        Some(selected) => selected.contains(scenario_id),
+        None => true,
+    }
+}
+
+#[derive(Default)]
+struct PrepTimingReport {
+    phases: Vec<(&'static str, u64)>,
+}
+
+impl PrepTimingReport {
+    fn record(&mut self, phase: &'static str, started: Instant) {
+        self.phases
+            .push((phase, started.elapsed().as_nanos().min(u64::MAX as u128) as u64));
+    }
+
+    fn emit(&self, scenario_id: &'static str) {
+        let total_ns: u128 = self.phases.iter().map(|(_, ns)| u128::from(*ns)).sum();
+        let total_ms = total_ns as f64 / 1_000_000.0;
+        eprintln!(
+            "tonbo benchmark prep timing scenario={} total_ms={total_ms:.3}",
+            scenario_id
+        );
+        for (phase, elapsed_ns) in &self.phases {
+            let elapsed_ms = *elapsed_ns as f64 / 1_000_000.0;
+            let share_pct = if total_ns > 0 {
+                (*elapsed_ns as f64 / total_ns as f64) * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "tonbo benchmark prep timing scenario={} phase={} elapsed_ms={elapsed_ms:.3} share_pct={share_pct:.2}",
+                scenario_id, phase
+            );
+        }
+    }
+}
+
 fn push_prepared_scenario(
     scenarios: &mut Vec<ScenarioState>,
     prepared: Result<ScenarioState, BenchError>,
@@ -156,6 +235,8 @@ async fn prepare_read_baseline(
     let benchmark_id = scenario_id.to_string();
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
+    let mut timing = PrepTimingReport::default();
+    let phase_started = Instant::now();
     let db = open_scenario_db(
         storage,
         &schema,
@@ -166,8 +247,11 @@ async fn prepare_read_baseline(
         &io_probe,
     )
     .await?;
+    timing.record("open_db", phase_started);
 
+    let phase_started = Instant::now();
     ingest_workload(&db, &schema, config).await?;
+    timing.record("ingest_workload", phase_started);
 
     let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
         return scenario_skipped(
@@ -176,8 +260,11 @@ async fn prepare_read_baseline(
         );
     };
     ensure_ssts_present(scenario_id, version_ready)?;
+    let phase_started = Instant::now();
     let (rows_per_scan, _) = read_all_rows(&db).await?;
+    timing.record("read_all_rows", phase_started);
     let setup_io = io_probe.snapshot();
+    timing.emit(scenario_id);
 
     Ok(ScenarioState {
         scenario_id,
@@ -243,7 +330,9 @@ async fn prepare_read_compaction_state(
     let benchmark_id = scenario_id.to_string();
     let schema = benchmark_schema();
     let io_probe = common::IoProbe::default();
+    let mut timing = PrepTimingReport::default();
 
+    let phase_started = Instant::now();
     let ingest_only_db = open_scenario_db(
         storage,
         &schema,
@@ -254,7 +343,10 @@ async fn prepare_read_compaction_state(
         &io_probe,
     )
     .await?;
+    timing.record("open_db_ingest_only", phase_started);
+    let phase_started = Instant::now();
     ingest_workload(&ingest_only_db, &schema, config).await?;
+    timing.record("ingest_workload", phase_started);
     let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
     else {
         return scenario_skipped(
@@ -265,6 +357,7 @@ async fn prepare_read_compaction_state(
     ensure_ssts_present(scenario_id, version_before_compaction)?;
     drop(ingest_only_db);
 
+    let phase_started = Instant::now();
     let db = open_scenario_db(
         storage,
         &schema,
@@ -277,14 +370,20 @@ async fn prepare_read_compaction_state(
         &io_probe,
     )
     .await?;
+    timing.record("open_db_for_compaction", phase_started);
+    let phase_started = Instant::now();
     if wait_for_quiesced {
         wait_for_compaction_quiesced(&db, version_before_compaction, config).await?;
     } else {
         wait_for_first_compaction_observed(&db, version_before_compaction, config).await?;
     }
+    timing.record("wait_for_compaction_state", phase_started);
     let version_ready = latest_version_summary(&db).await?;
+    let phase_started = Instant::now();
     let (rows_per_scan, _) = read_all_rows(&db).await?;
+    timing.record("read_all_rows", phase_started);
     let setup_io = io_probe.snapshot();
+    timing.emit(scenario_id);
 
     Ok(ScenarioState {
         scenario_id,
