@@ -56,15 +56,10 @@ Reference log path from run: `/tmp/object_store_s10_bounded_1772211597/run.log`
 
 ## Interpretation
 
-- Local scale `1` already shows lower read work and lower mean/p99 latency after compaction.
-- Local scale `10` strengthens the same trend: larger read-work reduction tracks larger latency reduction.
-- Object-store scale `1` shows a larger latency drop than local scale `1`, consistent with higher remote I/O sensitivity.
-- Mean and p99 deltas move closely in completed cells, indicating broad latency improvement rather than tail-only effects.
-
-## Caveats
-
-- This historical run predates object-store probe wiring in the harness, so object-store `read_ops` and `bytes_read` are unavailable for this artifact.
-- The `object_store` scale `10` cell must be rerun after stabilizing WAL-state persistence on that path.
+- Validated conclusion (local backend): scale `1` and scale `10` both show lower read work and lower mean/p99 latency after compaction.
+- Validated local trend: larger read-work reduction at scale `10` tracks larger latency reduction than scale `1`.
+- Object-store directional interpretation is not treated as validated in this matrix report.
+- Treat this report as local-directional evidence plus historical run records for object-store cells.
 
 ## Reproduction Commands
 
