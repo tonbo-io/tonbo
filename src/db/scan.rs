@@ -1164,9 +1164,7 @@ where
         let stream = stream::empty::<Result<RecordBatch, crate::db::DBError>>();
         return Ok((
             Box::pin(stream)
-                as Pin<
-                    Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
-                >,
+                as Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
             profile,
         ));
     }
@@ -1205,9 +1203,7 @@ where
     let mapped = package.map(|result| result.map_err(crate::db::DBError::from));
     Ok((
         Box::pin(mapped)
-            as Pin<
-                Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
-            >,
+            as Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
         profile,
     ))
 }
