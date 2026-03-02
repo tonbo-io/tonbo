@@ -7,7 +7,8 @@ This report captures the directional CPU-vs-I/O benchmark matrix run on `2026-02
 - Question: `CPU vs I/O bound under dataset scaling and backend change?`
 - Scenario pair:
   - `read_baseline`
-  - `read_compaction_quiesced`
+  - `read_quiesced` (historical scenario id in these 2026-02-27 artifacts; renamed to
+    `read_compaction_quiesced` in the current harness)
 - Matrix dimensions:
   - Backend: `local`, `object_store`
   - Dataset scale: `1`, `10`
@@ -37,6 +38,13 @@ This report captures the directional CPU-vs-I/O benchmark matrix run on `2026-02
 | `local` | `1` | `target/tonbo-bench/compaction_local-1772210385445-1074695.json` | `-50.00%` | `-54.82%` | `-24.14%` | `-22.57%` | `+31.83%` |
 | `local` | `10` | `target/tonbo-bench/compaction_local-1772210396458-1074996.json` | `-89.00%` | `-92.38%` | `-58.52%` | `-57.84%` | `+141.06%` |
 | `object_store` | `1` | `target/tonbo-bench/compaction_local-1772210468296-1076637.json` | `n/a` | `n/a` | `-80.18%` | `-79.83%` | `+404.44%` |
+
+## Scenario Naming Note
+
+- Artifact `target/tonbo-bench/compaction_local-1772210468296-1076637.json` uses
+  `read_quiesced`.
+- Current harness/reporting uses `read_compaction_quiesced` for the same intent.
+- Treat these names as equivalent when comparing historical vs current runs.
 
 ## Failed Cell
 

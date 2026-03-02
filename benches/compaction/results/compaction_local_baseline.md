@@ -5,7 +5,8 @@
 This report includes only the large read profile run:
 
 - Baseline ID: `compaction_local_io_probes_large_v1`
-- Artifact: `target/tonbo-bench/compaction_local-1771877579581-3694094.json`
+- Artifact origin (historical run, not checked into this branch workspace):
+  `target/tonbo-bench/compaction_local-1771877579581-3694094.json`
 - Schema version: `3`
 - Scenarios:
   - `read_baseline`
@@ -91,9 +92,6 @@ Interpretation from CI overlap:
 
 ## Files
 
-- Artifact:
-  - `target/tonbo-bench/compaction_local-1771877579581-3694094.json`
-- Criterion estimates:
-  - `target/criterion/compaction_local/read_baseline/compaction_local_io_probes_large_v1/estimates.json`
-  - `target/criterion/compaction_local/read_after_first_compaction_observed/compaction_local_io_probes_large_v1/estimates.json`
-  - `target/criterion/compaction_local/read_compaction_quiesced/compaction_local_io_probes_large_v1/estimates.json`
+- Availability in this checkout:
+  - Historical artifact/criterion files above are not present by default in this branch.
+  - Re-run the command in this report to regenerate equivalent local outputs under `target/`.
