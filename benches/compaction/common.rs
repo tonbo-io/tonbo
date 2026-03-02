@@ -32,11 +32,11 @@ use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
 use tonbo::db::{
     AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder,
-    LeveledPlannerConfig, ObjectSpec, S3Spec, WalSyncPolicy,
+    LeveledPlannerConfig, ObjectSpec, S3Spec, ScanSetupProfile, WalSyncPolicy,
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 5;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 6;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -812,6 +812,7 @@ struct ScenarioSummaryArtifact {
     throughput: ThroughputSummary,
     latency_ns: LatencySummary,
     read_path_latency_ns: Option<ReadPathLatencySummary>,
+    read_path_internal_ns: Option<ReadPathInternalSummary>,
     io: IoCountersArtifact,
 }
 
@@ -850,11 +851,30 @@ struct ReadPathLatencySummary {
     mean_batches_per_scan: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct ReadPathInternalSummary {
+    mean_snapshot_ns: f64,
+    mean_plan_scan_ns: f64,
+    mean_build_scan_streams_ns: f64,
+    mean_merge_init_ns: f64,
+    mean_package_init_ns: f64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReadPathInternalBreakdown {
+    snapshot_ns: u64,
+    plan_scan_ns: u64,
+    build_scan_streams_ns: u64,
+    merge_init_ns: u64,
+    package_init_ns: u64,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ReadPathBreakdown {
     prepare_ns: u64,
     consume_ns: u64,
     batch_count: usize,
+    internal: ReadPathInternalBreakdown,
 }
 
 #[derive(Default)]
@@ -863,6 +883,11 @@ struct ReadPathAggregate {
     prepare_ns_total: u128,
     consume_ns_total: u128,
     batch_count_total: u128,
+    snapshot_ns_total: u128,
+    plan_scan_ns_total: u128,
+    build_scan_streams_ns_total: u128,
+    merge_init_ns_total: u128,
+    package_init_ns_total: u128,
 }
 
 impl ReadPathAggregate {
@@ -877,6 +902,21 @@ impl ReadPathAggregate {
         self.batch_count_total = self
             .batch_count_total
             .saturating_add(breakdown.batch_count as u128);
+        self.snapshot_ns_total = self
+            .snapshot_ns_total
+            .saturating_add(u128::from(breakdown.internal.snapshot_ns));
+        self.plan_scan_ns_total = self
+            .plan_scan_ns_total
+            .saturating_add(u128::from(breakdown.internal.plan_scan_ns));
+        self.build_scan_streams_ns_total = self
+            .build_scan_streams_ns_total
+            .saturating_add(u128::from(breakdown.internal.build_scan_streams_ns));
+        self.merge_init_ns_total = self
+            .merge_init_ns_total
+            .saturating_add(u128::from(breakdown.internal.merge_init_ns));
+        self.package_init_ns_total = self
+            .package_init_ns_total
+            .saturating_add(u128::from(breakdown.internal.package_init_ns));
     }
 
     fn to_summary(&self) -> Option<ReadPathLatencySummary> {
@@ -902,6 +942,20 @@ impl ReadPathAggregate {
             prepare_share_pct,
             consume_share_pct,
             mean_batches_per_scan: self.batch_count_total as f64 / samples,
+        })
+    }
+
+    fn to_internal_summary(&self) -> Option<ReadPathInternalSummary> {
+        if self.samples == 0 {
+            return None;
+        }
+        let samples = self.samples as f64;
+        Some(ReadPathInternalSummary {
+            mean_snapshot_ns: self.snapshot_ns_total as f64 / samples,
+            mean_plan_scan_ns: self.plan_scan_ns_total as f64 / samples,
+            mean_build_scan_streams_ns: self.build_scan_streams_ns_total as f64 / samples,
+            mean_merge_init_ns: self.merge_init_ns_total as f64 / samples,
+            mean_package_init_ns: self.package_init_ns_total as f64 / samples,
         })
     }
 }
@@ -1495,9 +1549,9 @@ async fn read_all_rows_local(
     db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
 ) -> Result<(usize, ReadPathBreakdown), BenchError> {
     let plan_started = Instant::now();
-    let mut stream = db
+    let (mut stream, profile) = db
         .scan()
-        .stream()
+        .stream_with_profile()
         .await
         .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
     let prepare_ns = duration_ns_u64(plan_started.elapsed());
@@ -1518,6 +1572,7 @@ async fn read_all_rows_local(
             prepare_ns,
             consume_ns,
             batch_count,
+            internal: internal_breakdown(profile),
         },
     ))
 }
@@ -1526,9 +1581,9 @@ async fn read_all_rows_object_store(
     db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
 ) -> Result<(usize, ReadPathBreakdown), BenchError> {
     let plan_started = Instant::now();
-    let mut stream = db
+    let (mut stream, profile) = db
         .scan()
-        .stream()
+        .stream_with_profile()
         .await
         .map_err(|err| BenchError::Message(format!("scan stream failed: {err}")))?;
     let prepare_ns = duration_ns_u64(plan_started.elapsed());
@@ -1549,8 +1604,19 @@ async fn read_all_rows_object_store(
             prepare_ns,
             consume_ns,
             batch_count,
+            internal: internal_breakdown(profile),
         },
     ))
+}
+
+fn internal_breakdown(profile: ScanSetupProfile) -> ReadPathInternalBreakdown {
+    ReadPathInternalBreakdown {
+        snapshot_ns: profile.snapshot_ns(),
+        plan_scan_ns: profile.plan_scan_ns(),
+        build_scan_streams_ns: profile.build_scan_streams_ns(),
+        merge_init_ns: profile.merge_init_ns(),
+        package_init_ns: profile.package_init_ns(),
+    }
 }
 
 fn measure_for_artifact(
@@ -1610,6 +1676,10 @@ fn to_scenario_artifact(
         .read_path
         .as_ref()
         .and_then(ReadPathAggregate::to_summary);
+    let read_path_internal = measurement
+        .read_path
+        .as_ref()
+        .and_then(ReadPathAggregate::to_internal_summary);
     let latency = latency_summary(&measurement.latencies_ns);
     let total_rows = measurement.rows_processed as f64;
     let total_elapsed_secs = if measurement.total_elapsed_ns == 0 {
@@ -1649,6 +1719,7 @@ fn to_scenario_artifact(
             throughput,
             latency_ns: latency,
             read_path_latency_ns: read_path_latency,
+            read_path_internal_ns: read_path_internal,
             io: measurement.io,
         },
     }

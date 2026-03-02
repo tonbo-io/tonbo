@@ -39,7 +39,7 @@ pub use builder::{
     DbBuilder, L0BackpressureConfig, ObjectSpec, S3Spec, WalConfig, wal_tuning,
 };
 pub use error::DBError;
-pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
+pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder, ScanSetupProfile};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
 pub use crate::{
