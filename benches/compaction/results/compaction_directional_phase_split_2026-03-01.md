@@ -80,6 +80,28 @@ What this means operationally:
    - batch-shape and per-batch overhead reduction.
 4. `prepare`/`consume` are harness phases, not hardware buckets; they guide where to instrument next (fine-grained timers in scan internals) before deciding CPU vs memory vs I/O micro-optimizations.
 
+## Setup-Phase Internal Decomposition (Schema 6 Follow-up, 2026-03-02)
+
+A follow-up run with the new internal setup-stage timings (`schema_version=6`) was executed:
+
+- Artifact: `target/tonbo-bench/compaction_local-1772459539994-86663.json`
+- Backend/scale: `local`, `1`
+- Scenario pair: `read_baseline`, `read_compaction_quiesced`
+
+Internal setup timings (means, milliseconds):
+
+| Scenario | prepare_ms | snapshot_ms | plan_ms | build_streams_ms | merge_init_ms | package_init_ms | setup accounted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `read_baseline` | `18.123` | `9.146` | `3.573` | `2.910` | `2.479` | `0.003` | `99.94%` |
+| `read_compaction_quiesced` | `14.798` | `9.988` | `1.592` | `1.527` | `1.682` | `0.003` | `99.96%` |
+
+Interpretation:
+
+- The internal setup decomposition is consistent (`~100%` of `prepare` accounted).
+- Compaction reduces setup work mainly in `plan_scan`, `build_scan_streams`, and `merge_init`.
+- After compaction, `snapshot` remains the largest setup component.
+- Next high-value optimization path for setup latency is snapshot/read-view overhead reduction.
+
 ## Object-Store Probe Wiring Check (Executed)
 
 Object-store runs now execute and generate artifacts with probe counters.

@@ -134,9 +134,22 @@ Read workloads also include a scan-phase breakdown:
 - `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`:
   - approximate setup-vs-execute split (harness-level phases, not hardware-level CPU/IO buckets)
 
+For schema `6` artifacts, read workloads also include internal setup-stage means:
+
+- `read_path_internal_ns.mean_snapshot_ns`
+- `read_path_internal_ns.mean_plan_scan_ns`
+- `read_path_internal_ns.mean_build_scan_streams_ns`
+- `read_path_internal_ns.mean_merge_init_ns`
+- `read_path_internal_ns.mean_package_init_ns`
+
+These internal setup-stage timers should approximately sum to `mean_prepare_ns` (small residual
+measurement overhead is expected).
+
 Interpretation guideline:
 
 - If `consume_share_pct` remains larger after compaction, prioritize execute-path optimizations (decode/merge/filter/materialization) before setup-path tweaks.
+- If setup optimization is targeted, use `read_path_internal_ns` first; in current local validation
+  runs, `snapshot` remains the dominant setup component after compaction.
 
 After `read_baseline` and `read_compaction_quiesced` complete, the harness prints:
 
