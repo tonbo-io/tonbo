@@ -9,6 +9,8 @@ use fusio::executor::JoinHandle;
 use futures::SinkExt;
 use futures::{channel::mpsc, future::AbortHandle};
 
+use crate::observability::log_debug;
+
 /// Handle to a background compaction worker.
 ///
 /// Provides control over the worker lifecycle. The worker is automatically
@@ -47,6 +49,7 @@ impl<E: Executor> CompactionHandle<E> {
             let mut sender = sender.clone();
             let _ = sender.try_send(CompactionTrigger::Kick);
         }
+        log_debug!(component = "compaction", event = "compaction_kick",);
     }
 
     /// Gracefully stop the compaction worker and wait for it to exit.
@@ -72,5 +75,6 @@ impl<E: Executor> Drop for CompactionHandle<E> {
             abort.abort();
         }
         let _ = self.join.take();
+        log_debug!(component = "compaction", event = "compaction_shutdown",);
     }
 }

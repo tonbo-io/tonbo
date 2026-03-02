@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, ops::Bound, sync::Arc};
 
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
@@ -173,7 +173,17 @@ impl ImmutableMemTable {
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<ImmutableVisibleScan<'t>, KeyExtractError> {
-        ImmutableVisibleScan::new(self, projection_schema, read_ts)
+        ImmutableVisibleScan::new(self, projection_schema, read_ts, None)
+    }
+
+    pub(crate) fn scan_visible_in_range<'t>(
+        &'t self,
+        projection_schema: Option<SchemaRef>,
+        read_ts: Timestamp,
+        start: Bound<KeyOwned>,
+        end: Bound<KeyOwned>,
+    ) -> Result<ImmutableVisibleScan<'t>, KeyExtractError> {
+        ImmutableVisibleScan::new(self, projection_schema, read_ts, Some((start, end)))
     }
 }
 
@@ -201,12 +211,88 @@ pub(crate) fn bundle_mvcc_sidecar(
 
 pub(crate) struct ImmutableVisibleScan<'t> {
     table: &'t ImmutableMemTable,
-    iter: std::collections::btree_map::Iter<'t, KeyTsViewRaw, ImmutableIndexEntry>,
+    iter: ImmutableCursor<'t>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
     dyn_schema: DynSchema,
     projection: DynProjection,
+    _range_keys: Option<RangeKeyOwners>,
+}
+
+#[derive(Debug)]
+struct RangeKeyOwners {
+    start: Option<KeyOwned>,
+    end: Option<KeyOwned>,
+}
+
+type ImmutableIter<'t> = std::collections::btree_map::Iter<'t, KeyTsViewRaw, ImmutableIndexEntry>;
+type ImmutableRange<'t> = std::collections::btree_map::Range<'t, KeyTsViewRaw, ImmutableIndexEntry>;
+
+enum ImmutableCursor<'t> {
+    Iter(ImmutableIter<'t>),
+    Range(ImmutableRange<'t>),
+}
+
+impl<'t> Iterator for ImmutableCursor<'t> {
+    type Item = (&'t KeyTsViewRaw, &'t ImmutableIndexEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Iter(iter) => iter.next(),
+            Self::Range(range) => range.next(),
+        }
+    }
+}
+
+fn lower_bound_for_immutable(
+    bound: Bound<KeyOwned>,
+    slot: &mut Option<KeyOwned>,
+) -> Bound<KeyTsViewRaw> {
+    match bound {
+        Bound::Included(key) => {
+            *slot = Some(key);
+            if let Some(key) = slot.as_ref() {
+                Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
+            } else {
+                Bound::Unbounded
+            }
+        }
+        Bound::Excluded(key) => {
+            *slot = Some(key);
+            if let Some(key) = slot.as_ref() {
+                Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
+            } else {
+                Bound::Unbounded
+            }
+        }
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn upper_bound_for_immutable(
+    bound: Bound<KeyOwned>,
+    slot: &mut Option<KeyOwned>,
+) -> Bound<KeyTsViewRaw> {
+    match bound {
+        Bound::Included(key) => {
+            *slot = Some(key);
+            if let Some(key) = slot.as_ref() {
+                Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
+            } else {
+                Bound::Unbounded
+            }
+        }
+        Bound::Excluded(key) => {
+            *slot = Some(key);
+            if let Some(key) = slot.as_ref() {
+                Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
+            } else {
+                Bound::Unbounded
+            }
+        }
+        Bound::Unbounded => Bound::Unbounded,
+    }
 }
 
 pub(crate) enum ImmutableVisibleEntry {
@@ -238,18 +324,35 @@ impl<'t> ImmutableVisibleScan<'t> {
         table: &'t ImmutableMemTable,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
+        bounds: Option<(Bound<KeyOwned>, Bound<KeyOwned>)>,
     ) -> Result<Self, KeyExtractError> {
         let base_schema = table.storage.schema();
         let dyn_schema = DynSchema::from_ref(base_schema.clone());
         let projection = build_projection(&base_schema, projection_schema.as_ref())?;
+        let (iter, range_keys): (ImmutableCursor<'t>, Option<RangeKeyOwners>) = match bounds {
+            Some((start, end)) => {
+                let mut keys = RangeKeyOwners {
+                    start: None,
+                    end: None,
+                };
+                let lower = lower_bound_for_immutable(start, &mut keys.start);
+                let upper = upper_bound_for_immutable(end, &mut keys.end);
+                (
+                    ImmutableCursor::Range(table.index.range((lower, upper))),
+                    Some(keys),
+                )
+            }
+            None => (ImmutableCursor::Iter(table.index.iter()), None),
+        };
         Ok(Self {
             table,
-            iter: table.index.iter(),
+            iter,
             read_ts,
             current_key: None,
             emitted_for_key: false,
             dyn_schema,
             projection,
+            _range_keys: range_keys,
         })
     }
 }

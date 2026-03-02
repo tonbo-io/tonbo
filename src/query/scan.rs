@@ -1,6 +1,10 @@
-use std::{collections::BTreeSet, ops::Range, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    ops::{Bound, Range},
+    sync::Arc,
+};
 
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::{DataType, Schema, SchemaRef};
 use parquet::{
     arrow::{
         ProjectionMask,
@@ -47,10 +51,10 @@ pub(crate) struct DeleteSelection {
 /// Placeholder for future key-range selections.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyRangeSelection {
-    /// Inclusive lower bound.
-    pub(crate) start: Option<KeyOwned>,
-    /// Inclusive upper bound.
-    pub(crate) end: Option<KeyOwned>,
+    /// Lower bound (inclusive/exclusive/unbounded).
+    pub(crate) start: Bound<KeyOwned>,
+    /// Upper bound (inclusive/exclusive/unbounded).
+    pub(crate) end: Bound<KeyOwned>,
 }
 
 /// Selection details for a scan source.
@@ -480,14 +484,14 @@ pub(crate) fn key_bounds_for_predicate(
         return None;
     }
     let key_column = field.name();
-    bounds_from_expr(predicate, key_column)
+    bounds_from_expr(predicate, key_column, field.data_type())
 }
 
 fn scalar_to_key(value: &ScalarValue) -> Option<KeyOwned> {
     <KeyOwned as KeyPredicateValue>::from_scalar(value)
 }
 
-fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
+fn bounds_from_expr(expr: &Expr, key_column: &str, key_type: &DataType) -> Option<KeyBounds> {
     match expr {
         Expr::True => None,
         Expr::False => Some(KeyBounds::empty()),
@@ -516,6 +520,18 @@ fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
                 (high_key, *inclusive),
             ))
         }
+        Expr::StartsWith { column, prefix } if column == key_column => {
+            if !is_string_key(key_type) || prefix.is_empty() {
+                return None;
+            }
+            let lower = KeyOwned::from(prefix.as_str());
+            if let Some(next_prefix) = next_prefix_string(prefix) {
+                let upper = KeyOwned::from(next_prefix.as_str());
+                Some(KeyBounds::with_range((lower, true), (upper, false)))
+            } else {
+                Some(KeyBounds::with_lower(lower, true))
+            }
+        }
         Expr::InList { column, values } if column == key_column => {
             if values.is_empty() {
                 return Some(KeyBounds::empty());
@@ -532,7 +548,7 @@ fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
         Expr::And(children) => {
             let mut acc: Option<KeyBounds> = None;
             for child in children {
-                if let Some(bounds) = bounds_from_expr(child, key_column) {
+                if let Some(bounds) = bounds_from_expr(child, key_column, key_type) {
                     acc = Some(match acc {
                         Some(prev) => prev.intersect(&bounds),
                         None => bounds,
@@ -544,7 +560,7 @@ fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
         Expr::Or(children) => {
             let mut acc: Option<KeyBounds> = None;
             for child in children {
-                let bounds = bounds_from_expr(child, key_column)?;
+                let bounds = bounds_from_expr(child, key_column, key_type)?;
                 acc = Some(match acc {
                     Some(prev) => prev.union_envelope(&bounds),
                     None => bounds,
@@ -555,6 +571,62 @@ fn bounds_from_expr(expr: &Expr, key_column: &str) -> Option<KeyBounds> {
         Expr::Not(_) => None,
         _ => None,
     }
+}
+
+pub(crate) fn key_range_for_predicate(
+    predicate: &Expr,
+    key_schema: &SchemaRef,
+) -> Option<KeyRangeSelection> {
+    let bounds = key_bounds_for_predicate(predicate, key_schema)?;
+    if bounds.is_empty() {
+        return None;
+    }
+    Some(KeyRangeSelection {
+        start: match bounds.lower.as_ref() {
+            Some(bound) => {
+                if bound.inclusive {
+                    Bound::Included(bound.key.clone())
+                } else {
+                    Bound::Excluded(bound.key.clone())
+                }
+            }
+            None => Bound::Unbounded,
+        },
+        end: match bounds.upper.as_ref() {
+            Some(bound) => {
+                if bound.inclusive {
+                    Bound::Included(bound.key.clone())
+                } else {
+                    Bound::Excluded(bound.key.clone())
+                }
+            }
+            None => Bound::Unbounded,
+        },
+    })
+}
+
+fn is_string_key(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
+}
+
+fn next_prefix_string(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let mut chars: Vec<char> = prefix.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        let current = chars[idx];
+        if current != char::MAX {
+            let next = char::from_u32(current as u32 + 1)?;
+            chars[idx] = next;
+            chars.truncate(idx + 1);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
 }
 
 fn extend_projection_schema(
