@@ -125,13 +125,18 @@ Each scenario summary includes latency fields in nanoseconds:
 
 Read workloads also include a scan-phase breakdown:
 
-- `read_path_latency_ns.mean_prepare_ns`: scan planning + stream construction
-- `read_path_latency_ns.mean_consume_ns`: stream consumption/materialization
-- `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`: approximate dominance split
+- `read_path_latency_ns.mean_prepare_ns` (`setup phase`):
+  - measured around `db.scan().stream().await`
+  - includes snapshot/read-ts resolution, scan planning/pruning, and stream construction/open
+- `read_path_latency_ns.mean_consume_ns` (`execute phase`):
+  - measured around `while let Some(batch_result) = stream.next().await`
+  - includes stream polling/materialization/merge work and async wait while consuming rows
+- `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`:
+  - approximate setup-vs-execute split (harness-level phases, not hardware-level CPU/IO buckets)
 
 Interpretation guideline:
 
-- If `consume_share_pct` remains larger after compaction, prioritize execution-path optimizations (decode/merge/filter/materialization) before planning/setup tweaks.
+- If `consume_share_pct` remains larger after compaction, prioritize execute-path optimizations (decode/merge/filter/materialization) before setup-path tweaks.
 
 After `read_baseline` and `read_compaction_quiesced` complete, the harness prints:
 

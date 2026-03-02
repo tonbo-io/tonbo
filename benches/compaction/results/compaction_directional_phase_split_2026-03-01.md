@@ -45,8 +45,8 @@ Relative change vs `read_baseline`:
 
 Each read iteration is divided into:
 
-- `prepare`: scan setup/planning + stream construction
-- `consume`: stream consumption/materialization
+- `prepare` (`setup phase`): snapshot/scan setup + planning/pruning + stream construction
+- `consume` (`execute phase`): stream polling/consumption/materialization
 
 Measurement boundaries (directly timed in harness):
 
