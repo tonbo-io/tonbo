@@ -98,6 +98,22 @@ TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=1  TONBO_COMPACTION_B
 TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=10 TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s10-$(date +%s) cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
 ```
 
+High-scale object-store tuned profile (reduces small-operation amplification while preserving
+benchmark intent):
+
+```bash
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=7 \
+TONBO_COMPACTION_BENCH_ROWS_PER_BATCH=192 \
+TONBO_COMPACTION_BENCH_INGEST_BATCHES=214 \
+TONBO_COMPACTION_BENCH_ARTIFACT_ITERATIONS=8 \
+TONBO_COMPACTION_BENCH_CRITERION_SAMPLE_SIZE=10 \
+TONBO_COMPACTION_BENCH_ENABLE_READ_WHILE_COMPACTION=0 \
+TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY=0 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-object-s7-$(date +%s) \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+```
+
 ## Compaction Eligibility and Skips
 
 `read_after_first_compaction_observed` and `read_compaction_quiesced` wait for compaction-state transitions. If compaction never triggers, those scenarios can time out; increase `TONBO_COMPACTION_BENCH_INGEST_BATCHES` or `TONBO_BENCH_DATASET_SCALE` in that case.
@@ -134,7 +150,7 @@ Read workloads also include a scan-phase breakdown:
 - `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`:
   - approximate setup-vs-execute split (harness-level phases, not hardware-level CPU/IO buckets)
 
-For schema `6` artifacts, read workloads also include internal setup-stage means:
+For schema `6+` artifacts, read workloads also include internal setup-stage means:
 
 - `read_path_internal_ns.mean_snapshot_ns`
 - `read_path_internal_ns.mean_plan_scan_ns`
@@ -144,6 +160,48 @@ For schema `6` artifacts, read workloads also include internal setup-stage means
 
 These internal setup-stage timers should approximately sum to `mean_prepare_ns` (small residual
 measurement overhead is expected).
+
+For schema `8+` artifacts, setup payloads include both logical and physical volume sections:
+
+- Primary logical live-set view:
+  - `setup.logical_before_compaction`
+  - `setup.logical_ready`
+- Debug physical prefix snapshots:
+  - `setup.volume_before_compaction`
+  - `setup.volume_ready`
+
+Logical section fields:
+
+- `sst_count`
+- `sst_bytes`
+- `wal_bytes` (nullable best-effort; `null` when live WAL byte accounting is unavailable)
+- `manifest_bytes` (nullable best-effort)
+- `total_bytes` (sum of included logical components only; excludes obsolete/unreferenced files)
+
+Physical section fields:
+
+- `setup.volume_before_compaction`
+- `setup.volume_ready`
+
+Each volume snapshot includes:
+
+- `object_count`
+- `total_bytes`
+- `sst_bytes`
+- `wal_bytes`
+- `manifest_bytes`
+- `other_bytes`
+
+Capture points:
+
+- `logical_before_compaction` / `volume_before_compaction`: after ingest, before compaction wait.
+- `logical_ready` / `volume_ready`: after scenario reaches ready state.
+
+Semantics:
+
+- Physical can increase from before -> ready because compaction writes new SSTs before old files are GC'd.
+- Logical should be used as the primary compaction-effectiveness metric because it tracks manifest-visible live state.
+- Physical remains useful for debugging storage amplification and cleanup lag.
 
 Interpretation guideline:
 

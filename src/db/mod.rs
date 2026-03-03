@@ -88,6 +88,8 @@ pub struct Version {
     pub timestamp: Timestamp,
     /// Number of SST files in this version.
     pub sst_count: usize,
+    /// Sum of manifest-visible SST payload bytes in this version.
+    pub sst_bytes: u64,
     /// Number of compaction levels with data.
     pub level_count: usize,
 }
@@ -904,10 +906,22 @@ where
 
         Ok(states
             .into_iter()
-            .map(|s| Version {
-                timestamp: s.commit_timestamp,
-                sst_count: s.ssts.iter().map(|level| level.len()).sum(),
-                level_count: s.ssts.iter().filter(|level| !level.is_empty()).count(),
+            .map(|s| {
+                let sst_count = s.ssts.iter().map(|level| level.len()).sum();
+                let sst_bytes = s
+                    .ssts
+                    .iter()
+                    .flatten()
+                    .filter_map(|entry| entry.stats().map(|stats| stats.bytes))
+                    .fold(0u64, |acc, bytes| {
+                        acc.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX))
+                    });
+                Version {
+                    timestamp: s.commit_timestamp,
+                    sst_count,
+                    sst_bytes,
+                    level_count: s.ssts.iter().filter(|level| !level.is_empty()).count(),
+                }
             })
             .collect())
     }

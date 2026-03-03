@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     path::{Path, PathBuf},
     pin::Pin,
@@ -36,7 +36,7 @@ use tonbo::db::{
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 6;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 8;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -102,6 +102,47 @@ pub(crate) struct IoCountersArtifact {
     bytes_read: u64,
     bytes_written: u64,
     ssts_touched: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct StorageVolumeArtifact {
+    object_count: u64,
+    total_bytes: u64,
+    sst_bytes: u64,
+    wal_bytes: u64,
+    manifest_bytes: u64,
+    other_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LogicalVolumeArtifact {
+    sst_count: usize,
+    sst_bytes: u64,
+    wal_bytes: Option<u64>,
+    manifest_bytes: Option<u64>,
+    total_bytes: u64,
+}
+
+impl LogicalVolumeArtifact {
+    pub(crate) fn from_version(version: VersionSummary) -> Self {
+        let wal_bytes = None;
+        let manifest_bytes = None;
+        let mut total_bytes = version.sst_bytes;
+        if let Some(bytes) = wal_bytes {
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+        if let Some(bytes) = manifest_bytes {
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+
+        Self {
+            sst_count: version.sst_count,
+            sst_bytes: version.sst_bytes,
+            wal_bytes,
+            manifest_bytes,
+            total_bytes,
+        }
+    }
 }
 
 impl IoProbe {
@@ -666,6 +707,7 @@ impl ResolvedConfig {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VersionSummary {
     pub(crate) sst_count: usize,
+    pub(crate) sst_bytes: u64,
     pub(crate) level_count: usize,
 }
 
@@ -733,6 +775,8 @@ pub(crate) struct ScenarioState {
     pub(crate) rows_per_op_hint: usize,
     pub(crate) version_before_compaction: VersionSummary,
     pub(crate) version_ready: VersionSummary,
+    pub(crate) volume_before_compaction: StorageVolumeArtifact,
+    pub(crate) volume_ready: StorageVolumeArtifact,
     pub(crate) write_state: Option<WriteWorkloadState>,
 }
 
@@ -801,6 +845,10 @@ struct ScenarioSetupArtifact {
     level_count_before_compaction: usize,
     sst_count_ready: usize,
     level_count_ready: usize,
+    logical_before_compaction: LogicalVolumeArtifact,
+    logical_ready: LogicalVolumeArtifact,
+    volume_before_compaction: StorageVolumeArtifact,
+    volume_ready: StorageVolumeArtifact,
     io: IoCountersArtifact,
 }
 
@@ -1307,6 +1355,28 @@ pub(crate) async fn open_object_store_benchmark_db(
     Ok(BenchmarkDb::ObjectStore(db))
 }
 
+pub(crate) async fn snapshot_local_storage_volume(
+    root: &Path,
+) -> Result<StorageVolumeArtifact, BenchError> {
+    let fs = LocalFs {};
+    let absolute = absolutize(root)?;
+    let root_path = FusioPath::from_filesystem_path(&absolute).map_err(|err| {
+        BenchError::Message(format!(
+            "failed to convert benchmark root `{}` to fusio path: {err}",
+            absolute.display()
+        ))
+    })?;
+    snapshot_storage_volume_with_fs(&fs, &root_path).await
+}
+
+pub(crate) async fn snapshot_object_store_storage_volume(
+    object_spec: &ObjectSpec,
+) -> Result<StorageVolumeArtifact, BenchError> {
+    let probe = IoProbe::default();
+    let (fs, root) = build_probed_object_store_fs(object_spec, &probe)?;
+    snapshot_storage_volume_with_fs(fs.as_ref(), &root).await
+}
+
 fn build_probed_object_store_fs(
     object_spec: &ObjectSpec,
     io_probe: &IoProbe,
@@ -1361,6 +1431,69 @@ fn build_swept_compaction_options(tuning: &CompactionTuning) -> CompactionOption
     CompactionOptions::new()
         .strategy(CompactionStrategy::Leveled(planner))
         .periodic_tick(Duration::from_millis(tuning.periodic_tick_ms.max(1)))
+}
+
+async fn snapshot_storage_volume_with_fs<FS: Fs>(
+    fs: &FS,
+    root: &FusioPath,
+) -> Result<StorageVolumeArtifact, BenchError> {
+    let mut pending = VecDeque::new();
+    let mut visited = HashSet::new();
+    pending.push_back(root.clone());
+    let mut volume = StorageVolumeArtifact::default();
+    while let Some(dir) = pending.pop_front() {
+        if !visited.insert(dir.to_string()) {
+            continue;
+        }
+        let stream = fs.list(&dir).await.map_err(|err| {
+            BenchError::Message(format!(
+                "failed to list storage under `{}`: {err}",
+                dir.as_ref()
+            ))
+        })?;
+        futures::pin_mut!(stream);
+        while let Some(meta_result) = stream.next().await {
+            let meta = meta_result.map_err(|err| {
+                BenchError::Message(format!(
+                    "failed to read storage metadata under `{}`: {err}",
+                    dir.as_ref()
+                ))
+            })?;
+            let path = meta.path.as_ref();
+            if !is_probably_file_path(path) {
+                pending.push_back(meta.path);
+                continue;
+            }
+            let size = meta.size;
+            volume.object_count = volume.object_count.saturating_add(1);
+            volume.total_bytes = volume.total_bytes.saturating_add(size);
+            if is_sst_path(&meta.path) {
+                volume.sst_bytes = volume.sst_bytes.saturating_add(size);
+            } else if is_wal_path(path) {
+                volume.wal_bytes = volume.wal_bytes.saturating_add(size);
+            } else if is_manifest_path(path) {
+                volume.manifest_bytes = volume.manifest_bytes.saturating_add(size);
+            } else {
+                volume.other_bytes = volume.other_bytes.saturating_add(size);
+            }
+        }
+    }
+    Ok(volume)
+}
+
+fn is_probably_file_path(path: &str) -> bool {
+    let Some(name) = path.rsplit('/').next() else {
+        return false;
+    };
+    name.contains('.')
+}
+
+fn is_wal_path(path: &str) -> bool {
+    path.contains("/wal/") || path.starts_with("wal/")
+}
+
+fn is_manifest_path(path: &str) -> bool {
+    path.contains("/manifest/") || path.starts_with("manifest/")
 }
 
 pub(crate) async fn ingest_workload(
@@ -1440,6 +1573,7 @@ pub(crate) async fn latest_version_summary_if_any(
     .map_err(|err| BenchError::Message(format!("list_versions failed: {err}")))?;
     Ok(versions.into_iter().next().map(|version| VersionSummary {
         sst_count: version.sst_count,
+        sst_bytes: version.sst_bytes,
         level_count: version.level_count,
     }))
 }
@@ -1710,6 +1844,12 @@ fn to_scenario_artifact(
             level_count_before_compaction: scenario.version_before_compaction.level_count,
             sst_count_ready: scenario.version_ready.sst_count,
             level_count_ready: scenario.version_ready.level_count,
+            logical_before_compaction: LogicalVolumeArtifact::from_version(
+                scenario.version_before_compaction,
+            ),
+            logical_ready: LogicalVolumeArtifact::from_version(scenario.version_ready),
+            volume_before_compaction: scenario.volume_before_compaction.clone(),
+            volume_ready: scenario.volume_ready.clone(),
             io: scenario.setup_io.clone(),
         },
         summary: ScenarioSummaryArtifact {

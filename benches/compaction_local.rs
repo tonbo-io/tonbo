@@ -1,8 +1,6 @@
 #![cfg(feature = "tokio")]
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -12,10 +10,11 @@ mod common;
 use common::{
     BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
     ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
-    ScenarioWorkload, VersionSummary, WriteWorkloadState, artifact_path, benchmark_schema,
-    build_artifact, build_run_id, build_runtime, ingest_workload, latest_version_summary,
-    latest_version_summary_if_any, open_benchmark_db, open_object_store_benchmark_db,
-    print_directional_report, read_all_rows, run_criterion, scenario_root,
+    ScenarioWorkload, StorageVolumeArtifact, VersionSummary, WriteWorkloadState, artifact_path,
+    benchmark_schema, build_artifact, build_run_id, build_runtime, ingest_workload,
+    latest_version_summary, latest_version_summary_if_any, open_benchmark_db,
+    open_object_store_benchmark_db, print_directional_report, read_all_rows, run_criterion,
+    scenario_root, snapshot_local_storage_volume, snapshot_object_store_storage_volume,
     wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
 };
 
@@ -182,8 +181,10 @@ struct PrepTimingReport {
 
 impl PrepTimingReport {
     fn record(&mut self, phase: &'static str, started: Instant) {
-        self.phases
-            .push((phase, started.elapsed().as_nanos().min(u64::MAX as u128) as u64));
+        self.phases.push((
+            phase,
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        ));
     }
 
     fn emit(&self, scenario_id: &'static str) {
@@ -201,7 +202,8 @@ impl PrepTimingReport {
                 0.0
             };
             eprintln!(
-                "tonbo benchmark prep timing scenario={} phase={} elapsed_ms={elapsed_ms:.3} share_pct={share_pct:.2}",
+                "tonbo benchmark prep timing scenario={} phase={} elapsed_ms={elapsed_ms:.3} \
+                 share_pct={share_pct:.2}",
                 scenario_id, phase
             );
         }
@@ -252,6 +254,7 @@ async fn prepare_read_baseline(
     let phase_started = Instant::now();
     ingest_workload(&db, &schema, config).await?;
     timing.record("ingest_workload", phase_started);
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
 
     let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
         return scenario_skipped(
@@ -263,6 +266,7 @@ async fn prepare_read_baseline(
     let phase_started = Instant::now();
     let (rows_per_scan, _) = read_all_rows(&db).await?;
     timing.record("read_all_rows", phase_started);
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
     timing.emit(scenario_id);
 
@@ -282,6 +286,8 @@ async fn prepare_read_baseline(
         rows_per_op_hint: rows_per_scan,
         version_before_compaction: version_ready,
         version_ready,
+        volume_before_compaction,
+        volume_ready,
         write_state: None,
     })
 }
@@ -347,6 +353,7 @@ async fn prepare_read_compaction_state(
     let phase_started = Instant::now();
     ingest_workload(&ingest_only_db, &schema, config).await?;
     timing.record("ingest_workload", phase_started);
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
     else {
         return scenario_skipped(
@@ -382,6 +389,7 @@ async fn prepare_read_compaction_state(
     let phase_started = Instant::now();
     let (rows_per_scan, _) = read_all_rows(&db).await?;
     timing.record("read_all_rows", phase_started);
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
     timing.emit(scenario_id);
 
@@ -401,6 +409,8 @@ async fn prepare_read_compaction_state(
         rows_per_op_hint: rows_per_scan,
         version_before_compaction,
         version_ready,
+        volume_before_compaction,
+        volume_ready,
         write_state: None,
     })
 }
@@ -429,6 +439,7 @@ async fn prepare_read_while_compaction(
     )
     .await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
     else {
         return scenario_skipped(
@@ -456,6 +467,7 @@ async fn prepare_read_while_compaction(
         );
     };
     let (rows_per_scan, _) = read_all_rows(&db).await?;
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
     let write_state = WriteWorkloadState::new(
         Arc::clone(&schema),
@@ -488,6 +500,8 @@ async fn prepare_read_while_compaction(
         rows_per_op_hint: rows_per_scan,
         version_before_compaction,
         version_ready,
+        volume_before_compaction,
+        volume_ready,
         write_state: Some(write_state),
     })
 }
@@ -517,6 +531,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
     )
     .await?;
     ingest_workload(&ingest_only_db, &schema, config).await?;
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
     else {
         return scenario_skipped(
@@ -544,6 +559,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         );
     };
     let setup_io = io_probe.snapshot();
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let write_state = WriteWorkloadState::new(
         Arc::clone(&schema),
         config.rows_per_batch,
@@ -576,6 +592,8 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         rows_per_op_hint: config.rows_per_batch,
         version_before_compaction,
         version_ready,
+        volume_before_compaction,
+        volume_ready,
         write_state: Some(write_state),
     })
 }
@@ -603,6 +621,29 @@ async fn open_scenario_db(
             };
             let spec = object_store.object_spec(run_id, benchmark_id);
             open_object_store_benchmark_db(schema, &spec, config, profile, io_probe).await
+        }
+    }
+}
+
+async fn snapshot_scenario_volume(
+    storage: &ScenarioStorage,
+    run_id: &str,
+    benchmark_id: &str,
+) -> Result<StorageVolumeArtifact, BenchError> {
+    match storage.backend {
+        BenchBackend::Local => {
+            let root = scenario_root(run_id, benchmark_id);
+            snapshot_local_storage_volume(&root).await
+        }
+        BenchBackend::ObjectStore => {
+            let Some(object_store) = &storage.object_store else {
+                return Err(BenchError::Message(format!(
+                    "object_store backend selected without resolved object-store config for \
+                     benchmark `{benchmark_id}`"
+                )));
+            };
+            let spec = object_store.object_spec(run_id, benchmark_id);
+            snapshot_object_store_storage_volume(&spec).await
         }
     }
 }
