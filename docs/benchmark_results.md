@@ -40,7 +40,7 @@ Column meaning:
 - `Physical bytes before -> ready`: `setup.volume_before_compaction.total_bytes -> setup.volume_ready.total_bytes` (all objects currently present under the benchmark prefix, including transient/obsolete files awaiting GC).
 
 | Backend | Scale | Status | Mean latency | p99 | Ops/sec | SST before -> ready | Logical live-set before -> ready (bytes) | Physical bytes before -> ready (bytes) |
-| --- | ---: | --- | ---: | ---: | ---: | --- | --- |
+| --- | ---: | --- | ---: | ---: | ---: | --- | --- | --- |
 | `local` | `3` | `ok` | `58.454 ms` | `63.993 ms` | `17.108` | `10 -> 5` | `11,797,089 -> 5,792,031` | `15,951,663 -> 17,028,823` |
 | `local` | `4` | `ok` | `86.503 ms` | `93.041 ms` | `11.560` | `13 -> 8` | `15,336,272 -> 9,331,214` | `20,882,160 -> 21,960,868` |
 | `local` | `7` | `ok` | `83.925 ms` | `88.189 ms` | `11.915` | `23 -> 8` | `27,133,554 -> 9,117,998` | `36,883,843 -> 40,125,799` |
