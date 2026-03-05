@@ -34,21 +34,34 @@ Profile used for rows below:
 - `TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY=0`
 - scenario: `read_compaction_quiesced`
 
-Column meaning:
+Backend legend:
 
-- `Logical live-set before -> ready`: `setup.logical_before_compaction.total_bytes -> setup.logical_ready.total_bytes` (manifest-visible, read-live bytes only).
-- `Physical bytes before -> ready`: `setup.volume_before_compaction.total_bytes -> setup.volume_ready.total_bytes` (all objects currently present under the benchmark prefix, including transient/obsolete files awaiting GC).
+- `local`: Tonbo on local filesystem (`LocalFs`) on the benchmark runner.
+- `object_store`: Tonbo object-store path from the same local runner to S3-compatible remote storage in the closest configured S3 region.
 
-| Backend | Scale | Status | Mean latency | p99 | Ops/sec | SST before -> ready | Logical live-set before -> ready (bytes) | Physical bytes before -> ready (bytes) |
-| --- | ---: | --- | ---: | ---: | ---: | --- | --- | --- |
-| `local` | `3` | `ok` | `58.454 ms` | `63.993 ms` | `17.108` | `10 -> 5` | `11,797,089 -> 5,792,031` | `15,951,663 -> 17,028,823` |
-| `local` | `4` | `ok` | `86.503 ms` | `93.041 ms` | `11.560` | `13 -> 8` | `15,336,272 -> 9,331,214` | `20,882,160 -> 21,960,868` |
-| `local` | `7` | `ok` | `83.925 ms` | `88.189 ms` | `11.915` | `23 -> 8` | `27,133,554 -> 9,117,998` | `36,883,843 -> 40,125,799` |
-| `local` | `10` | `ok` | `81.851 ms` | `85.603 ms` | `12.217` | `33 -> 8` | `38,930,832 -> 8,904,778` | `52,924,919 -> 58,338,067` |
-| `object_store` | `3` | `ok` | `405.980 ms` | `429.655 ms` | `2.463` | `10 -> 5` | `11,797,089 -> 5,792,031` | `11,823,466 -> 17,024,599` |
-| `object_store` | `4` | `ok` | `390.380 ms` | `410.206 ms` | `2.562` | `13 -> 8` | `15,336,272 -> 9,331,214` | `15,377,079 -> 21,954,007` |
-| `object_store` | `7` | `ok` | `393.249 ms` | `408.938 ms` | `2.543` | `23 -> 18` | `27,133,554 -> 21,128,496` | `27,245,479 -> 39,029,728` |
-| `object_store` | `10` | `ok` | `381.587 ms` | `399.655 ms` | `2.621` | `33 -> 23` | `38,930,832 -> 26,920,523` | `39,149,933 -> 55,065,425` |
+Column shorthand:
+
+- `b->r`: before -> ready.
+- `Live b->r (MiB)`: manifest-visible logical live-set (`setup.logical_before_compaction.total_bytes -> setup.logical_ready.total_bytes`) in MiB with percent change.
+- `Phys b->r (MiB)`: physical prefix volume (`setup.volume_before_compaction.total_bytes -> setup.volume_ready.total_bytes`) in MiB with percent change.
+
+### Local
+
+| Scale | Status | Mean (ms) | p99 (ms) | Ops/s | SST b->r | Live b->r (MiB) | Phys b->r (MiB) |
+| ---: | --- | ---: | ---: | ---: | --- | --- | --- |
+| `3` | `ok` | `58.454` | `63.993` | `17.108` | `10 -> 5` | `11.25 -> 5.52 (-50.9%)` | `15.21 -> 16.24 (+6.8%)` |
+| `4` | `ok` | `86.503` | `93.041` | `11.560` | `13 -> 8` | `14.63 -> 8.90 (-39.2%)` | `19.91 -> 20.94 (+5.2%)` |
+| `7` | `ok` | `83.925` | `88.189` | `11.915` | `23 -> 8` | `25.88 -> 8.70 (-66.4%)` | `35.18 -> 38.27 (+8.8%)` |
+| `10` | `ok` | `81.851` | `85.603` | `12.217` | `33 -> 8` | `37.13 -> 8.49 (-77.1%)` | `50.47 -> 55.64 (+10.2%)` |
+
+### Object Store
+
+| Scale | Status | Mean (ms) | p99 (ms) | Ops/s | SST b->r | Live b->r (MiB) | Phys b->r (MiB) |
+| ---: | --- | ---: | ---: | ---: | --- | --- | --- |
+| `3` | `ok` | `405.980` | `429.655` | `2.463` | `10 -> 5` | `11.25 -> 5.52 (-50.9%)` | `11.28 -> 16.24 (+44.0%)` |
+| `4` | `ok` | `390.380` | `410.206` | `2.562` | `13 -> 8` | `14.63 -> 8.90 (-39.2%)` | `14.66 -> 20.94 (+42.8%)` |
+| `7` | `ok` | `393.249` | `408.938` | `2.543` | `23 -> 18` | `25.88 -> 20.15 (-22.1%)` | `25.98 -> 37.22 (+43.3%)` |
+| `10` | `ok` | `381.587` | `399.655` | `2.621` | `33 -> 23` | `37.13 -> 25.67 (-30.9%)` | `37.34 -> 52.51 (+40.7%)` |
 
 ## Interpretation
 
