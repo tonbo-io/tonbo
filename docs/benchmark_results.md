@@ -41,7 +41,9 @@ Backend legend:
 
 Column shorthand:
 
-- `b->r`: before -> ready.
+- `b->r`: before compaction wait -> compaction ready.
+  `before` is captured after ingest and before waiting for compaction-state transition.
+  `ready` is captured when the scenario reaches compaction-ready state and new compaction output is read-visible.
 - `Live b->r (MiB)`: manifest-visible logical live-set (`setup.logical_before_compaction.total_bytes -> setup.logical_ready.total_bytes`) in MiB with percent change.
 - `Phys b->r (MiB)`: physical prefix volume (`setup.volume_before_compaction.total_bytes -> setup.volume_ready.total_bytes`) in MiB with percent change.
 
