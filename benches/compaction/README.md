@@ -7,6 +7,22 @@ This benchmark suite lives in `benches/compaction_local.rs` and now supports:
 - Tail latency reporting (p50/p95/p99 in addition to mean).
 - A directional report block for `read_baseline` vs `read_compaction_quiesced`.
 
+## Program Context
+
+This suite is one current engine-layer benchmark inside Tonbo's broader
+benchmark program. The wider roadmap and instrumentation plan live in
+`docs/benchmark_program.md`.
+
+In that broader program:
+
+- `micro` benchmarks isolate narrow internal costs,
+- `engine` benchmarks cover mixed read/write, durability, compaction, GC, and
+  object-store effects,
+- `surface` benchmarks cover user-facing query/open/freshness behavior.
+
+This README stays focused on the current compaction harness, but its artifact
+and scenario design should evolve toward that larger program.
+
 ## New Environment Variables
 
 - `TONBO_BENCH_DATASET_SCALE` (default: `1`)
@@ -150,6 +166,11 @@ Read workloads also include a scan-phase breakdown:
 - `read_path_latency_ns.prepare_share_pct` / `consume_share_pct`:
   - approximate setup-vs-execute split (harness-level phases, not hardware-level CPU/IO buckets)
 
+Artifact design principle:
+
+- always record end-to-end latency, and add phase-level timers so the top-line
+  number is explainable
+
 For schema `6+` artifacts, read workloads also include internal setup-stage means:
 
 - `read_path_internal_ns.mean_snapshot_ns`
@@ -203,6 +224,17 @@ Semantics:
 - Logical should be used as the primary compaction-effectiveness metric because it tracks manifest-visible live state.
 - Physical remains useful for debugging storage amplification and cleanup lag.
 
+Planned artifact growth for the broader benchmark program:
+
+- topology fields such as runner region, bucket region, path placement, and
+  cold/warm run state
+- request-economics fields such as GET/HEAD/range-GET/PUT counts and
+  bytes/request
+- engine-pressure fields such as compaction backlog, GC backlog, WAL queue
+  depth, CPU, RSS, and network throughput
+- stable configuration snapshots so each run can be traced back to WAL mode,
+  compaction settings, and workload shape
+
 Interpretation guideline:
 
 - If `consume_share_pct` remains larger after compaction, prioritize execute-path optimizations (decode/merge/filter/materialization) before setup-path tweaks.
@@ -221,6 +253,10 @@ After `read_baseline` and `read_compaction_quiesced` complete, the harness print
 
 ## Report Files
 
+- Benchmark-program roadmap and instrumentation guide:
+  - `docs/benchmark_program.md`
+- Consolidated benchmark summary for the PR:
+  - `docs/benchmark_results.md`
 - Large read baseline (current branch format):
   - `benches/compaction/results/compaction_local_baseline.md`
 - Directional matrix (ported from `feat/bench-cpu-vs-io-directional-loop`, reformatted):
