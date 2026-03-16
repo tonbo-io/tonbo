@@ -1,6 +1,5 @@
-#![cfg(test)]
-
 pub mod backend;
+pub mod common;
 pub mod compaction_gc_e2e;
 pub mod compaction_loop_spawn;
 pub mod conflict_e2e;

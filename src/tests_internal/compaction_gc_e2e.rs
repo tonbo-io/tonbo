@@ -87,7 +87,7 @@ async fn compaction_gc_prunes_obsolete_wal_and_preserves_visible_rows()
             schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![format!("k{pass}")])) as _,
-                Arc::new(Int32Array::from(vec![pass as i32])) as _,
+                Arc::new(Int32Array::from(vec![pass])) as _,
             ],
         )?;
         db.ingest(batch).await?;

@@ -6,11 +6,10 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 
-use crate::db::{BatchesThreshold, DB, Expr};
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
+use crate::{
+    db::{BatchesThreshold, DB, Expr},
+    tests_internal::common::config_with_pk,
+};
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");

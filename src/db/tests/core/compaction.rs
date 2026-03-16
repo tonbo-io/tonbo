@@ -446,8 +446,8 @@ async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>
 
     for pass in 0..2 {
         let rows = vec![vec![
-            Some(DynCell::Str(format!("comp-{pass}").into())),
-            Some(DynCell::I32(pass as i32)),
+            Some(DynCell::Str(format!("comp-{pass}"))),
+            Some(DynCell::I32(pass)),
         ]];
         let batch = build_batch(Arc::clone(&schema), rows).expect("batch");
         db.ingest(batch).await.expect("ingest");
@@ -553,7 +553,7 @@ fn wal_segments_after_compaction_preserves_manifest_when_metadata_missing() {
     let entry_with_wal = SstEntry::new(
         SsTableId::new(2),
         None,
-        Some(vec![wal_b.file_id().clone()]),
+        Some(vec![*wal_b.file_id()]),
         Path::default(),
         None,
     );
@@ -596,14 +596,14 @@ fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
     let entry_a = SstEntry::new(
         SsTableId::new(1),
         None,
-        Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
+        Some(vec![*wal_a.file_id(), *wal_b.file_id()]),
         Path::default(),
         None,
     );
     let entry_b = SstEntry::new(
         SsTableId::new(2),
         None,
-        Some(vec![wal_c.file_id().clone()]),
+        Some(vec![*wal_c.file_id()]),
         Path::default(),
         None,
     );
@@ -798,14 +798,14 @@ async fn compaction_updates_manifest_wal_and_records_gc_plan()
     let entry_a = SstEntry::new(
         SsTableId::new(1),
         None,
-        Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
+        Some(vec![*wal_a.file_id(), *wal_b.file_id()]),
         Path::from("L0/1.parquet"),
         None,
     );
     let entry_b = SstEntry::new(
         SsTableId::new(2),
         None,
-        Some(vec![wal_b.file_id().clone()]),
+        Some(vec![*wal_b.file_id()]),
         Path::from("L0/2.parquet"),
         None,
     );
@@ -858,7 +858,7 @@ async fn compaction_updates_manifest_wal_and_records_gc_plan()
     let planner = OneShotPlanner::new(task);
 
     let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
-        .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+        .with_wal_ids(Some(vec![*wal_b.file_id()]))
         .with_storage_paths(Path::from("L1/3.parquet"), None);
     let executor = StaticExecutor {
         outputs: vec![output_desc],
@@ -915,7 +915,7 @@ async fn compaction_preserves_manifest_wal_when_metadata_missing()
     let entry_with_wal = SstEntry::new(
         SsTableId::new(2),
         None,
-        Some(vec![wal_b.file_id().clone()]),
+        Some(vec![*wal_b.file_id()]),
         Path::from("L0/2.parquet"),
         None,
     );
@@ -962,7 +962,7 @@ async fn compaction_preserves_manifest_wal_when_metadata_missing()
     let planner = OneShotPlanner::new(task);
 
     let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
-        .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+        .with_wal_ids(Some(vec![*wal_b.file_id()]))
         .with_storage_paths(Path::from("L1/3.parquet"), None);
     let executor = StaticExecutor {
         outputs: vec![output_desc],
@@ -1049,7 +1049,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
     let desc_a = sst_a
         .descriptor()
         .clone()
-        .with_wal_ids(Some(vec![wal_a.file_id().clone()]));
+        .with_wal_ids(Some(vec![*wal_a.file_id()]));
 
     let batch_b = build_batch(
         Arc::clone(&schema),
@@ -1068,7 +1068,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
     let desc_b = sst_b
         .descriptor()
         .clone()
-        .with_wal_ids(Some(vec![wal_b.file_id().clone()]));
+        .with_wal_ids(Some(vec![*wal_b.file_id()]));
 
     // Seed manifest with the two inputs and WAL set.
     let db: DB<InMemoryFs, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
@@ -1169,7 +1169,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
     let wal_ids: HashSet<_> = latest
         .wal_segments()
         .iter()
-        .map(|seg| seg.file_id().clone())
+        .map(|seg| *seg.file_id())
         .collect();
     assert!(wal_ids.contains(wal_a.file_id()));
     assert!(wal_ids.contains(wal_b.file_id()));
@@ -1187,7 +1187,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
         .expect("gc plan recorded");
     assert_eq!(plan.obsolete_wal_segments.len(), 0);
     assert!(
-        plan.obsolete_ssts.len() >= 1,
+        !plan.obsolete_ssts.is_empty(),
         "gc plan should record obsolete ssts"
     );
 
@@ -1328,16 +1328,16 @@ async fn compaction_merges_overlap_heavy_inputs() -> Result<(), Box<dyn std::err
                     data_vals.push(vals.value(i));
                 }
             }
-            if let Some(delete) = batch.delete.as_ref() {
-                if delete.num_rows() > 0 {
-                    let ids = delete
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<arrow_array::StringArray>()
-                        .expect("string delete ids");
-                    for i in 0..delete.num_rows() {
-                        delete_keys.push(ids.value(i).to_string());
-                    }
+            if let Some(delete) = batch.delete.as_ref()
+                && delete.num_rows() > 0
+            {
+                let ids = delete
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .expect("string delete ids");
+                for i in 0..delete.num_rows() {
+                    delete_keys.push(ids.value(i).to_string());
                 }
             }
         }
@@ -1440,10 +1440,11 @@ async fn compaction_self_kick_advances_without_periodic_tick()
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
-        if let Some(version) = snapshot.latest_version.as_ref() {
-            if version.ssts().len() > 2 && !version.ssts()[2].is_empty() {
-                break;
-            }
+        if let Some(version) = snapshot.latest_version.as_ref()
+            && version.ssts().len() > 2
+            && !version.ssts()[2].is_empty()
+        {
+            break;
         }
         if Instant::now() >= deadline {
             break;
@@ -1854,8 +1855,8 @@ async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::err
 
     for idx in 0..2 {
         let rows = vec![vec![
-            Some(DynCell::Str(format!("ck-{idx}").into())),
-            Some(DynCell::I32(idx as i32)),
+            Some(DynCell::Str(format!("ck-{idx}"))),
+            Some(DynCell::I32(idx)),
         ]];
         let batch = build_batch(Arc::clone(&schema), rows)?;
         db.ingest(batch).await?;
@@ -2253,11 +2254,11 @@ fn segment_with_commits(
     for (key, value, commit, tombstone) in rows {
         let ts = Timestamp::new(commit);
         if tombstone {
-            delete_rows.push(DynRow(vec![Some(DynCell::Str(key.into()))]));
+            delete_rows.push(DynRow(vec![Some(DynCell::Str(key))]));
             delete_commits.push(ts);
         } else {
             data_rows.push(DynRow(vec![
-                Some(DynCell::Str(key.into())),
+                Some(DynCell::Str(key)),
                 Some(DynCell::I32(value)),
             ]));
             data_commits.push(ts);

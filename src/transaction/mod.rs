@@ -1117,10 +1117,10 @@ mod tests {
                 Some(DynCell::I32(2)),
             ])),
         );
-        let mut scan =
+        let scan =
             TransactionScan::new(&staged, &schema, Timestamp::new(1), None).expect("txn scan");
         let mut seen = Vec::new();
-        while let Some(entry) = scan.next() {
+        for entry in scan {
             match entry.expect("txn entry") {
                 TransactionScanEntry::Row((key_ts, row)) => {
                     let key = key_ts.key().to_owned();

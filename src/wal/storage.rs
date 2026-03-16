@@ -919,11 +919,9 @@ mod tests {
         )
         .expect("encode");
 
-        let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
-        for frame in frames {
+        for (seq, frame) in (crate::wal::frame::INITIAL_FRAME_SEQ..).zip(frames.into_iter()) {
             bytes.extend_from_slice(&frame.into_bytes(seq));
-            seq += 1;
         }
 
         let mut segment = storage.open_segment(5).await.expect("open segment");

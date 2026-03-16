@@ -1087,7 +1087,7 @@ mod tests {
             .expect("scan rows")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
-                entry.into_row().map(|(key, row)| (key, row))
+                entry.into_row()
             })
             .filter_map(|(key, row)| {
                 let key_str = key
@@ -1208,7 +1208,7 @@ mod tests {
             .expect("insert3");
         assert!(result3.is_some(), "third insert should trigger seal");
 
-        let sealed = result3.unwrap();
+        let sealed = result3.expect("third insert should return sealed memtable");
         assert_eq!(
             sealed.storage().num_rows(),
             2,

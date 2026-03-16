@@ -661,8 +661,8 @@ mod tests {
             FrameType::TypedAppend,
         ] {
             let disc = u16::from(ty);
-            let round_tripped =
-                FrameType::try_from(disc).expect(&format!("failed to decode discriminant {disc}"));
+            let round_tripped = FrameType::try_from(disc)
+                .unwrap_or_else(|_| panic!("failed to decode discriminant {disc}"));
             assert_eq!(round_tripped, ty);
         }
     }

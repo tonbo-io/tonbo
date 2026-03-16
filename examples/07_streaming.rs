@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(result) = stream.next().await {
         let batch = result?;
         for entry in batch.iter_views::<LogEntry>()?.try_flatten()? {
-            match entry.level.as_ref() {
+            match entry.level {
                 "INFO" => info_count += 1,
                 "WARN" => warn_count += 1,
                 "ERROR" => error_count += 1,

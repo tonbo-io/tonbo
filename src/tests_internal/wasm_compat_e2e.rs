@@ -6,11 +6,10 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field};
 use fusio::{executor::NoopExecutor, impls::mem::fs::InMemoryFs};
 
-use crate::db::{BatchesThreshold, DB, Expr, WalSyncPolicy};
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
+use crate::{
+    db::{BatchesThreshold, DB, Expr, WalSyncPolicy},
+    tests_internal::common::config_with_pk,
+};
 
 /// Ensure a wasm-like config (in-memory FS + no-op executor) can ingest and scan end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

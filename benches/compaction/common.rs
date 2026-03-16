@@ -1381,9 +1381,7 @@ fn build_probed_object_store_fs(
     object_spec: &ObjectSpec,
     io_probe: &IoProbe,
 ) -> Result<(Arc<ProbedFs<AmazonS3>>, FusioPath), BenchError> {
-    let spec = match object_spec {
-        ObjectSpec::S3(spec) => spec,
-    };
+    let ObjectSpec::S3(spec) = object_spec;
     use fusio::impls::remotes::aws::{credential::AwsCredential, fs::AmazonS3Builder};
 
     let region = spec
@@ -1639,18 +1637,16 @@ pub(crate) async fn wait_for_compaction_quiesced(
                 last_after_observed = current;
                 stable_polls = 0;
             }
-        } else {
-            if current.sst_count == last_after_observed.sst_count
-                && current.level_count == last_after_observed.level_count
-            {
-                stable_polls = stable_polls.saturating_add(1);
-                if stable_polls >= COMPACTION_QUIESCED_STABLE_POLLS {
-                    return Ok(());
-                }
-            } else {
-                stable_polls = 0;
-                last_after_observed = current;
+        } else if current.sst_count == last_after_observed.sst_count
+            && current.level_count == last_after_observed.level_count
+        {
+            stable_polls = stable_polls.saturating_add(1);
+            if stable_polls >= COMPACTION_QUIESCED_STABLE_POLLS {
+                return Ok(());
             }
+        } else {
+            stable_polls = 0;
+            last_after_observed = current;
         }
 
         if started.elapsed() >= timeout {

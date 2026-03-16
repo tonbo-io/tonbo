@@ -10,11 +10,8 @@ use futures::TryStreamExt;
 use crate::{
     db::{BatchesThreshold, DB, Expr, NeverSeal, ScalarValue},
     test_support::{execute_scan_plan, plan_scan_snapshot},
+    tests_internal::common::config_with_pk,
 };
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -68,7 +65,7 @@ async fn plan_execute_scan_merges_layers_with_residuals() -> Result<(), Box<dyn 
     db.ingest(immutable_batch).await?;
 
     // Leave the next writes mutable and include a tombstone to ensure deletes are filtered.
-    db.set_seal_policy(Arc::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal));
     let mutable_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -147,7 +144,7 @@ async fn plan_execute_applies_limit_after_merge_ordering() -> Result<(), Box<dyn
     // First batch: 1200 rows to exceed DEFAULT_SCAN_BATCH_ROWS.
     for idx in 0..1200 {
         ids.push(format!("k{idx:04}"));
-        values.push(idx as i32);
+        values.push(idx);
     }
     let immutable_batch = RecordBatch::try_new(
         schema.clone(),
@@ -158,7 +155,7 @@ async fn plan_execute_applies_limit_after_merge_ordering() -> Result<(), Box<dyn
     )?;
     db.ingest(immutable_batch).await?;
 
-    db.set_seal_policy(Arc::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal));
     let mutable_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
