@@ -76,7 +76,7 @@ authority**.
 The SST GC root set is:
 
 - the current HEAD version,
-- retained historical manifest versions selected by retention policy.
+- any explicit hard pins that already exist in the single-process deployment.
 
 That is the entire must-have root set for the first implementation.
 
@@ -87,10 +87,9 @@ The first release intentionally does **not** require:
 - distributed reader registries,
 - separate pin objects in the manifest.
 
-Instead, readers are protected conservatively by retained versions. This is the
-fastest path to correctness. If later evidence shows that retention-based
-protection is too blunt, explicit pins can be added as an extension to the same
-root-set model.
+The first milestone deliberately avoids adding new retention semantics. If later
+evidence shows the initial root set is too small or too blunt, explicit pins or
+retention-driven root sets can be added as follow-up work.
 
 This should not be read as a distributed design placeholder. It is a deliberate
 single-process simplification:
@@ -121,27 +120,24 @@ sweeper looks at first, but it cannot decide safety.
 This keeps the safety rule simple:
 
 - manifest versions define visibility,
-- retention defines which versions remain protected,
+- the current root set defines which versions remain protected,
 - reachability defines deletability.
 
 ### Single-Process Correctness
 
 The first GC milestone is correctness for one Tonbo process managing manifest
-versions, retention, and GC, while many readers may still observe retained
-versions through that process.
+versions, the current root set, and GC.
 
 The contract is:
 
 - the owning process may publish new SSTs and remove old SST references from
   HEAD,
-- readers may still observe older manifest versions while those versions remain
-  retained,
-- SST GC may only delete objects that are unreachable from all retained
-  versions.
+- SST GC may only delete objects that are unreachable from the current root
+  set.
 
 This means the implementation can be conservative without being wrong. If GC
 keeps extra files for a while, that is a liveness or cost issue. If it deletes a
-file still reachable from a retained version, that is a correctness failure.
+file still reachable from the current root set, that is a correctness failure.
 
 ### Why This Model Stops at One Process
 
@@ -151,31 +147,27 @@ distributed Tonbo deployment.
 In a distributed deployment, at least these assumptions break:
 
 - the process performing GC cannot assume it sees every active reader,
-- retention alone may no longer be a sufficient proxy for reader protection,
+- the local root set may no longer be a sufficient proxy for reader protection,
 - independent workers may race on planning, deletion, and version visibility,
 - reclaim safety may depend on explicit distributed coordination rather than on
-  local reachability plus retention.
+  local reachability plus a locally computed root set.
 
 That means the distributed design is not just “this RFC plus a reader pin.” It
 will require a different mental model with different safety boundaries.
 
-### Retention Semantics
+### Retention Is Deferred
 
-Retention applies to manifest versions, not directly to physical files.
+Version-retention policy is intentionally not part of the first SST GC
+milestone.
 
-The initial retention policy remains intentionally small:
+That means:
 
-- `max_versions`: keep at least the newest committed versions,
-- `max_ttl`: keep versions newer than `now - max_ttl`.
+- no `max_ttl` requirement in this RFC,
+- no `max_versions` requirement in this RFC,
+- no promise yet about time-travel retention as part of the initial GC design.
 
-A version is in the root set if any of the following are true:
-
-1. it is HEAD,
-2. it is within `max_ttl`,
-3. it is among the newest `max_versions`.
-
-These knobs are primarily a correctness backstop for readers in the first SST GC
-implementation, and only secondarily a storage-cost control.
+If Tonbo later wants retention-driven root sets, that should be added as a
+follow-up change after the basic single-process GC path is working and measured.
 
 ### WAL GC Is Separate
 
@@ -195,7 +187,7 @@ without improving the immediate correctness target.
 
 The initial SST GC execution model is intentionally minimal:
 
-1. load HEAD and retained versions from the manifest,
+1. load HEAD and the current root set from the manifest,
 2. compute the reachable SST object set,
 3. compare that set with known manifest-published SST objects,
 4. delete unreachable objects,
@@ -217,11 +209,12 @@ way to ship, that is acceptable, provided that:
 
 | Category | Must have now | Enhancement later |
 | --- | --- | --- |
-| Safety authority | Root set from retained manifest versions | Explicit pins, reader registries, leases |
-| Reader protection | Conservative retention-based protection | Fine-grained pinned versions |
+| Safety authority | Root set from HEAD and existing hard pins | Retention-driven root sets, explicit pins, reader registries, leases |
+| Reader protection | Single-process protection from the current root set | Fine-grained pinned versions |
 | SST discovery | Reachability over manifest-published SSTs | Durable per-event GC queues |
 | WAL GC | Keep current floor-driven path | Optional operational convergence only if proven useful |
 | Benchmarking | Baseline-first benchmark story before enablement | Remote-store simulations, cadence tuning |
+| Retention policy | Deferred | `max_ttl`, `max_versions`, time-travel retention |
 | Checkpoints | Out of GC scope; copy a chosen version elsewhere | Rich checkpoint/tag integration |
 | Metrics | Minimal cost/benefit metrics | Full backlog, lease, and rate-limit dashboards |
 | Rate limiting | Undefined for now | Delete throttling and service isolation |
@@ -317,9 +310,8 @@ The narrow failure model for the first implementation is:
 - if GC crashes before delete, nothing is reclaimed,
 - if GC crashes after deleting some files, retry is safe because missing files
   are treated as already deleted,
-- if retention keeps more versions than necessary, reclaim is delayed,
-- if retention drops a still-needed version too early, SST GC can become
-  unsafe.
+- if the root set is computed incorrectly, SST GC can become unsafe,
+- if the root set is conservative, reclaim is delayed.
 
 The main correctness work is therefore not “build more GC machinery”; it is
 “compute and retain the right root set”.
@@ -340,22 +332,21 @@ ship without improving correctness.
 
 ### Add Explicit Reader Pins Before Shipping Any SST GC
 
-Rejected for now because it delays the first correct implementation. Retained
-manifest versions are a simpler initial protection mechanism for the
-single-process deployment model targeted by this RFC.
+Rejected for now because it delays the first correct implementation. The first
+milestone should not pull in extra reader-protection semantics before the basic
+single-process GC path exists.
 
 ## Open Questions
 
-1. What provisional `max_ttl` and `max_versions` values best protect readers
-   without making SST reclaim useless?
-2. Should the first SST sweep run only as an explicit maintenance action, or as
+1. Should the first SST sweep run only as an explicit maintenance action, or as
    a lightweight in-process background loop?
-3. Should Tonbo keep GC benchmarks in the main crate, or in a dedicated bench
+2. Should Tonbo keep GC benchmarks in the main crate, or in a dedicated bench
    workspace similar to adjacent repos once the scenarios grow?
 
 ## Future Work
 
 - Explicit pinned versions for long-lived readers.
+- Retention-driven root sets using `max_ttl` and `max_versions`.
 - Distributed reader protection for shared-storage multi-process deployments.
 - Durable GC work queues if liveness or observability requires them.
 - Checkpoint tags and named pins if the product needs in-place retained copies.
