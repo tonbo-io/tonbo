@@ -276,6 +276,10 @@ mod tests {
             wal_floor: None,
             obsolete_wal_segments: Vec::new(),
         };
-        assert!(gc_plan_from_outcome(&outcome).unwrap().is_none());
+        assert!(
+            gc_plan_from_outcome(&outcome)
+                .expect("gc plan should build for empty outcome")
+                .is_none()
+        );
     }
 }

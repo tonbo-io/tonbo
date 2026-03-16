@@ -58,7 +58,7 @@ async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Erro
             schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![format!("k{idx}")])) as _,
-                Arc::new(Int32Array::from(vec![idx as i32])) as _,
+                Arc::new(Int32Array::from(vec![idx])) as _,
             ],
         )?;
         db.ingest(batch).await?;
@@ -119,7 +119,7 @@ async fn public_compaction_s3(
             schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![format!("k{idx}")])) as _,
-                Arc::new(Int32Array::from(vec![idx as i32])) as _,
+                Arc::new(Int32Array::from(vec![idx])) as _,
             ],
         )?;
         db.ingest(batch).await?;
@@ -165,7 +165,7 @@ async fn wal_rotation_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
 
     for idx in 0..3 {
         let ids: Vec<String> = (0..64).map(|n| format!("user-{idx}-{n:02}")).collect();
-        let vals: Vec<i32> = (0..64).map(|n| idx as i32 * 10 + n as i32).collect();
+        let vals: Vec<i32> = (0..64).map(|n| idx * 10 + n).collect();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -225,7 +225,7 @@ async fn wal_rotation_s3(schema: Arc<Schema>, harness: S3Harness) -> Result<(), 
 
     for idx in 0..3 {
         let ids: Vec<String> = (0..64).map(|n| format!("user-{idx}-{n:02}")).collect();
-        let vals: Vec<i32> = (0..64).map(|n| idx as i32 * 10 + n as i32).collect();
+        let vals: Vec<i32> = (0..64).map(|n| idx * 10 + n).collect();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -325,7 +325,7 @@ async fn snapshot_and_merge_local(schema: Arc<Schema>) -> Result<(), Box<dyn Err
     );
 
     let mut inner = db.into_inner();
-    inner.set_seal_policy(Arc::new(NeverSeal::default()));
+    inner.set_seal_policy(Arc::new(NeverSeal));
     let mutable_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -416,7 +416,7 @@ async fn snapshot_and_merge_s3(
     );
 
     let mut inner = db.into_inner();
-    inner.set_seal_policy(Arc::new(NeverSeal::default()));
+    inner.set_seal_policy(Arc::new(NeverSeal));
     let mutable_batch = RecordBatch::try_new(
         schema.clone(),
         vec![

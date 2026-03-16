@@ -10,11 +10,8 @@ use serde::Deserialize;
 use crate::{
     db::{BatchesThreshold, WalSyncPolicy},
     test_support::{TestFsWalStateStore, TestWalExt as WalExt},
+    tests_internal::common::config_with_pk,
 };
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -81,7 +78,7 @@ async fn wal_rotation_and_state_persisted() -> Result<(), Box<dyn std::error::Er
     // Two batches large enough to force multiple WAL frames and at least one rotation.
     for idx in 0..3 {
         let ids: Vec<String> = (0..64).map(|n| format!("user-{idx}-{n:02}")).collect();
-        let vals: Vec<i32> = (0..64).map(|n| idx as i32 * 100 + n as i32).collect();
+        let vals: Vec<i32> = (0..64).map(|n| idx * 100 + n).collect();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![

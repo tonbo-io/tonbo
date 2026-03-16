@@ -2088,16 +2088,16 @@ mod tests {
                     data_vals.push(vals.value(i));
                 }
             }
-            if let Some(delete) = batch.delete.as_ref() {
-                if delete.num_rows() > 0 {
-                    let ids = delete
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .expect("string delete ids");
-                    for i in 0..delete.num_rows() {
-                        delete_keys.push(ids.value(i).to_string());
-                    }
+            if let Some(delete) = batch.delete.as_ref()
+                && delete.num_rows() > 0
+            {
+                let ids = delete
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("string delete ids");
+                for i in 0..delete.num_rows() {
+                    delete_keys.push(ids.value(i).to_string());
                 }
             }
         }
@@ -2192,17 +2192,16 @@ mod tests {
         let mut data_commits = Vec::new();
         let mut delete_rows = Vec::new();
         let mut delete_commits = Vec::new();
-        for ((key, value), (commit, tombstone)) in rows
-            .into_iter()
-            .zip(commits.into_iter().zip(tombstones.into_iter()))
+        for ((key, value), (commit, tombstone)) in
+            rows.into_iter().zip(commits.into_iter().zip(tombstones))
         {
             let ts = Timestamp::new(commit);
             if tombstone {
-                delete_rows.push(DynRow(vec![Some(DynCell::Str(key.into()))]));
+                delete_rows.push(DynRow(vec![Some(DynCell::Str(key))]));
                 delete_commits.push(ts);
             } else {
                 data_rows.push(DynRow(vec![
-                    Some(DynCell::Str(key.into())),
+                    Some(DynCell::Str(key)),
                     Some(DynCell::I32(value)),
                 ]));
                 data_commits.push(ts);

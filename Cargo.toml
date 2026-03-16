@@ -99,6 +99,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 typed-arrow = { version = "0.6.0", default-features = false, features = ["arrow-57", "ext-hooks", "views"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.5"
 tokio = { version = "1", default-features = false, features = [
     "macros",
     "net",
@@ -138,3 +139,9 @@ path = "examples/10_dynamic/10c_dynamic_composite.rs"
 [[example]]
 name = "10d_dynamic_transaction"
 path = "examples/10_dynamic/10d_dynamic_transaction.rs"
+
+[[bench]]
+name = "compaction_local"
+path = "benches/compaction_local.rs"
+harness = false
+required-features = ["tokio"]

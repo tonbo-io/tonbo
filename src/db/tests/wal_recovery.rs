@@ -409,11 +409,9 @@ async fn wal_replay_emits_delete_frames_for_tombstones() -> Result<(), Box<dyn s
         commit_ts,
     })?);
 
-    let mut seq = INITIAL_FRAME_SEQ;
     let mut bytes = Vec::new();
-    for frame in frames {
+    for (seq, frame) in (INITIAL_FRAME_SEQ..).zip(frames.into_iter()) {
         bytes.extend_from_slice(&frame.into_bytes(seq));
-        seq += 1;
     }
 
     let mut segment = storage.open_segment(0).await.expect("segment");
@@ -421,10 +419,12 @@ async fn wal_replay_emits_delete_frames_for_tombstones() -> Result<(), Box<dyn s
     write_res.expect("write wal");
     segment.file_mut().flush().await.expect("flush");
 
-    let mut cfg = RuntimeWalConfig::default();
-    cfg.dir = wal_root.clone();
-    cfg.segment_backend = fs_dyn;
-    cfg.state_store = None;
+    let cfg = RuntimeWalConfig {
+        dir: wal_root.clone(),
+        segment_backend: fs_dyn,
+        state_store: None,
+        ..RuntimeWalConfig::default()
+    };
 
     let replayer = Replayer::new(cfg);
     let events = replayer.scan().await.expect("scan");
@@ -552,7 +552,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             format!("user-{}", chunk * 2),
             format!("user-{}", chunk * 2 + 1),
         ];
-        let values = vec![(chunk as i32) * 10, (chunk as i32) * 10 + 1];
+        let values = vec![chunk * 10, chunk * 10 + 1];
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![

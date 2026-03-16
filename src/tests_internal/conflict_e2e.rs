@@ -6,11 +6,10 @@ use arrow_schema::{DataType, Field};
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use typed_arrow_dyn::{DynCell, DynRow};
 
-use crate::db::{DB, Expr};
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
+use crate::{
+    db::{DB, Expr},
+    tests_internal::common::config_with_pk,
+};
 
 async fn make_db() -> Result<DB<InMemoryFs, TokioExecutor>, Box<dyn std::error::Error>> {
     let cfg = config_with_pk(

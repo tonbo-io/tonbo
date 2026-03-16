@@ -372,7 +372,7 @@ where
                                 ctx.record_sync().await;
                             }
                             ctx.apply_timer_directive(timer_directive, &mut timer);
-                            for ((_, _, tx), ack) in batch.into_iter().zip(acks.into_iter()) {
+                            for ((_, _, tx), ack) in batch.into_iter().zip(acks) {
                                 let _ = tx.send(Ok(ack));
                             }
                         }
@@ -1446,11 +1446,13 @@ mod tests {
         let fs_dyn: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
         let storage = WalStorage::new(Arc::clone(&fs_dyn), Path::parse(root).expect("path"));
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = queue_size;
-        cfg.sync = sync;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        let cfg = WalConfig {
+            queue_size,
+            sync,
+            segment_backend: fs_dyn,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            ..WalConfig::default()
+        };
         (storage, cfg)
     }
 
@@ -1462,12 +1464,14 @@ mod tests {
         let root = Path::parse("wal-state-progress").expect("path");
         let storage = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = 2;
-        cfg.sync = WalSyncPolicy::Always;
-        cfg.segment_backend = fs_writer;
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
-        cfg.state_store = Some(Arc::clone(&state_store));
+        let cfg = WalConfig {
+            queue_size: 2,
+            sync: WalSyncPolicy::Always,
+            segment_backend: fs_writer,
+            state_store: Some(Arc::clone(&state_store)),
+            ..WalConfig::default()
+        };
 
         let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
@@ -1484,7 +1488,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1563,12 +1567,14 @@ mod tests {
         let root = Path::parse("wal-state-sealed").expect("path");
         let storage = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = 2;
-        cfg.sync = WalSyncPolicy::Always;
-        cfg.segment_backend = fs_writer;
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
-        cfg.state_store = Some(Arc::clone(&state_store));
+        let cfg = WalConfig {
+            queue_size: 2,
+            sync: WalSyncPolicy::Always,
+            segment_backend: fs_writer,
+            state_store: Some(Arc::clone(&state_store)),
+            ..WalConfig::default()
+        };
 
         let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
@@ -1585,7 +1591,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1676,7 +1682,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1806,7 +1812,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1879,7 +1885,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1986,7 +1992,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2059,7 +2065,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2122,13 +2128,15 @@ mod tests {
         let storage_reader = WalStorage::new(fs_reader, root.clone());
         let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = 4;
-        cfg.segment_max_bytes = 1024;
-        cfg.sync = WalSyncPolicy::Always;
-        cfg.segment_backend = fs_writer;
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
-        cfg.state_store = Some(Arc::clone(&state_store));
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_bytes: 1024,
+            sync: WalSyncPolicy::Always,
+            segment_backend: fs_writer,
+            state_store: Some(Arc::clone(&state_store)),
+            ..WalConfig::default()
+        };
 
         let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
@@ -2145,7 +2153,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2250,12 +2258,14 @@ mod tests {
         let storage_reader = WalStorage::new(fs_reader, root.clone());
         let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = 4;
-        cfg.segment_max_age = Some(Duration::from_millis(0));
-        cfg.sync = WalSyncPolicy::Always;
-        cfg.segment_backend = fs_writer;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_age: Some(Duration::from_millis(0)),
+            sync: WalSyncPolicy::Always,
+            segment_backend: fs_writer,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            ..WalConfig::default()
+        };
 
         let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
@@ -2272,7 +2282,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2346,13 +2356,15 @@ mod tests {
         let storage_reader = WalStorage::new(fs_reader, root.clone());
         let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let mut cfg = WalConfig::default();
-        cfg.queue_size = 4;
-        cfg.segment_max_bytes = 1;
-        cfg.retention_bytes = Some(1);
-        cfg.sync = WalSyncPolicy::Disabled;
-        cfg.segment_backend = fs_writer;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_bytes: 1,
+            retention_bytes: Some(1),
+            sync: WalSyncPolicy::Disabled,
+            segment_backend: fs_writer,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            ..WalConfig::default()
+        };
 
         let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
@@ -2369,7 +2381,7 @@ mod tests {
             .spawn_local(async move {
                 let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(NoopExecutor::default()),
+                        exec: Arc::new(NoopExecutor),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),

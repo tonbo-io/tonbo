@@ -232,11 +232,9 @@ mod tests {
 
         let frames =
             encode_autocommit_frames(batch.clone(), 7, Timestamp::new(42)).expect("encode");
-        let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
-        for frame in frames {
+        for (seq, frame) in (INITIAL_FRAME_SEQ..).zip(frames.into_iter()) {
             bytes.extend_from_slice(&frame.into_bytes(seq));
-            seq += 1;
         }
         let storage_clone = storage.clone();
         let wal_root_for_write = wal_root.clone();
@@ -250,10 +248,12 @@ mod tests {
         write_res.expect("write wal");
         segment.file_mut().flush().await.expect("flush");
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            ..WalConfig::default()
+        };
         let replayer = Replayer::new(cfg);
         let events = replayer.scan().await.expect("scan");
         assert_eq!(events.len(), 2);
@@ -306,10 +306,12 @@ mod tests {
             write_autocommit_segment(&storage, 1, batch_b, 11, Timestamp::new(200), &mut next_seq)
                 .await;
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = None;
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: None,
+            ..WalConfig::default()
+        };
 
         let replayer = Replayer::new(cfg);
         let floor = WalSegmentRef::new(1, wal_segment_file_id(1), floor_first_seq, floor_last_seq);
@@ -373,10 +375,12 @@ mod tests {
         res_commit.expect("write truncated commit");
         segment.file_mut().flush().await.expect("flush");
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            ..WalConfig::default()
+        };
         let replayer = Replayer::new(cfg);
         let events = replayer.scan().await.expect("scan succeeds");
 
@@ -429,11 +433,9 @@ mod tests {
         let frames =
             encode_autocommit_frames(batch.clone(), 11, Timestamp::new(7)).expect("encode");
 
-        let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
-        for frame in frames {
+        for (seq, frame) in (INITIAL_FRAME_SEQ..).zip(frames.into_iter()) {
             bytes.extend_from_slice(&frame.into_bytes(seq));
-            seq += 1;
         }
 
         let mut segment = storage.open_segment(42).await.expect("segment");
@@ -441,10 +443,12 @@ mod tests {
         write_res.expect("write");
         segment.file_mut().flush().await.expect("flush");
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = None;
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: None,
+            ..WalConfig::default()
+        };
 
         let replayer = Replayer::new(cfg);
         let events = replayer.scan().await.expect("scan");
@@ -500,10 +504,12 @@ mod tests {
         )
         .await;
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = None;
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: None,
+            ..WalConfig::default()
+        };
 
         let replayer = Replayer::new(cfg);
         let floor =
@@ -532,11 +538,13 @@ mod tests {
         let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-unimplemented").expect("wal path");
 
-        let mut cfg = WalConfig::default();
-        cfg.dir = wal_root;
-        cfg.segment_backend = fs_dyn;
-        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
-        cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
+        let cfg = WalConfig {
+            dir: wal_root,
+            segment_backend: fs_dyn,
+            state_store: Some(Arc::new(FsWalStateStore::new(fs_cas))),
+            recovery: WalRecoveryMode::AbsoluteConsistency,
+            ..WalConfig::default()
+        };
 
         let replayer = Replayer::new(cfg);
         let err = replayer.scan().await.expect_err("mode unimplemented");
@@ -607,7 +615,10 @@ mod tests {
 
         impl std::io::Write for TestWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
+                self.0
+                    .lock()
+                    .expect("test log buffer lock should not be poisoned")
+                    .extend_from_slice(buf);
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -644,17 +655,25 @@ mod tests {
                 let fs_dyn: Arc<dyn DynFs> = backend.clone();
                 let wal_root = FusioPath::parse("wal-span-test").expect("wal path");
 
-                let mut cfg = WalConfig::default();
-                cfg.dir = wal_root;
-                cfg.segment_backend = fs_dyn;
-                cfg.state_store = None;
+                let cfg = WalConfig {
+                    dir: wal_root,
+                    segment_backend: fs_dyn,
+                    state_store: None,
+                    ..WalConfig::default()
+                };
 
                 let replayer = Replayer::new(cfg);
                 let _events = replayer.scan_with_floor(None).await.expect("scan");
             });
         });
 
-        let output = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");
+        let output = String::from_utf8(
+            buffer
+                .lock()
+                .expect("test log buffer lock should not be poisoned")
+                .clone(),
+        )
+        .expect("utf8");
         assert!(
             output.contains("wal::replay"),
             "Expected span 'wal::replay' in output, got: {}",

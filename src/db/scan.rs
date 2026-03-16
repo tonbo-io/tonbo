@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     pin::Pin,
     sync::Arc,
+    time::Instant,
 };
 
 use aisle::PruneRequest;
@@ -122,6 +123,46 @@ where
 
 /// Default package size for a scan
 pub const DEFAULT_SCAN_BATCH_ROWS: usize = 1024;
+
+/// Setup-phase timing breakdown for a single scan stream construction.
+///
+/// Values are measured in nanoseconds and cover setup work before consuming
+/// the first output batch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanSetupProfile {
+    snapshot_ns: u64,
+    plan_scan_ns: u64,
+    build_scan_streams_ns: u64,
+    merge_init_ns: u64,
+    package_init_ns: u64,
+}
+
+impl ScanSetupProfile {
+    /// Time spent resolving snapshot/read timestamp.
+    pub fn snapshot_ns(&self) -> u64 {
+        self.snapshot_ns
+    }
+
+    /// Time spent building the scan plan (predicate/projection pruning).
+    pub fn plan_scan_ns(&self) -> u64 {
+        self.plan_scan_ns
+    }
+
+    /// Time spent constructing scan streams from the plan.
+    pub fn build_scan_streams_ns(&self) -> u64 {
+        self.build_scan_streams_ns
+    }
+
+    /// Time spent initializing the merge stream.
+    pub fn merge_init_ns(&self) -> u64 {
+        self.merge_init_ns
+    }
+
+    /// Time spent initializing the package stream.
+    pub fn package_init_ns(&self) -> u64 {
+        self.package_init_ns
+    }
+}
 
 impl TxSnapshot {
     /// Plan a scan using this snapshot for MVCC visibility and manifest pinning.
@@ -1013,6 +1054,20 @@ where
         self,
     ) -> Result<impl Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a, crate::db::DBError>
     {
+        let (stream, _) = self.stream_with_profile().await?;
+        Ok(stream)
+    }
+
+    /// Execute the scan and return both stream and setup-phase timing profile.
+    pub async fn stream_with_profile(
+        self,
+    ) -> Result<
+        (
+            impl Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a,
+            ScanSetupProfile,
+        ),
+        crate::db::DBError,
+    > {
         // Take ownership of all fields upfront to avoid partial move issues
         let Self {
             db,
@@ -1024,20 +1079,28 @@ where
         } = self;
 
         let predicate = predicate.unwrap_or(Expr::True);
+        let mut profile = ScanSetupProfile::default();
 
         // Resolve snapshot: use pre-existing or create new one
         let snapshot = match snapshot_source {
             SnapshotSource::Preexisting(snap) => snap.clone(),
-            SnapshotSource::Lazy => db.begin_snapshot().await?,
+            SnapshotSource::Lazy => {
+                let started = Instant::now();
+                let snapshot = db.begin_snapshot().await?;
+                profile.snapshot_ns = duration_ns_u64(started.elapsed());
+                snapshot
+            }
         };
 
         // Build transaction scan if we have staged mutations
         let txn_scan = match staged_overlay {
             Some(overlay) if !overlay.staging.is_empty() => {
                 // We need to plan first to get the scan_schema
+                let started = Instant::now();
                 let plan = snapshot
                     .plan_scan_with_context(db, &predicate, projection.as_ref(), limit, true)
                     .await?;
+                profile.plan_scan_ns = duration_ns_u64(started.elapsed());
                 Some((
                     TransactionScan::new(
                         overlay.staging,
@@ -1056,16 +1119,19 @@ where
         let plan = match txn_scan {
             Some((scan, plan)) => {
                 // Execute with transaction scan overlay
-                return execute_with_txn_scan(db, plan, Some(scan)).await;
+                return execute_with_txn_scan(db, plan, Some(scan), profile).await;
             }
             None => {
-                snapshot
+                let started = Instant::now();
+                let plan = snapshot
                     .plan_scan(db, &predicate, projection.as_ref(), limit)
-                    .await?
+                    .await?;
+                profile.plan_scan_ns = duration_ns_u64(started.elapsed());
+                plan
             }
         };
 
-        execute_with_txn_scan(db, plan, None).await
+        execute_with_txn_scan(db, plan, None, profile).await
     }
 
     /// Execute the scan and collect all batches into a vector.
@@ -1078,8 +1144,12 @@ async fn execute_with_txn_scan<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     plan: ScanPlan,
     txn_scan: Option<TransactionScan<'a>>,
+    mut profile: ScanSetupProfile,
 ) -> Result<
-    Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
+    (
+        Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
+        ScanSetupProfile,
+    ),
     crate::db::DBError,
 >
 where
@@ -1092,14 +1162,17 @@ where
         .clone()
         .unwrap_or_else(|| Arc::clone(&db.schema));
     let scan_schema = Arc::clone(&plan.scan_schema);
+    let build_streams_started = Instant::now();
     let streams = db.build_scan_streams(&plan, txn_scan).await?;
+    profile.build_scan_streams_ns = duration_ns_u64(build_streams_started.elapsed());
 
     if streams.is_empty() {
         let stream = stream::empty::<Result<RecordBatch, crate::db::DBError>>();
-        return Ok(Box::pin(stream)
-            as Pin<
-                Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
-            >);
+        return Ok((
+            Box::pin(stream)
+                as Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
+            profile,
+        ));
     }
 
     let ScanPlan {
@@ -1111,9 +1184,12 @@ where
     let limit_for_merge = if needs_post_filter { None } else { limit };
     let limit_for_package = if needs_post_filter { limit } else { None };
     // Only apply limit early when no post-merge filtering is required.
+    let merge_started = Instant::now();
     let merge = MergeStream::from_vec(streams, limit_for_merge, Some(Order::Asc))
         .await
         .map_err(crate::db::DBError::from)?;
+    profile.merge_init_ns = duration_ns_u64(merge_started.elapsed());
+    let package_started = Instant::now();
     let package = PackageStream::with_limit(
         DEFAULT_SCAN_BATCH_ROWS,
         merge,
@@ -1123,12 +1199,18 @@ where
         limit_for_package,
     )
     .map_err(crate::db::DBError::from)?;
+    profile.package_init_ns = duration_ns_u64(package_started.elapsed());
 
     let mapped = package.map(|result| result.map_err(crate::db::DBError::from));
-    Ok(Box::pin(mapped)
-        as Pin<
-            Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
-        >)
+    Ok((
+        Box::pin(mapped)
+            as Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
+        profile,
+    ))
+}
+
+fn duration_ns_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn find_bloom_filter_column(predicate: &Expr) -> Option<&str> {

@@ -47,16 +47,18 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
     fs::create_dir_all(&wal_dir)?;
     let wal_path = Path::from_filesystem_path(&wal_dir)?;
 
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_backend = wal_dyn_fs;
-    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
-    // Force extremely small segments so each batch append rotates the WAL; this
-    // guarantees multiple sealed segments exist between the two flushes and
-    // exercises the GC path we care about.
-    wal_cfg.segment_max_bytes = 1;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Disabled;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_backend: wal_dyn_fs,
+        state_store: Some(Arc::new(FsWalStateStore::new(wal_cas))),
+        // Force extremely small segments so each batch append rotates the WAL; this
+        // guarantees multiple sealed segments exist between the two flushes and
+        // exercises the GC path we care about.
+        segment_max_bytes: 1,
+        flush_interval: Duration::from_millis(1),
+        sync: WalSyncPolicy::Disabled,
+        ..RuntimeWalConfig::default()
+    };
 
     db.enable_wal(wal_cfg.clone()).await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -70,8 +72,8 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
     // First ingest/flush establishes the initial WAL floor.
     for idx in 0..4 {
         let rows = vec![DynRow(vec![
-            Some(DynCell::Str(format!("user-{idx}").into())),
-            Some(DynCell::I32(idx as i32)),
+            Some(DynCell::Str(format!("user-{idx}"))),
+            Some(DynCell::I32(idx)),
         ])];
         let batch = build_batch(schema.clone(), rows)?;
         db.ingest(batch).await?;
@@ -97,8 +99,8 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
     // Second ingest/flush should advance the floor and delete older segments.
     for idx in 4..8 {
         let rows = vec![DynRow(vec![
-            Some(DynCell::Str(format!("user-{idx}").into())),
-            Some(DynCell::I32(idx as i32)),
+            Some(DynCell::Str(format!("user-{idx}"))),
+            Some(DynCell::I32(idx)),
         ])];
         let batch = build_batch(schema.clone(), rows)?;
         db.ingest(batch).await?;
@@ -184,12 +186,14 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
     fs::create_dir_all(&wal_dir)?;
     let wal_path = Path::from_filesystem_path(&wal_dir)?;
 
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_backend = wal_dyn_fs;
-    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
-    wal_cfg.segment_max_bytes = 1;
-    wal_cfg.prune_dry_run = true;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_backend: wal_dyn_fs,
+        state_store: Some(Arc::new(FsWalStateStore::new(wal_cas))),
+        segment_max_bytes: 1,
+        prune_dry_run: true,
+        ..RuntimeWalConfig::default()
+    };
 
     db.enable_wal(wal_cfg.clone()).await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -202,8 +206,8 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
 
     for idx in 0..4 {
         let rows = vec![vec![
-            Some(DynCell::Str(format!("dry-{idx}").into())),
-            Some(DynCell::I32(idx as i32)),
+            Some(DynCell::Str(format!("dry-{idx}"))),
+            Some(DynCell::I32(idx)),
         ]];
         let batch = build_batch(schema.clone(), rows)?;
         db.ingest(batch).await?;
@@ -215,8 +219,8 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
 
     for idx in 4..8 {
         let rows = vec![vec![
-            Some(DynCell::Str(format!("dry-{idx}").into())),
-            Some(DynCell::I32(idx as i32)),
+            Some(DynCell::Str(format!("dry-{idx}"))),
+            Some(DynCell::I32(idx)),
         ]];
         let batch = build_batch(schema.clone(), rows)?;
         db.ingest(batch).await?;

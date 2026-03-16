@@ -719,7 +719,7 @@ mod tests {
         let rows = (0..5)
             .map(|idx| {
                 DynRow(vec![
-                    Some(DynCell::Str(format!("k{idx}").into())),
+                    Some(DynCell::Str(format!("k{idx}"))),
                     Some(DynCell::I64(idx as i64)),
                 ])
             })

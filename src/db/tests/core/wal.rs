@@ -242,11 +242,11 @@ async fn wal_live_frame_floor_tracks_multi_frame_append() {
     assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
     assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-    if db.mutable_wal_range_snapshot().is_some() {
-        if let Some(sealed) = db.seal_mutable() {
-            let wal_range = db.take_mutable_wal_range();
-            db.add_immutable(sealed, wal_range);
-        }
+    if db.mutable_wal_range_snapshot().is_some()
+        && let Some(sealed) = db.seal_mutable()
+    {
+        let wal_range = db.take_mutable_wal_range();
+        db.add_immutable(sealed, wal_range);
     }
 
     assert!(db.mutable_wal_range_snapshot().is_none());
@@ -340,11 +340,11 @@ async fn wal_live_frame_floor_tracks_multi_frame_append_via_insert() {
     assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
     assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-    if db.mutable_wal_range_snapshot().is_some() {
-        if let Some(sealed) = db.seal_mutable() {
-            let wal_range = db.take_mutable_wal_range();
-            db.add_immutable(sealed, wal_range);
-        }
+    if db.mutable_wal_range_snapshot().is_some()
+        && let Some(sealed) = db.seal_mutable()
+    {
+        let wal_range = db.take_mutable_wal_range();
+        db.add_immutable(sealed, wal_range);
     }
 
     assert!(db.mutable_wal_range_snapshot().is_none());
@@ -510,13 +510,15 @@ async fn flush_records_manifest_metadata() -> Result<(), Box<dyn std::error::Err
     fs::create_dir_all(&wal_dir)?;
     let wal_path = Path::from_filesystem_path(&wal_dir)?;
 
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_backend = wal_dyn_fs;
-    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
-    wal_cfg.segment_max_bytes = 1;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Disabled;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_backend: wal_dyn_fs,
+        state_store: Some(Arc::new(FsWalStateStore::new(wal_cas))),
+        segment_max_bytes: 1,
+        flush_interval: Duration::from_millis(1),
+        sync: WalSyncPolicy::Disabled,
+        ..RuntimeWalConfig::default()
+    };
 
     db.enable_wal(wal_cfg.clone()).await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -631,13 +633,15 @@ async fn wal_logging_verification() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&wal_dir)?;
     let wal_path = Path::from_filesystem_path(&wal_dir)?;
 
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_backend = wal_dyn_fs;
-    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
-    wal_cfg.segment_max_bytes = 1024;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Disabled;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_backend: wal_dyn_fs,
+        state_store: Some(Arc::new(FsWalStateStore::new(wal_cas))),
+        segment_max_bytes: 1024,
+        flush_interval: Duration::from_millis(1),
+        sync: WalSyncPolicy::Disabled,
+        ..RuntimeWalConfig::default()
+    };
 
     db.enable_wal(wal_cfg).await?;
 

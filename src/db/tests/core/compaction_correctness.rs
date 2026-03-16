@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     env,
     fmt::{self, Write},
-    path::PathBuf,
+    path::{Path as StdPath, PathBuf},
     sync::Arc,
 };
 
@@ -96,12 +96,11 @@ impl MvccOracle {
             match &best {
                 None => best = Some(VisibleVersion::from(version)),
                 Some(best_version) => {
-                    if version.commit_ts > best_version.commit_ts {
-                        best = Some(VisibleVersion::from(version));
-                    } else if version.commit_ts == best_version.commit_ts
+                    let newer_version = version.commit_ts > best_version.commit_ts;
+                    let preferred_tombstone = version.commit_ts == best_version.commit_ts
                         && version.tombstone
-                        && !best_version.tombstone
-                    {
+                        && !best_version.tombstone;
+                    if newer_version || preferred_tombstone {
                         best = Some(VisibleVersion::from(version));
                     }
                 }
@@ -186,7 +185,7 @@ impl ScenarioHarness {
 
     async fn open_db(
         base_schema: SchemaRef,
-        db_root: &PathBuf,
+        db_root: &StdPath,
     ) -> Result<(DB<LocalFs, TokioExecutor>, SchemaRef), Box<dyn std::error::Error>> {
         let config = SchemaBuilder::from_schema(Arc::clone(&base_schema))
             .primary_key("id")
@@ -206,7 +205,7 @@ impl ScenarioHarness {
 
     fn build_sst_cfg(
         schema: SchemaRef,
-        db_root: &PathBuf,
+        db_root: &StdPath,
     ) -> Result<Arc<SsTableConfig>, Box<dyn std::error::Error>> {
         let extractor = extractor::projection_for_field(Arc::clone(&schema), 0)?;
         let sst_root = Path::from_filesystem_path(db_root.join("sst"))?;
@@ -443,6 +442,7 @@ async fn assert_oracle_matches(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assert_range_matches(
     scenario: &str,
     snapshot_ts: u64,
@@ -753,10 +753,10 @@ impl ModelRunner {
             OpKind::Flush => {
                 self.clear_active_snapshot();
                 self.trace.push(Op::Flush);
-                if self.allow_sst {
-                    if let Some(sst_id) = self.harness.try_flush_immutables_to_l0().await? {
-                        self.l0_ssts.push(sst_id);
-                    }
+                if self.allow_sst
+                    && let Some(sst_id) = self.harness.try_flush_immutables_to_l0().await?
+                {
+                    self.l0_ssts.push(sst_id);
                 }
             }
             OpKind::Compact => {

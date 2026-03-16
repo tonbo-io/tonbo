@@ -60,12 +60,14 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
     let manifest_root = Path::parse("durable-test").expect("path");
     let wal_dir = manifest_root.child(PathPart::parse("wal").expect("wal dir component"));
 
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_dir;
     let dyn_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
-    wal_cfg.segment_backend = dyn_fs;
     let cas_backend: Arc<dyn FsCas> = Arc::new(fs.clone());
-    wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(cas_backend)));
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_dir,
+        segment_backend: dyn_fs,
+        state_store: Some(Arc::new(FsWalStateStore::new(cas_backend))),
+        ..RuntimeWalConfig::default()
+    };
 
     let manifest = init_fs_manifest_in_memory(fs.clone(), &manifest_root, TokioExecutor::default())
         .await
@@ -203,17 +205,17 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         .expect("encode commit"),
     );
 
-    let mut seq = INITIAL_FRAME_SEQ;
     let mut bytes = Vec::new();
-    for frame in frames {
+    for (seq, frame) in (INITIAL_FRAME_SEQ..).zip(frames.into_iter()) {
         bytes.extend_from_slice(&frame.into_bytes(seq));
-        seq += 1;
     }
     fs::write(wal_dir.join("wal-00000000000000000001.tonwal"), bytes).expect("write wal");
 
     let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-    let mut cfg = RuntimeWalConfig::default();
-    cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
+    let cfg = RuntimeWalConfig {
+        dir: fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path"),
+        ..RuntimeWalConfig::default()
+    };
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
     let table_def = table_definition(&config, builder::DEFAULT_TABLE_NAME);

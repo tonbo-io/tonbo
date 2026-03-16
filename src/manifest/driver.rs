@@ -448,7 +448,7 @@ where
         }
         session.end().await?;
 
-        versions.sort_by(|a, b| b.commit_timestamp.cmp(&a.commit_timestamp));
+        versions.sort_by_key(|version| std::cmp::Reverse(version.commit_timestamp));
         if limit > 0 && versions.len() > limit {
             versions.truncate(limit);
         }
@@ -756,7 +756,7 @@ mod tests {
         let sst_level0_a = SstEntry::new(
             SsTableId::new(7),
             Some(SsTableStats::default()),
-            Some(vec![wal_segment_b.file_id().clone()]),
+            Some(vec![*wal_segment_b.file_id()]),
             data0a.clone(),
             None,
         );

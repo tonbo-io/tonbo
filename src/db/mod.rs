@@ -39,9 +39,18 @@ pub use builder::{
     DbBuilder, L0BackpressureConfig, ObjectSpec, S3Spec, WalConfig, wal_tuning,
 };
 pub use error::DBError;
-pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
+pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder, ScanSetupProfile};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
+pub use crate::{
+    compaction::planner::{CompactionStrategy, LeveledPlannerConfig},
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+    mode::DynModeConfig,
+    query::{Expr, ScalarValue},
+    schema::SchemaBuilder,
+    transaction::{CommitAckMode, Transaction},
+    wal::WalSyncPolicy,
+};
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
@@ -63,14 +72,6 @@ use crate::{
         replay::Replayer, state::WalStateHandle,
     },
 };
-pub use crate::{
-    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
-    mode::DynModeConfig,
-    query::{Expr, ScalarValue},
-    schema::SchemaBuilder,
-    transaction::{CommitAckMode, Transaction},
-    wal::WalSyncPolicy,
-};
 
 /// Internal shared handle for the database backed by an `Arc`.
 pub(crate) type DynDbHandle<FS, E> = Arc<DbInner<FS, E>>;
@@ -87,6 +88,8 @@ pub struct Version {
     pub timestamp: Timestamp,
     /// Number of SST files in this version.
     pub sst_count: usize,
+    /// Sum of manifest-visible SST payload bytes in this version.
+    pub sst_bytes: u64,
     /// Number of compaction levels with data.
     pub level_count: usize,
 }
@@ -903,10 +906,22 @@ where
 
         Ok(states
             .into_iter()
-            .map(|s| Version {
-                timestamp: s.commit_timestamp,
-                sst_count: s.ssts.iter().map(|level| level.len()).sum(),
-                level_count: s.ssts.iter().filter(|level| !level.is_empty()).count(),
+            .map(|s| {
+                let sst_count = s.ssts.iter().map(|level| level.len()).sum();
+                let sst_bytes = s
+                    .ssts
+                    .iter()
+                    .flatten()
+                    .filter_map(|entry| entry.stats().map(|stats| stats.bytes))
+                    .fold(0u64, |acc, bytes| {
+                        acc.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX))
+                    });
+                Version {
+                    timestamp: s.commit_timestamp,
+                    sst_count,
+                    sst_bytes,
+                    level_count: s.ssts.iter().filter(|level| !level.is_empty()).count(),
+                }
             })
             .collect())
     }

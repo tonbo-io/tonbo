@@ -10,11 +10,8 @@ use tokio::time::sleep;
 use crate::{
     db::{BatchesThreshold, WalSyncPolicy},
     test_support::{TestFsWalStateStore, TestWalExt as WalExt},
+    tests_internal::common::config_with_pk,
 };
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -50,7 +47,7 @@ async fn write_rows(
     offset: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ids: Vec<String> = (0..32).map(|n| format!("row-{offset}-{n:02}")).collect();
-    let vals: Vec<i32> = (0..32).map(|n| offset + n as i32).collect();
+    let vals: Vec<i32> = (0..32).map(|n| offset + n).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![

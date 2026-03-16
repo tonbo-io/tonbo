@@ -150,7 +150,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let mut ingested_rows: Vec<(String, i32)> = Vec::new();
     for idx in 0..2 {
         let id = format!("sealed-{idx}");
-        let value = idx as i32;
+        let value = idx;
         ingested_rows.push((id.clone(), value));
         db.ingest(single_row_batch(schema.clone(), &id, value))
             .await?;
@@ -160,10 +160,10 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         "expected initial seal to create immutables"
     );
 
-    db.set_seal_policy(Arc::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal));
     for idx in 0..4 {
         let id = format!("pinned-{idx}");
-        let value = 100 + idx as i32;
+        let value = 100 + idx;
         ingested_rows.push((id.clone(), value));
         db.ingest(single_row_batch(schema.clone(), &id, value))
             .await?;
@@ -261,11 +261,13 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
     let wal_dir = temp_root.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_max_bytes = 256;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Always;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_max_bytes: 256,
+        flush_interval: Duration::from_millis(1),
+        sync: WalSyncPolicy::Always,
+        ..RuntimeWalConfig::default()
+    };
 
     let mut db = DB::new(config, Arc::clone(&executor)).await?.into_inner();
     db.enable_wal(wal_cfg.clone()).await?;
@@ -306,11 +308,13 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
     let wal_dir = temp_root.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_max_bytes = 256;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Disabled;
+    let wal_cfg = RuntimeWalConfig {
+        dir: wal_path,
+        segment_max_bytes: 256,
+        flush_interval: Duration::from_millis(1),
+        sync: WalSyncPolicy::Disabled,
+        ..RuntimeWalConfig::default()
+    };
 
     let mut db = DB::new(config, Arc::clone(&executor)).await?.into_inner();
     db.enable_wal(wal_cfg.clone()).await?;

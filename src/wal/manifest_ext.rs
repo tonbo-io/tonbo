@@ -93,6 +93,24 @@ fn segment_required(
     }
 }
 
+/// Prune WAL segments whose sequence is strictly below the manifest floor.
+pub(crate) async fn prune_wal_segments(
+    cfg: &WalConfig,
+    floor: &WalSegmentRef,
+) -> Result<usize, WalError> {
+    let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
+    if cfg.prune_dry_run {
+        let segments = storage.list_segments_with_hint(None).await?;
+        let removable = segments
+            .into_iter()
+            .filter(|descriptor| descriptor.seq < floor.seq())
+            .count();
+        Ok(removable)
+    } else {
+        storage.prune_below(floor.seq()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,23 +133,5 @@ mod tests {
         };
         assert!(segment_required(3, &bounds, Some(5), Some(35)));
         assert!(!segment_required(3, &bounds, Some(5), Some(45)));
-    }
-}
-
-/// Prune WAL segments whose sequence is strictly below the manifest floor.
-pub(crate) async fn prune_wal_segments(
-    cfg: &WalConfig,
-    floor: &WalSegmentRef,
-) -> Result<usize, WalError> {
-    let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    if cfg.prune_dry_run {
-        let segments = storage.list_segments_with_hint(None).await?;
-        let removable = segments
-            .into_iter()
-            .filter(|descriptor| descriptor.seq < floor.seq())
-            .count();
-        Ok(removable)
-    } else {
-        storage.prune_below(floor.seq()).await
     }
 }

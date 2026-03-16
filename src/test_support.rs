@@ -29,6 +29,9 @@ use crate::{
     transaction::Snapshot as TxSnapshot,
 };
 
+type CompactionOutcomeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CompactionOutcome, Box<dyn std::error::Error>>> + 'a>>;
+
 /// Trait for types that can be converted into a `DynRow`.
 pub(crate) trait IntoDynRow {
     /// Convert into a `DynRow`.
@@ -73,7 +76,7 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
     let builder = if primary_key.len() == 1 {
         builder.primary_key(primary_key[0].to_string())
     } else {
-        builder.composite_key(primary_key.iter().copied().collect::<Vec<_>>())
+        builder.composite_key(primary_key.to_vec())
     }
     .with_metadata();
 
@@ -135,7 +138,7 @@ pub(crate) fn compact_merge_l0<'a, FS, E>(
     target_level: u32,
     sst_cfg: Arc<SsTableConfig>,
     start_id: u64,
-) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, Box<dyn std::error::Error>>> + 'a>>
+) -> CompactionOutcomeFuture<'a>
 where
     FS: ManifestFs<E> + 'a,
     E: Executor + Timer + Clone + 'static,
@@ -194,6 +197,7 @@ where
 }
 
 /// Execute a prepared scan plan and stream `RecordBatch` results.
+#[allow(clippy::type_complexity)]
 pub(crate) fn execute_scan_plan<'a, FS, E>(
     db: &'a DbInner<FS, E>,
     plan: crate::query::scan::ScanPlan,

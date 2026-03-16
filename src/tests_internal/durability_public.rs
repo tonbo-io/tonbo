@@ -9,12 +9,9 @@ use crate::{
         BatchesThreshold, DB, DbInner, Expr, NeverSeal, WalConfig as BuilderWalConfig,
         WalSyncPolicy,
     },
+    tests_internal::common::config_with_pk,
     wal::{WalExt, state::FsWalStateStore},
 };
-
-#[path = "common/mod.rs"]
-mod common;
-use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -299,7 +296,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
 
     // Second batch: stays mutable/WAL only (disable sealing).
     let wal_only_rows = vec![("w1".to_string(), 100), ("w2".to_string(), 200)];
-    db.set_seal_policy(Arc::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal));
     for (id, value) in &wal_only_rows {
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -370,12 +367,12 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
         );
         let mut db: DbInner<LocalFs, TokioExecutor> =
             DB::<LocalFs, TokioExecutor>::builder(reopen_config)
-                .on_disk(root.to_string())?
+                .on_disk(root)?
                 .wal_config(wal_cfg.clone())
                 .open_with_executor(Arc::clone(&executor))
                 .await?
                 .into_inner();
-        db.set_seal_policy(Arc::new(NeverSeal::default()));
+        db.set_seal_policy(Arc::new(NeverSeal));
         for (id, value) in rows {
             let batch = RecordBatch::try_new(
                 schema.clone(),
@@ -458,7 +455,7 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
-    db.set_seal_policy(Arc::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal));
 
     let expected_rows = vec![("ns1".to_string(), 7), ("ns2".to_string(), 8)];
     for (id, value) in &expected_rows {
