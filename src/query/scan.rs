@@ -612,15 +612,13 @@ fn is_string_key(data_type: &DataType) -> bool {
     )
 }
 
-fn next_prefix_string(prefix: &str) -> Option<String> {
+pub(crate) fn next_prefix_string(prefix: &str) -> Option<String> {
     if prefix.is_empty() {
         return None;
     }
     let mut chars: Vec<char> = prefix.chars().collect();
     for idx in (0..chars.len()).rev() {
-        let current = chars[idx];
-        if current != char::MAX {
-            let next = char::from_u32(current as u32 + 1)?;
+        if let Some(next) = next_scalar_char(chars[idx]) {
             chars[idx] = next;
             chars.truncate(idx + 1);
             return Some(chars.into_iter().collect());
@@ -629,6 +627,16 @@ fn next_prefix_string(prefix: &str) -> Option<String> {
     None
 }
 
+fn next_scalar_char(current: char) -> Option<char> {
+    let mut next = u32::from(current).checked_add(1)?;
+    while next <= u32::from(char::MAX) {
+        if let Some(ch) = char::from_u32(next) {
+            return Some(ch);
+        }
+        next += 1;
+    }
+    None
+}
 fn extend_projection_schema(
     base_schema: &SchemaRef,
     projection: &SchemaRef,
@@ -705,6 +713,8 @@ impl ScanPlan {
 
 #[cfg(test)]
 mod tests {
+    use arrow_schema::Field;
+
     use super::*;
 
     #[test]
@@ -737,5 +747,36 @@ mod tests {
                 assert_eq!(right, 2);
             }
         }
+    }
+
+    #[test]
+    fn next_prefix_string_skips_surrogate_gap() {
+        let prefix = "\u{d7ff}";
+        let expected = "\u{e000}".to_string();
+        assert_eq!(next_prefix_string(prefix), Some(expected));
+    }
+
+    #[test]
+    fn next_prefix_string_carries_past_max_scalar_tail() {
+        let prefix = format!("a{}", char::MAX);
+        assert_eq!(next_prefix_string(&prefix), Some("b".to_string()));
+    }
+
+    #[test]
+    fn key_bounds_starts_with_keeps_upper_bound_across_unicode_gap() {
+        let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let predicate = Expr::StartsWith {
+            column: "id".to_string(),
+            prefix: "\u{d7ff}".to_string(),
+        };
+
+        let bounds = key_bounds_for_predicate(&predicate, &key_schema).expect("bounds");
+        assert!(!bounds.is_empty());
+        let lower = bounds.lower.expect("lower");
+        let upper = bounds.upper.expect("upper");
+        assert_eq!(lower.key, KeyOwned::from("\u{d7ff}"));
+        assert!(lower.inclusive);
+        assert_eq!(upper.key, KeyOwned::from("\u{e000}"));
+        assert!(!upper.inclusive);
     }
 }
