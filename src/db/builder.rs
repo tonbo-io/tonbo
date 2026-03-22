@@ -1134,6 +1134,7 @@ where
             commit_ack_mode,
             mem,
             layout.dyn_fs(),
+            layout.sst_route()?.path,
             manifest,
             manifest_table,
             table_meta,
@@ -1307,8 +1308,8 @@ impl CompactionOptions {
 
     /// Attach compaction metrics to record per-job and scheduler counters.
     #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn compaction_metrics(mut self, metrics: Arc<CompactionMetrics>) -> Self {
+    #[doc(hidden)]
+    pub fn compaction_metrics(mut self, metrics: Arc<CompactionMetrics>) -> Self {
         self.compaction_metrics = Some(metrics);
         self
     }
@@ -1724,6 +1725,7 @@ where
                 mode_config,
                 Arc::clone(&executor),
                 fs_dyn,
+                layout.sst_route()?.path,
                 wal_cfg.clone(),
                 manifest,
                 manifest_table,

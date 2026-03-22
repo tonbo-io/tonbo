@@ -10,12 +10,13 @@ mod common;
 use common::{
     BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
     ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
-    ScenarioWorkload, StorageVolumeArtifact, VersionSummary, WriteWorkloadState, artifact_path,
-    benchmark_schema, build_artifact, build_run_id, build_runtime, ingest_workload,
-    latest_version_summary, latest_version_summary_if_any, open_benchmark_db,
-    open_object_store_benchmark_db, print_directional_report, read_all_rows, run_criterion,
-    scenario_root, snapshot_local_storage_volume, snapshot_object_store_storage_volume,
-    wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
+    ScenarioStorageTarget, ScenarioWorkload, StorageVolumeArtifact, VersionSummary,
+    WriteWorkloadState, artifact_path, benchmark_schema, build_artifact, build_run_id,
+    build_runtime, ingest_workload, latest_version_summary, latest_version_summary_if_any,
+    open_benchmark_db, open_object_store_benchmark_db, print_directional_report, read_all_rows,
+    run_criterion, run_gc_observation, scenario_root, snapshot_local_storage_volume,
+    snapshot_object_store_storage_volume, wait_for_compaction_quiesced,
+    wait_for_first_compaction_observed, write_artifact_json,
 };
 
 #[derive(Clone)]
@@ -106,6 +107,30 @@ async fn prepare_scenarios(
             prepare_read_compaction_quiesced(config, run_id, storage).await,
         )?;
     }
+    if should_prepare_scenario(&selected, "read_compaction_quiesced_after_gc") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_read_compaction_quiesced_after_gc(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "write_heavy_no_sst_sweep") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_write_heavy_no_sst_sweep(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "write_heavy_with_sst_sweep") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_write_heavy_with_sst_sweep(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "estimate_sweep_candidates") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_estimate_sweep_candidates(config, run_id, storage).await,
+        )?;
+    }
 
     let sweep_points = config.compaction_sweep_points();
     if config.enable_read_while_compaction {
@@ -138,10 +163,14 @@ async fn prepare_scenarios(
 }
 
 fn selected_scenario_filter() -> Option<HashSet<&'static str>> {
-    const KNOWN_SCENARIOS: [&str; 5] = [
+    const KNOWN_SCENARIOS: [&str; 9] = [
         "read_baseline",
         "read_after_first_compaction_observed",
         "read_compaction_quiesced",
+        "read_compaction_quiesced_after_gc",
+        "write_heavy_no_sst_sweep",
+        "write_heavy_with_sst_sweep",
+        "estimate_sweep_candidates",
         "read_while_compaction",
         "write_throughput_vs_compaction_frequency",
     ];
@@ -232,6 +261,7 @@ async fn prepare_read_baseline(
     run_id: &str,
     storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
     let scenario_id = "read_baseline";
     let scenario_variant_id = "default".to_string();
     let benchmark_id = scenario_id.to_string();
@@ -269,6 +299,7 @@ async fn prepare_read_baseline(
     let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
     timing.emit(scenario_id);
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
 
     Ok(ScenarioState {
         scenario_id,
@@ -276,18 +307,21 @@ async fn prepare_read_baseline(
         scenario_variant_id: scenario_variant_id.clone(),
         benchmark_id,
         workload: ScenarioWorkload::ReadOnly,
+        storage_target,
         dimensions: ScenarioDimensionsArtifact::baseline(
             scenario_variant_id,
             ScenarioWorkload::ReadOnly,
         ),
         db,
         io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
         setup_io,
         rows_per_op_hint: rows_per_scan,
         version_before_compaction: version_ready,
         version_ready,
         volume_before_compaction,
         volume_ready,
+        gc_observation: None,
         write_state: None,
     })
 }
@@ -303,6 +337,7 @@ async fn prepare_read_after_first_compaction_observed(
         storage,
         "read_after_first_compaction_observed",
         "Read After First Compaction Observed",
+        false,
         false,
     )
     .await
@@ -320,6 +355,24 @@ async fn prepare_read_compaction_quiesced(
         "read_compaction_quiesced",
         "Read Compaction Quiesced",
         true,
+        false,
+    )
+    .await
+}
+
+async fn prepare_read_compaction_quiesced_after_gc(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    prepare_read_compaction_state(
+        config,
+        run_id,
+        storage,
+        "read_compaction_quiesced_after_gc",
+        "Read Compaction Quiesced After GC",
+        true,
+        true,
     )
     .await
 }
@@ -331,7 +384,9 @@ async fn prepare_read_compaction_state(
     scenario_id: &'static str,
     scenario_name: &'static str,
     wait_for_quiesced: bool,
+    run_gc_before_measurement: bool,
 ) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
     let scenario_variant_id = "default".to_string();
     let benchmark_id = scenario_id.to_string();
     let schema = benchmark_schema();
@@ -386,10 +441,19 @@ async fn prepare_read_compaction_state(
     }
     timing.record("wait_for_compaction_state", phase_started);
     let version_ready = latest_version_summary(&db).await?;
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let gc_observation = if run_gc_before_measurement {
+        let phase_started = Instant::now();
+        let observation = run_gc_observation(&db, &storage_target).await?;
+        timing.record("gc_sweep", phase_started);
+        Some(observation)
+    } else {
+        None
+    };
     let phase_started = Instant::now();
     let (rows_per_scan, _) = read_all_rows(&db).await?;
     timing.record("read_all_rows", phase_started);
-    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
     timing.emit(scenario_id);
 
@@ -399,18 +463,21 @@ async fn prepare_read_compaction_state(
         scenario_variant_id: scenario_variant_id.clone(),
         benchmark_id,
         workload: ScenarioWorkload::ReadOnly,
+        storage_target,
         dimensions: ScenarioDimensionsArtifact::baseline(
             scenario_variant_id,
             ScenarioWorkload::ReadOnly,
         ),
         db,
         io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
         setup_io,
         rows_per_op_hint: rows_per_scan,
         version_before_compaction,
         version_ready,
         volume_before_compaction,
         volume_ready,
+        gc_observation,
         write_state: None,
     })
 }
@@ -421,6 +488,7 @@ async fn prepare_read_while_compaction(
     point: &CompactionSweepPoint,
     storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
     let scenario_id = "read_while_compaction";
     let tuning = compaction_tuning(point, config.compaction_periodic_tick_ms);
     let scenario_variant_id = sweep_variant_id(point, tuning.periodic_tick_ms);
@@ -476,6 +544,7 @@ async fn prepare_read_while_compaction(
         config.seed ^ 0xA11CE,
         u64::try_from(config.ingest_batches).unwrap_or(u64::MAX),
     );
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
 
     Ok(ScenarioState {
         scenario_id,
@@ -489,6 +558,7 @@ async fn prepare_read_while_compaction(
         scenario_variant_id: scenario_variant_id.clone(),
         benchmark_id,
         workload: ScenarioWorkload::ReadWhileCompaction,
+        storage_target,
         dimensions: ScenarioDimensionsArtifact::swept(
             scenario_variant_id,
             ScenarioWorkload::ReadWhileCompaction,
@@ -496,12 +566,14 @@ async fn prepare_read_while_compaction(
         ),
         db,
         io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
         setup_io,
         rows_per_op_hint: rows_per_scan,
         version_before_compaction,
         version_ready,
         volume_before_compaction,
         volume_ready,
+        gc_observation: None,
         write_state: Some(write_state),
     })
 }
@@ -513,6 +585,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
     periodic_tick_ms: u64,
     storage: &ScenarioStorage,
 ) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
     let scenario_id = "write_throughput_vs_compaction_frequency";
     let tuning = compaction_tuning(point, periodic_tick_ms);
     let scenario_variant_id = sweep_variant_id(point, periodic_tick_ms);
@@ -567,6 +640,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         config.seed ^ 0xBEE5,
         u64::try_from(config.ingest_batches).unwrap_or(u64::MAX),
     );
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
 
     Ok(ScenarioState {
         scenario_id,
@@ -581,6 +655,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         scenario_variant_id: scenario_variant_id.clone(),
         benchmark_id,
         workload: ScenarioWorkload::WriteThroughput,
+        storage_target,
         dimensions: ScenarioDimensionsArtifact::swept(
             scenario_variant_id,
             ScenarioWorkload::WriteThroughput,
@@ -588,13 +663,215 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         ),
         db,
         io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
         setup_io,
         rows_per_op_hint: config.rows_per_batch,
         version_before_compaction,
         version_ready,
         volume_before_compaction,
         volume_ready,
+        gc_observation: None,
         write_state: Some(write_state),
+    })
+}
+
+async fn prepare_write_heavy_no_sst_sweep(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    prepare_write_heavy_state(
+        config,
+        run_id,
+        storage,
+        "write_heavy_no_sst_sweep",
+        "Write Heavy No SST Sweep",
+        false,
+    )
+    .await
+}
+
+async fn prepare_write_heavy_with_sst_sweep(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    prepare_write_heavy_state(
+        config,
+        run_id,
+        storage,
+        "write_heavy_with_sst_sweep",
+        "Write Heavy With SST Sweep",
+        true,
+    )
+    .await
+}
+
+async fn prepare_write_heavy_state(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+    scenario_id: &'static str,
+    scenario_name: &'static str,
+    run_gc_before_measurement: bool,
+) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
+    let scenario_variant_id = "default".to_string();
+    let benchmark_id = scenario_id.to_string();
+    let schema = benchmark_schema();
+    let io_probe = common::IoProbe::default();
+
+    let ingest_only_db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Disabled,
+        &io_probe,
+    )
+    .await?;
+    ingest_workload(&ingest_only_db, &schema, config).await?;
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
+    else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
+    ensure_ssts_present(scenario_id, version_before_compaction)?;
+    drop(ingest_only_db);
+
+    let db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Default {
+            periodic_tick_ms: config.compaction_periodic_tick_ms,
+        },
+        &io_probe,
+    )
+    .await?;
+    wait_for_first_compaction_observed(&db, version_before_compaction, config).await?;
+    let version_ready = latest_version_summary(&db).await?;
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
+    let gc_observation = if run_gc_before_measurement {
+        Some(run_gc_observation(&db, &storage_target).await?)
+    } else {
+        None
+    };
+    let setup_io = io_probe.snapshot();
+    let write_state = WriteWorkloadState::new(
+        Arc::clone(&schema),
+        config.rows_per_batch,
+        config.key_space,
+        config.seed ^ 0x594,
+        u64::try_from(config.ingest_batches).unwrap_or(u64::MAX),
+    );
+
+    Ok(ScenarioState {
+        scenario_id,
+        scenario_name: scenario_name.to_string(),
+        scenario_variant_id: scenario_variant_id.clone(),
+        benchmark_id,
+        workload: ScenarioWorkload::WriteThroughput,
+        storage_target,
+        dimensions: ScenarioDimensionsArtifact::baseline(
+            scenario_variant_id,
+            ScenarioWorkload::WriteThroughput,
+        ),
+        db,
+        io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
+        setup_io,
+        rows_per_op_hint: config.rows_per_batch,
+        version_before_compaction,
+        version_ready,
+        volume_before_compaction,
+        volume_ready,
+        gc_observation,
+        write_state: Some(write_state),
+    })
+}
+
+async fn prepare_estimate_sweep_candidates(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    let setup_started = Instant::now();
+    let scenario_id = "estimate_sweep_candidates";
+    let scenario_variant_id = "default".to_string();
+    let benchmark_id = scenario_id.to_string();
+    let schema = benchmark_schema();
+    let io_probe = common::IoProbe::default();
+
+    let ingest_only_db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Disabled,
+        &io_probe,
+    )
+    .await?;
+    ingest_workload(&ingest_only_db, &schema, config).await?;
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&ingest_only_db).await?
+    else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
+    ensure_ssts_present(scenario_id, version_before_compaction)?;
+    drop(ingest_only_db);
+
+    let db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Default {
+            periodic_tick_ms: config.compaction_periodic_tick_ms,
+        },
+        &io_probe,
+    )
+    .await?;
+    wait_for_compaction_quiesced(&db, version_before_compaction, config).await?;
+    let version_ready = latest_version_summary(&db).await?;
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let setup_io = io_probe.snapshot();
+    let storage_target = storage_target(storage, run_id, &benchmark_id)?;
+
+    Ok(ScenarioState {
+        scenario_id,
+        scenario_name: "Estimate Sweep Candidates".to_string(),
+        scenario_variant_id: scenario_variant_id.clone(),
+        benchmark_id,
+        workload: ScenarioWorkload::SweepEstimate,
+        storage_target,
+        dimensions: ScenarioDimensionsArtifact::baseline(
+            scenario_variant_id,
+            ScenarioWorkload::SweepEstimate,
+        ),
+        db,
+        io_probe,
+        setup_elapsed_ns: elapsed_ns(setup_started),
+        setup_io,
+        rows_per_op_hint: 1,
+        version_before_compaction,
+        version_ready,
+        volume_before_compaction,
+        volume_ready,
+        gc_observation: None,
+        write_state: None,
     })
 }
 
@@ -674,6 +951,10 @@ fn format_max_task_bytes(value: Option<usize>) -> String {
     }
 }
 
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 fn ensure_ssts_present(scenario_id: &str, summary: VersionSummary) -> Result<(), BenchError> {
     if summary.sst_count == 0 {
         return scenario_skipped(
@@ -689,6 +970,29 @@ fn scenario_skipped<T>(scenario_id: &str, reason: impl Into<String>) -> Result<T
         scenario_id: scenario_id.to_string(),
         reason: reason.into(),
     })
+}
+
+fn storage_target(
+    storage: &ScenarioStorage,
+    run_id: &str,
+    benchmark_id: &str,
+) -> Result<ScenarioStorageTarget, BenchError> {
+    match storage.backend {
+        BenchBackend::Local => Ok(ScenarioStorageTarget::Local {
+            root: scenario_root(run_id, benchmark_id),
+        }),
+        BenchBackend::ObjectStore => storage
+            .object_store
+            .as_ref()
+            .map(|object_store| ScenarioStorageTarget::ObjectStore {
+                spec: object_store.object_spec(run_id, benchmark_id),
+            })
+            .ok_or_else(|| {
+                BenchError::Message(format!(
+                    "object store config missing for benchmark `{benchmark_id}`"
+                ))
+            }),
+    }
 }
 
 criterion_group!(benches, compaction_local);

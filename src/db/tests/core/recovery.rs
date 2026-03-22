@@ -79,6 +79,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         .await
         .expect("register table");
     let manifest_table = table_meta.table_id;
+    let sst_root = Path::default();
 
     let (schema, delete_schema, commit_ack_mode, mem) = build_dyn_components(build_config)?;
     let db_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
@@ -88,6 +89,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         commit_ack_mode,
         mem,
         db_fs,
+        sst_root.clone(),
         manifest,
         manifest_table,
         table_meta.clone(),
@@ -117,6 +119,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         recover_config,
         Arc::clone(&executor),
         recover_fs,
+        sst_root,
         wal_cfg.clone(),
         manifest,
         manifest_table,
@@ -233,6 +236,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         config,
         executor.clone(),
         test_fs,
+        Path::default(),
         cfg,
         manifest,
         manifest_table,

@@ -8,6 +8,7 @@ use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as 
 
 use crate::{
     db::{BatchesThreshold, Expr},
+    extractor::projection_for_field,
     test_support::{
         TestFsWalStateStore as FsWalStateStore, TestSsTableConfig as SsTableConfig,
         TestSsTableDescriptor as SsTableDescriptor, TestSsTableId as SsTableId,
@@ -66,22 +67,25 @@ async fn compaction_gc_prunes_obsolete_wal_and_preserves_visible_rows()
 
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir);
+    let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
 
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(root_str.clone())?
         .wal_config(wal_cfg.clone())
-        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     // Ingest two batches that will become two L0 SSTs.
-    let sst_cfg = Arc::new(SsTableConfig::new(
-        schema.clone(),
-        Arc::new(LocalFs {}),
-        FusioPath::from_filesystem_path(temp_root.join("sst")).expect("sst path"),
-    ));
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(
+            schema.clone(),
+            Arc::new(LocalFs {}),
+            FusioPath::from_filesystem_path(temp_root.join("sst")).expect("sst path"),
+        )
+        .with_key_extractor(extractor.into()),
+    );
     for pass in 0..2 {
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -93,17 +97,11 @@ async fn compaction_gc_prunes_obsolete_wal_and_preserves_visible_rows()
         db.ingest(batch).await?;
         // Seal + flush each immutable to distinct SSTs.
         let descriptor = SsTableDescriptor::new(SsTableId::new(pass as u64 + 1), 0);
-        if let Err(err) = flush_immutables(&db, Arc::clone(&sst_cfg), descriptor).await {
-            eprintln!("flush skipped: {err}");
-            return Ok(());
-        }
+        flush_immutables(&db, Arc::clone(&sst_cfg), descriptor).await?;
     }
 
     // Plan a compaction that merges both L0 SSTs into L1 and records WAL GC.
-    if let Err(err) = compact_merge_l0(&db, vec![1, 2], 1, Arc::clone(&sst_cfg), 100).await {
-        eprintln!("compaction merge skipped: {err}");
-        return Ok(());
-    }
+    compact_merge_l0(&db, vec![1, 2], 1, Arc::clone(&sst_cfg), 100).await?;
 
     prune_wal_segments_below_floor(&db).await;
 
