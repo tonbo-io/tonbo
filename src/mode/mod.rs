@@ -103,7 +103,6 @@ pub(crate) fn table_definition(config: &DynModeConfig, table_name: &str) -> Tabl
         name: table_name.to_string(),
         schema_fingerprint: fingerprint_schema(&config.schema),
         primary_key_columns: key_columns,
-        retention: None,
         schema_version: 0,
     }
 }

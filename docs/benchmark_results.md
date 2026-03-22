@@ -182,6 +182,41 @@ Therefore:
 - use logical live-set for compaction effectiveness,
 - use physical bytes for GC/debug interpretation.
 
+### Validated: GC can materially shrink physical SST footprint without showing a steady-state latency win
+
+The branch-local SST GC rerun in
+`benches/compaction/results/sst_gc_rerun_2026-03-19.md` adds the missing cleanup-cost view.
+
+What it validates:
+
+- in the kept local `scale=20` read-focused scenario, prior background sweeps deleted
+  `251,362,341` bytes across `230` obsolete SST objects before the final observation point,
+- those GC sweeps consumed `2,498 ms` of wall-clock time during setup, while total setup took
+  `79,402 ms`, so GC accounted for about `3.15%` of setup elapsed time,
+- without those earlier sweeps, the scenario would have been carrying `257,848,523` bytes of
+  physical SST data at the observation point, versus the `6,486,182` bytes actually present after
+  reclaim,
+- even with that large reduction in physical SST footprint, the paired steady-state read latency
+  only moved by about `-1.04%` in the final cleaned-up state.
+
+Interpretation:
+
+- GC can be highly valuable for physical storage cost and bounded object count,
+- in this scenario, a much larger amount of dead physical SST data did not produce a measurable
+  steady-state read-latency penalty,
+- that benefit does not by itself imply a measurable steady-state latency win in this harness,
+- and the observed sweep work in this run landed on the compaction/setup path rather than in the
+  measured foreground operation.
+
+The same rerun also refined the write-side conclusion:
+
+- cumulative SST reclaim still remained small relative to setup cost in the write-heavy scenario,
+- the paired write run moved to `-5.19%` mean latency for `write_heavy_with_sst_sweep` relative to
+  `write_heavy_no_sst_sweep`,
+- but that shift is still too small and noisy to treat as a clear foreground GC win on its own,
+- and the artifact shows one additional sweep overlapping the observation window rather than a
+  stable measured write-path speedup caused by explicit foreground reclaim.
+
 ## Inconclusive Or Blocked Conclusions
 
 ### Inconclusive: object-store root cause
@@ -265,3 +300,4 @@ Treat the documents below as appendices and raw evidence, not as the primary PR 
 - `benches/compaction/results/compaction_local_baseline.md`
 - `benches/compaction/results/compaction_directional_matrix_2026-02-27.md`
 - `benches/compaction/results/compaction_directional_phase_split_2026-03-01.md`
+- `benches/compaction/results/sst_gc_rerun_2026-03-19.md`

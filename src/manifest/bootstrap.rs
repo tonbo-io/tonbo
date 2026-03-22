@@ -18,7 +18,8 @@ use super::{
     ManifestFs,
     codec::{CatalogCodec, GcPlanCodec, ManifestCodec, VersionCodec},
     domain::{
-        GcPlanState, TableDefinition, TableHead, TableId, TableMeta, VersionState, WalSegmentRef,
+        CurrentRootSet, GcAuthorizationSummary, GcPlanState, TableDefinition, TableHead, TableId,
+        TableMeta, VersionState, WalSegmentRef,
     },
     driver::{Manifest, ManifestError, ManifestResult, Stores, VersionSnapshot},
     version::VersionEdit,
@@ -214,6 +215,7 @@ where
         Ok(meta)
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_gc_plan(
         &self,
         table: TableId,
@@ -222,9 +224,109 @@ where
         self.gc_plan.put_gc_plan(table, plan).await
     }
 
-    #[cfg(all(test, feature = "tokio"))]
-    pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
-        self.gc_plan.take_gc_plan(table).await
+    pub(crate) async fn merge_gc_plan(
+        &self,
+        table: TableId,
+        plan: GcPlanState,
+    ) -> ManifestResult<(Option<GcPlanState>, Option<GcPlanState>)> {
+        self.gc_plan
+            .update_gc_plan(table, move |current| {
+                let mut merged = current.unwrap_or_default();
+                merged.merge(plan);
+                (!merged.is_empty()).then_some(merged)
+            })
+            .await
+    }
+
+    pub(crate) async fn remove_gc_sst_candidates(
+        &self,
+        table: TableId,
+        reclaimed: &[crate::manifest::GcSstRef],
+    ) -> ManifestResult<(Option<GcPlanState>, Option<GcPlanState>)> {
+        self.gc_plan
+            .update_gc_plan(table, |current| {
+                let mut plan = current?;
+                plan.remove_sst_candidates(reclaimed);
+                (!plan.is_empty()).then_some(plan)
+            })
+            .await
+    }
+
+    pub(crate) async fn peek_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
+        self.gc_plan.peek_gc_plan(table).await
+    }
+
+    /// Take staged GC candidates and authorize SST reclamation against the current root set.
+    ///
+    /// In the single-process model the latest manifest root set is the only source of truth for
+    /// whether an SST is still live. `GcPlanState` remains a hint queue; this helper filters out
+    /// any SST candidate that has become reachable again before a sweeper acts on it. Callers that
+    /// only process part of the returned plan must re-queue any residual SST or WAL candidates.
+    #[allow(dead_code)]
+    pub(crate) async fn take_gc_plan_for_authorized_sweep(
+        &self,
+        table: TableId,
+    ) -> ManifestResult<Option<GcPlanState>> {
+        self.take_gc_plan_for_authorized_sweep_with_pins(table, &[])
+            .await
+    }
+
+    pub(crate) async fn take_gc_plan_for_authorized_sweep_with_pins(
+        &self,
+        table: TableId,
+        active_pins: &[Timestamp],
+    ) -> ManifestResult<Option<GcPlanState>> {
+        let Some(plan) = self.gc_plan.peek_gc_plan(table).await? else {
+            return Ok(None);
+        };
+        let staged_sst_count = plan.obsolete_ssts.len();
+        let root_set = self
+            .version
+            .current_root_set_with_pins(table, active_pins)
+            .await?;
+        let plan = plan.authorize_with_root_set(&root_set);
+        let authorized_sst_count = plan.obsolete_ssts.len();
+        log_debug!(
+            component = "manifest",
+            event = "gc_plan_authorized_for_sweep",
+            table_id = ?table,
+            protected_versions = root_set.protected_version_count(),
+            protected_sst_objects = root_set.protected_object_count(),
+            staged_sst_candidates = staged_sst_count,
+            authorized_sst_candidates = authorized_sst_count,
+            filtered_sst_candidates = staged_sst_count.saturating_sub(authorized_sst_count),
+            obsolete_wal_segments = plan.obsolete_wal_segments.len(),
+        );
+        if plan.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(plan))
+        }
+    }
+
+    /// Inspect the current GC plan against the latest manifest root set without mutating it.
+    #[allow(dead_code)]
+    pub(crate) async fn inspect_gc_plan_authorization(
+        &self,
+        table: TableId,
+    ) -> ManifestResult<Option<GcAuthorizationSummary>> {
+        self.inspect_gc_plan_authorization_with_pins(table, &[])
+            .await
+    }
+
+    pub(crate) async fn inspect_gc_plan_authorization_with_pins(
+        &self,
+        table: TableId,
+        active_pins: &[Timestamp],
+    ) -> ManifestResult<Option<GcAuthorizationSummary>> {
+        let Some(plan) = self.gc_plan.peek_gc_plan(table).await? else {
+            return Ok(None);
+        };
+        let root_set = self
+            .version
+            .current_root_set_with_pins(table, active_pins)
+            .await?;
+        Ok(Some(plan.authorization_summary(&root_set)))
     }
 
     /// List committed versions of a table, ordered newest-first.
@@ -236,6 +338,23 @@ where
         limit: usize,
     ) -> ManifestResult<Vec<VersionState>> {
         self.version.list_versions(table, limit).await
+    }
+
+    /// Build the current manifest root set that protects SST objects from GC.
+    #[allow(dead_code)]
+    pub(crate) async fn current_root_set(&self, table: TableId) -> ManifestResult<CurrentRootSet> {
+        self.current_root_set_with_pins(table, &[]).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn current_root_set_with_pins(
+        &self,
+        table: TableId,
+        active_pins: &[Timestamp],
+    ) -> ManifestResult<CurrentRootSet> {
+        self.version
+            .current_root_set_with_pins(table, active_pins)
+            .await
     }
 
     /// Snapshot a specific historical version by its manifest timestamp.
@@ -432,6 +551,12 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
+    use crate::{
+        id::FileIdGenerator,
+        manifest::{SstEntry, TableDefinition, VersionEdit},
+        mvcc::Timestamp,
+        ondisk::sstable::{SsTableId, SsTableStats},
+    };
 
     #[tokio::test(flavor = "multi_thread")]
     async fn init_disk_manifest_smoke() {
@@ -485,5 +610,119 @@ mod tests {
                 .all(|meta| meta.path.as_ref().starts_with(leases_dir.as_ref())),
             "all lease files should live under the leases/ prefix"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manifest_history_remains_queryable_while_root_set_defaults_to_head() {
+        let manifest = init_in_memory_manifest(TokioExecutor::default())
+            .await
+            .expect("manifest");
+        let file_ids = FileIdGenerator::default();
+        let table = manifest
+            .register_table(
+                &file_ids,
+                &TableDefinition {
+                    name: "manifest-history".into(),
+                    schema_fingerprint: "fingerprint".into(),
+                    primary_key_columns: vec!["id".into()],
+                    schema_version: 1,
+                },
+            )
+            .await
+            .expect("register table")
+            .table_id;
+
+        manifest
+            .apply_version_edits(
+                table,
+                &[VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(1),
+                        Some(SsTableStats::default()),
+                        None,
+                        FusioPath::from("L0/1.parquet"),
+                        None,
+                    )],
+                }],
+            )
+            .await
+            .expect("first version");
+        manifest
+            .apply_version_edits(
+                table,
+                &[
+                    VersionEdit::RemoveSsts {
+                        level: 0,
+                        sst_ids: vec![SsTableId::new(1)],
+                    },
+                    VersionEdit::AddSsts {
+                        level: 1,
+                        entries: vec![SstEntry::new(
+                            SsTableId::new(2),
+                            Some(SsTableStats::default()),
+                            None,
+                            FusioPath::from("L1/2.parquet"),
+                            None,
+                        )],
+                    },
+                ],
+            )
+            .await
+            .expect("second version");
+        manifest
+            .apply_version_edits(
+                table,
+                &[
+                    VersionEdit::RemoveSsts {
+                        level: 1,
+                        sst_ids: vec![SsTableId::new(2)],
+                    },
+                    VersionEdit::AddSsts {
+                        level: 2,
+                        entries: vec![SstEntry::new(
+                            SsTableId::new(3),
+                            Some(SsTableStats::default()),
+                            None,
+                            FusioPath::from("L2/3.parquet"),
+                            None,
+                        )],
+                    },
+                ],
+            )
+            .await
+            .expect("third version");
+
+        let versions = manifest
+            .list_versions(table, 10)
+            .await
+            .expect("list versions");
+        assert_eq!(
+            versions
+                .iter()
+                .map(VersionState::commit_timestamp)
+                .collect::<Vec<_>>(),
+            vec![Timestamp::new(3), Timestamp::new(2), Timestamp::new(1)]
+        );
+
+        let snapshot = manifest
+            .snapshot_at_version(table, Timestamp::new(1))
+            .await
+            .expect("historical version should remain available");
+        assert_eq!(
+            snapshot
+                .latest_version
+                .as_ref()
+                .map(VersionState::commit_timestamp),
+            Some(Timestamp::new(1))
+        );
+
+        let root_set = manifest.current_root_set(table).await.expect("root set");
+        assert_eq!(root_set.protected_version_count(), 1);
+        assert!(
+            !root_set.contains_path(&FusioPath::from("L0/1.parquet")),
+            "historical SSTs should not be protected unless a live snapshot pins them",
+        );
+        assert!(root_set.contains_path(&FusioPath::from("L2/3.parquet")));
     }
 }

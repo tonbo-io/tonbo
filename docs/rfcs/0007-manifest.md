@@ -64,14 +64,14 @@ These fields allow compaction and read-path pruning without inspecting Parquet c
 
 ### Catalog Registration and Table Definitions
 
-Registration mints a `TableId` and records a `TableDefinition` (name, schema fingerprint, primary key columns, retention policy, schema version). If a table already exists under the same name, schema and key layout must match or registration fails. A corresponding head entry is created so writers can publish versions immediately.
+Registration mints a `TableId` and records a `TableDefinition` (name, schema fingerprint, primary key columns, schema version). If a table already exists under the same name, schema and key layout must match or registration fails. A corresponding head entry is created so writers can publish versions immediately.
 
 ### Sessions and Workflow
 
 - **Write path:** assemble a `VersionState` (SST adds/removes, WAL segments, stats, tombstone watermark) and CAS-apply it alongside the updated table head (including WAL floor). CAS success defines global ordering; conflicts are retried with refreshed state.
 - **Read path:** fetch table head, then load the referenced `VersionState` and matching catalog metadata to build a snapshot for planning/reads.
 - **Recovery:** adopt orphaned manifest segments if present, reload catalog + heads, and replay WAL only at or above the recorded WAL floor.
-- **GC:** compute GC plans from retained versions and published floors; gc-plan manifest stores planned deletions to coordinate execution.
+- **GC:** compute GC plans from the current head, active snapshot pins, and published floors; gc-plan manifest stores planned deletions to coordinate execution.
 
 ### API Surface
 
@@ -82,10 +82,10 @@ The manifest module exposes operations for table lifecycle and version managemen
 | `open` | Initialize manifest from existing catalog and version stores |
 | `init_catalog` | Bootstrap empty catalog if none exists |
 | `register_table` | Register a new table or validate existing table matches definition |
-| `table_meta` | Fetch logical metadata (name, schema, retention) for a table |
+| `table_meta` | Fetch logical metadata (name, schema) for a table |
 | `apply_version_edits` | Atomically publish SST adds/removes and WAL floor updates |
 | `snapshot_latest` | Get current version state for read planning |
-| `list_versions` | Enumerate retained versions for debugging or time-travel |
+| `list_versions` | Enumerate committed versions for debugging or time-travel |
 | `recover_orphans` | Adopt orphaned segments after crash recovery |
 | `compactor` | Access GC/compaction planning APIs |
 
@@ -107,7 +107,7 @@ Each prefix uses fusio-manifest’s standard directory structure and CAS semanti
 
 - Writers and compactors publish SST additions/removals together with WAL segment references; table heads record the minimum WAL sequence (floor) required for recovery.
 - Recovery replays WAL at or above the recorded floor and ignores objects not referenced by any manifest version.
-- GC consumes manifest state (retained versions + floors) to decide which SSTs/WAL segments can be deleted safely; gc-plan records planned deletions to coordinate execution.
+- GC consumes manifest state (HEAD reachability, active snapshot pins, and WAL floors) to decide which SSTs/WAL segments can be deleted safely; gc-plan records planned deletions to coordinate execution.
 
 ## Risks
 

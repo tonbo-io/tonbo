@@ -7,6 +7,9 @@ This benchmark suite lives in `benches/compaction_local.rs` and now supports:
 - Tail latency reporting (p50/p95/p99 in addition to mean).
 - A directional report block for `read_baseline` vs `read_compaction_quiesced`.
 
+For the SST-GC pre-enablement baseline workflow, use
+`benches/compaction/sst_gc_baseline.md`.
+
 ## Program Context
 
 This suite is one current engine-layer benchmark inside Tonbo's broader
@@ -224,6 +227,36 @@ Semantics:
 - Logical should be used as the primary compaction-effectiveness metric because it tracks manifest-visible live state.
 - Physical remains useful for debugging storage amplification and cleanup lag.
 
+For schema `11+` artifacts, setup payloads may also include `setup.gc_observation` for
+GC-enabled scenarios. This captures:
+
+- `volume_before_gc` and `volume_after_gc`
+- `physical_stale_estimate_before_explicit_sweep` and `physical_stale_estimate_after_explicit_sweep`
+- `persisted_plan_before_explicit_sweep` and `persisted_plan_after_explicit_sweep`
+- `reclaimed_sst_objects` and `reclaimed_sst_bytes`
+- `explicit_sweep_result.deleted_objects`
+- `explicit_sweep_result.deleted_bytes`
+- `explicit_sweep_result.delete_failures`
+- `explicit_sweep_result.duration_ms`
+- cumulative counters before/after the explicit sweep, including:
+  `sweep_runs`, `deleted_objects`, `deleted_bytes`, `delete_failures`,
+  `sweep_duration_ms_total`, `gc_plan_write_runs`, `gc_plan_overwrite_non_empty`,
+  `gc_plan_take_runs`, `gc_plan_taken_sst_candidates`,
+  `gc_plan_authorized_sst_candidates`, `gc_plan_blocked_sst_candidates`,
+  `gc_plan_requeued_sst_candidates`
+
+Interpretation:
+
+- `physical_stale_estimate_*` is a physical-vs-logical SST storage delta estimate. It is not the persisted GC plan.
+- `persisted_plan_*` is the manifest GC plan at the explicit sweep observation point, including the currently authorized subset.
+- `explicit_sweep_result.*` is what that explicit benchmark sweep invocation actually deleted.
+- A non-zero `physical_stale_estimate_before_explicit_sweep` with `persisted_plan_before_explicit_sweep = null` means stale-looking SST objects still exist physically, but no persisted plan remained staged for the explicit sweep to consume.
+
+Use these fields to compare a GC-on scenario against its GC-off companion:
+
+- `read_compaction_quiesced` vs `read_compaction_quiesced_after_gc`
+- `write_heavy_no_sst_sweep` vs `write_heavy_with_sst_sweep`
+
 Planned artifact growth for the broader benchmark program:
 
 - topology fields such as runner region, bucket region, path placement, and
@@ -263,3 +296,5 @@ After `read_baseline` and `read_compaction_quiesced` complete, the harness print
   - `benches/compaction/results/compaction_directional_matrix_2026-02-27.md`
 - Directional + latency phase split validation (new probe wiring + dominance view):
   - `benches/compaction/results/compaction_directional_phase_split_2026-03-01.md`
+- SST GC timing rerun with snapshot-pin semantics:
+  - `benches/compaction/results/sst_gc_rerun_2026-03-19.md`
