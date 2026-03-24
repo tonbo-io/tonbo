@@ -693,13 +693,30 @@ fn ensure_table_compat(meta: &TableMeta, definition: &TableDefinition) -> Manife
 
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        io::ErrorKind,
+        panic::AssertUnwindSafe,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
-    use fusio::{mem::fs::InMemoryFs, path::Path};
+    use fusio::{
+        disk::LocalFs,
+        fs::{FileMeta, FileSystemTag, OpenOptions},
+        mem::fs::InMemoryFs,
+        path::{Path, PathPart},
+    };
     use fusio_manifest::{
         BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
-        ManifestContext, SegmentStoreImpl,
+        ManifestContext, ObjectHead, SegmentStoreImpl, types::Error as FusioManifestError,
     };
+    use futures::{FutureExt, Stream, StreamExt, future::try_join_all};
+    use tempfile::TempDir;
+    use tokio::sync::Barrier;
 
     use super::{
         super::domain::{SstEntry, TableDefinition},
@@ -707,7 +724,10 @@ mod tests {
     };
     use crate::{
         id::FileIdGenerator,
-        manifest::{bootstrap::init_in_memory_manifest_raw, domain::TableId},
+        manifest::{
+            bootstrap::{ensure_manifest_dirs, init_in_memory_manifest_raw},
+            domain::TableId,
+        },
         ondisk::sstable::{SsTableId, SsTableStats},
     };
 
@@ -1193,5 +1213,882 @@ mod tests {
             .await
             .expect_err("cas conflict");
         assert!(matches!(err, ManifestError::CasConflict(_)));
+    }
+
+    #[derive(Debug, Default)]
+    struct StoreCounters {
+        head_loads: AtomicU64,
+        head_puts: AtomicU64,
+        segment_puts: AtomicU64,
+        segment_lists: AtomicU64,
+        segment_meta_loads: AtomicU64,
+        lease_puts: AtomicU64,
+        lease_lists: AtomicU64,
+        lease_opens: AtomicU64,
+        lease_removes: AtomicU64,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct StoreCounterSnapshot {
+        head_loads: u64,
+        head_puts: u64,
+        segment_puts: u64,
+        segment_lists: u64,
+        segment_meta_loads: u64,
+        lease_puts: u64,
+        lease_lists: u64,
+        lease_opens: u64,
+        lease_removes: u64,
+    }
+
+    impl StoreCounterSnapshot {
+        fn total_object_ops(self) -> u64 {
+            self.head_loads
+                + self.head_puts
+                + self.segment_puts
+                + self.segment_lists
+                + self.segment_meta_loads
+                + self.lease_puts
+                + self.lease_lists
+                + self.lease_opens
+                + self.lease_removes
+        }
+
+        fn saturating_sub(self, other: Self) -> Self {
+            Self {
+                head_loads: self.head_loads.saturating_sub(other.head_loads),
+                head_puts: self.head_puts.saturating_sub(other.head_puts),
+                segment_puts: self.segment_puts.saturating_sub(other.segment_puts),
+                segment_lists: self.segment_lists.saturating_sub(other.segment_lists),
+                segment_meta_loads: self
+                    .segment_meta_loads
+                    .saturating_sub(other.segment_meta_loads),
+                lease_puts: self.lease_puts.saturating_sub(other.lease_puts),
+                lease_lists: self.lease_lists.saturating_sub(other.lease_lists),
+                lease_opens: self.lease_opens.saturating_sub(other.lease_opens),
+                lease_removes: self.lease_removes.saturating_sub(other.lease_removes),
+            }
+        }
+    }
+
+    impl StoreCounters {
+        fn snapshot(&self) -> StoreCounterSnapshot {
+            StoreCounterSnapshot {
+                head_loads: self.head_loads.load(Ordering::Relaxed),
+                head_puts: self.head_puts.load(Ordering::Relaxed),
+                segment_puts: self.segment_puts.load(Ordering::Relaxed),
+                segment_lists: self.segment_lists.load(Ordering::Relaxed),
+                segment_meta_loads: self.segment_meta_loads.load(Ordering::Relaxed),
+                lease_puts: self.lease_puts.load(Ordering::Relaxed),
+                lease_lists: self.lease_lists.load(Ordering::Relaxed),
+                lease_opens: self.lease_opens.load(Ordering::Relaxed),
+                lease_removes: self.lease_removes.load(Ordering::Relaxed),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingFs<FS> {
+        inner: FS,
+        counters: Arc<StoreCounters>,
+        delay: Option<Duration>,
+    }
+
+    impl<FS> CountingFs<FS> {
+        fn new(inner: FS, counters: Arc<StoreCounters>, delay: Option<Duration>) -> Self {
+            Self {
+                inner,
+                counters,
+                delay,
+            }
+        }
+    }
+
+    fn is_head_path(path: &Path) -> bool {
+        let raw = path.as_ref();
+        raw == "head.json" || raw.ends_with("/head.json")
+    }
+
+    fn is_dir(path: &Path, name: &str) -> bool {
+        let raw = path.as_ref();
+        raw == name || raw.ends_with(&format!("/{name}"))
+    }
+
+    fn is_segment_path(path: &Path) -> bool {
+        let raw = path.as_ref();
+        (raw.starts_with("segments/") || raw.contains("/segments/")) && raw.contains("seg-")
+    }
+
+    fn is_lease_path(path: &Path) -> bool {
+        let raw = path.as_ref();
+        (raw.starts_with("leases/") || raw.contains("/leases/")) && raw.ends_with(".json")
+    }
+
+    impl<FS> fusio::Fs for CountingFs<FS>
+    where
+        FS: fusio::Fs + Clone + Send + Sync + 'static,
+    {
+        type File = <FS as fusio::Fs>::File;
+
+        fn file_system(&self) -> FileSystemTag {
+            self.inner.file_system()
+        }
+
+        fn open_options(
+            &self,
+            path: &Path,
+            options: OpenOptions,
+        ) -> impl std::future::Future<Output = Result<Self::File, fusio::Error>> + fusio::MaybeSend
+        {
+            let is_lease_file = is_lease_path(path);
+            let create = options.create;
+            if is_lease_path(path) {
+                self.counters.lease_opens.fetch_add(1, Ordering::Relaxed);
+            }
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                match AssertUnwindSafe(inner.open_options(path, options))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) if is_lease_file && !create => Err(std::io::Error::new(
+                        ErrorKind::NotFound,
+                        format!("lease path {} disappeared during open", path),
+                    )
+                    .into()),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        }
+
+        fn create_dir_all(
+            path: &Path,
+        ) -> impl std::future::Future<Output = Result<(), fusio::Error>> + fusio::MaybeSend
+        {
+            FS::create_dir_all(path)
+        }
+
+        fn list(
+            &self,
+            path: &Path,
+        ) -> impl std::future::Future<
+            Output = Result<
+                impl Stream<Item = Result<FileMeta, fusio::Error>> + fusio::MaybeSend,
+                fusio::Error,
+            >,
+        > + fusio::MaybeSend {
+            let filter_segment_artifacts = is_dir(path, "segments");
+            if is_dir(path, "segments") {
+                self.counters.segment_lists.fetch_add(1, Ordering::Relaxed);
+            } else if is_dir(path, "leases") {
+                self.counters.lease_lists.fetch_add(1, Ordering::Relaxed);
+            }
+            async move {
+                let stream = self.inner.list(path).await?;
+                Ok(stream.filter_map(move |item| async move {
+                    match item {
+                        Ok(meta) => {
+                            if filter_segment_artifacts {
+                                let keep = meta.path.filename().is_some_and(|name| {
+                                    name.ends_with(".json") || name.ends_with(".bin")
+                                });
+                                if !keep {
+                                    return None;
+                                }
+                            }
+                            Some(Ok(meta))
+                        }
+                        Err(err) => Some(Err(err)),
+                    }
+                }))
+            }
+        }
+
+        fn remove(
+            &self,
+            path: &Path,
+        ) -> impl std::future::Future<Output = Result<(), fusio::Error>> + fusio::MaybeSend
+        {
+            if is_lease_path(path) {
+                self.counters.lease_removes.fetch_add(1, Ordering::Relaxed);
+            }
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                inner.remove(path).await
+            }
+        }
+
+        fn copy(
+            &self,
+            from: &Path,
+            to: &Path,
+        ) -> impl std::future::Future<Output = Result<(), fusio::Error>> + fusio::MaybeSend
+        {
+            self.inner.copy(from, to)
+        }
+
+        fn link(
+            &self,
+            from: &Path,
+            to: &Path,
+        ) -> impl std::future::Future<Output = Result<(), fusio::Error>> + fusio::MaybeSend
+        {
+            self.inner.link(from, to)
+        }
+    }
+
+    impl<FS> fusio::FsCas for CountingFs<FS>
+    where
+        FS: fusio::FsCas + Clone + Send + Sync + 'static,
+    {
+        fn load_with_tag(
+            &self,
+            path: &Path,
+        ) -> Pin<
+            Box<
+                dyn fusio::dynamic::MaybeSendFuture<
+                        Output = Result<Option<(Vec<u8>, String)>, fusio::Error>,
+                    > + '_,
+            >,
+        > {
+            if is_head_path(path) {
+                self.counters.head_loads.fetch_add(1, Ordering::Relaxed);
+            }
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            let path = path.clone();
+            Box::pin(async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                inner.load_with_tag(&path).await
+            })
+        }
+
+        fn put_conditional(
+            &self,
+            path: &Path,
+            payload: &[u8],
+            content_type: Option<&str>,
+            metadata: Option<Vec<(String, String)>>,
+            condition: fusio::fs::CasCondition,
+        ) -> Pin<Box<dyn fusio::dynamic::MaybeSendFuture<Output = Result<String, fusio::Error>> + '_>>
+        {
+            if is_head_path(path) {
+                self.counters.head_puts.fetch_add(1, Ordering::Relaxed);
+            } else if is_segment_path(path) {
+                self.counters.segment_puts.fetch_add(1, Ordering::Relaxed);
+            } else if is_lease_path(path) {
+                self.counters.lease_puts.fetch_add(1, Ordering::Relaxed);
+            }
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            let path = path.clone();
+            let payload = payload.to_vec();
+            let content_type_owned = content_type.map(ToOwned::to_owned);
+            Box::pin(async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                inner
+                    .put_conditional(
+                        &path,
+                        &payload,
+                        content_type_owned.as_deref(),
+                        metadata,
+                        condition,
+                    )
+                    .await
+            })
+        }
+    }
+
+    impl<FS> ObjectHead for CountingFs<FS>
+    where
+        FS: ObjectHead + Clone + Send + Sync + 'static,
+    {
+        fn head_metadata<'a>(
+            &'a self,
+            path: &'a Path,
+        ) -> Pin<
+            Box<
+                dyn fusio::dynamic::MaybeSendFuture<
+                        Output = Result<
+                            Option<std::collections::HashMap<String, String>>,
+                            fusio::Error,
+                        >,
+                    > + 'a,
+            >,
+        > {
+            if is_segment_path(path) {
+                self.counters
+                    .segment_meta_loads
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            Box::pin(async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                inner.head_metadata(path).await
+            })
+        }
+    }
+
+    type MeasuredManifest<FS> = Manifest<
+        VersionCodec,
+        HeadStoreImpl<CountingFs<FS>>,
+        SegmentStoreImpl<CountingFs<FS>>,
+        CheckpointStoreImpl<CountingFs<FS>>,
+        LeaseStoreImpl<CountingFs<FS>, DefaultExecutor>,
+        DefaultExecutor,
+    >;
+
+    struct ManifestFixture<FS>
+    where
+        FS: crate::manifest::ManifestFs<DefaultExecutor> + Send + Sync,
+        <FS as fusio::Fs>::File: fusio::durability::FileCommit,
+        HeadStoreImpl<CountingFs<FS>>: fusio_manifest::HeadStore,
+        SegmentStoreImpl<CountingFs<FS>>: fusio_manifest::SegmentIo,
+        CheckpointStoreImpl<CountingFs<FS>>: fusio_manifest::CheckpointStore,
+        LeaseStoreImpl<CountingFs<FS>, DefaultExecutor>: fusio_manifest::LeaseStore,
+    {
+        manifest: Arc<MeasuredManifest<FS>>,
+        table_id: TableId,
+        counters: Arc<StoreCounters>,
+        file_ids: Arc<FileIdGenerator>,
+        _tmpdir: Option<TempDir>,
+    }
+
+    async fn build_in_memory_fixture(delay: Option<Duration>) -> ManifestFixture<InMemoryFs> {
+        let root = Path::parse("manifest-cost").expect("manifest cost path");
+        ensure_manifest_dirs::<InMemoryFs>(&root)
+            .await
+            .expect("create manifest dirs");
+        let counters = Arc::new(StoreCounters::default());
+        let fs = CountingFs::new(InMemoryFs::new(), Arc::clone(&counters), delay);
+        let head = HeadStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("head.json").expect("head part")),
+        );
+        let segment = SegmentStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("segments").expect("segments part")),
+        );
+        let checkpoint = CheckpointStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("checkpoints").expect("checkpoints part")),
+        );
+        let lease = LeaseStoreImpl::new(
+            fs,
+            root.as_ref().to_string(),
+            BackoffPolicy::default(),
+            DefaultExecutor::default(),
+        );
+        let context = Arc::new(ManifestContext::new(DefaultExecutor::default()));
+        let manifest = Arc::new(Manifest::open(
+            Stores::new(head, segment, checkpoint, lease),
+            context,
+        ));
+        let file_ids = Arc::new(FileIdGenerator::default());
+        let table_id = TableId::new(&file_ids);
+        manifest
+            .init_table_head(
+                table_id,
+                TableHead {
+                    table_id,
+                    schema_version: 1,
+                    wal_floor: None,
+                    last_manifest_txn: None,
+                },
+            )
+            .await
+            .expect("init table head");
+        ManifestFixture {
+            manifest,
+            table_id,
+            counters,
+            file_ids,
+            _tmpdir: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn build_local_fixture() -> ManifestFixture<LocalFs> {
+        let tmpdir = tempfile::tempdir().expect("temp dir");
+        let root = Path::from(tmpdir.path().to_string_lossy().to_string());
+        ensure_manifest_dirs::<LocalFs>(&root)
+            .await
+            .expect("create manifest dirs");
+        let counters = Arc::new(StoreCounters::default());
+        let fs = CountingFs::new(LocalFs {}, Arc::clone(&counters), None);
+        let head = HeadStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("head.json").expect("head part")),
+        );
+        let segment = SegmentStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("segments").expect("segments part")),
+        );
+        let checkpoint = CheckpointStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("checkpoints").expect("checkpoints part")),
+        );
+        let lease = LeaseStoreImpl::new(
+            fs,
+            root.as_ref().to_string(),
+            BackoffPolicy::default(),
+            DefaultExecutor::default(),
+        );
+        let context = Arc::new(ManifestContext::new(DefaultExecutor::default()));
+        let manifest = Arc::new(Manifest::open(
+            Stores::new(head, segment, checkpoint, lease),
+            context,
+        ));
+        let file_ids = Arc::new(FileIdGenerator::default());
+        let table_id = TableId::new(&file_ids);
+        manifest
+            .init_table_head(
+                table_id,
+                TableHead {
+                    table_id,
+                    schema_version: 1,
+                    wal_floor: None,
+                    last_manifest_txn: None,
+                },
+            )
+            .await
+            .expect("init table head");
+        ManifestFixture {
+            manifest,
+            table_id,
+            counters,
+            file_ids,
+            _tmpdir: Some(tmpdir),
+        }
+    }
+
+    struct S3FixtureEnv {
+        endpoint: Option<String>,
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+        session_token: Option<String>,
+        prefix: String,
+    }
+
+    fn env_var_any(names: &[&str]) -> Option<String> {
+        names.iter().find_map(|name| std::env::var(name).ok())
+    }
+
+    fn load_s3_fixture_env() -> Option<S3FixtureEnv> {
+        let bucket = std::env::var("TONBO_S3_BUCKET").ok()?;
+        let region = env_var_any(&["TONBO_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"])
+            .unwrap_or_else(|| "us-east-1".to_string());
+        let access_key = env_var_any(&["TONBO_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"])?;
+        let secret_key = env_var_any(&["TONBO_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"])?;
+        let session_token = env_var_any(&["TONBO_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"]);
+        let endpoint = std::env::var("TONBO_S3_ENDPOINT").ok();
+        let prefix = format!(
+            "manifest-cost-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        );
+        Some(S3FixtureEnv {
+            endpoint,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            session_token,
+            prefix,
+        })
+    }
+
+    async fn build_s3_fixture() -> Option<ManifestFixture<fusio::impls::remotes::aws::fs::AmazonS3>>
+    {
+        use fusio::impls::remotes::aws::{
+            credential::AwsCredential,
+            fs::{AmazonS3, AmazonS3Builder},
+        };
+
+        let env = load_s3_fixture_env()?;
+        let mut builder = AmazonS3Builder::new(env.bucket).region(env.region);
+        if let Some(endpoint) = env.endpoint {
+            builder = builder.endpoint(endpoint);
+        }
+        builder = builder.sign_payload(true).credential(AwsCredential {
+            key_id: env.access_key,
+            secret_key: env.secret_key,
+            token: env.session_token,
+        });
+        let root = Path::parse(&env.prefix).expect("valid manifest benchmark prefix");
+        ensure_manifest_dirs::<AmazonS3>(&root)
+            .await
+            .expect("create manifest dirs");
+        let counters = Arc::new(StoreCounters::default());
+        let fs = CountingFs::new(builder.build(), Arc::clone(&counters), None);
+        let head = HeadStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("head.json").expect("head part")),
+        );
+        let segment = SegmentStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("segments").expect("segments part")),
+        );
+        let checkpoint = CheckpointStoreImpl::new(
+            fs.clone(),
+            root.child(PathPart::parse("checkpoints").expect("checkpoints part")),
+        );
+        let lease = LeaseStoreImpl::new(
+            fs,
+            root.as_ref().to_string(),
+            BackoffPolicy::default(),
+            DefaultExecutor::default(),
+        );
+        let context = Arc::new(ManifestContext::new(DefaultExecutor::default()));
+        let manifest = Arc::new(Manifest::open(
+            Stores::new(head, segment, checkpoint, lease),
+            context,
+        ));
+        let file_ids = Arc::new(FileIdGenerator::default());
+        let table_id = TableId::new(&file_ids);
+        manifest
+            .init_table_head(
+                table_id,
+                TableHead {
+                    table_id,
+                    schema_version: 1,
+                    wal_floor: None,
+                    last_manifest_txn: None,
+                },
+            )
+            .await
+            .expect("init table head");
+        Some(ManifestFixture {
+            manifest,
+            table_id,
+            counters,
+            file_ids,
+            _tmpdir: None,
+        })
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ScenarioConfig {
+        concurrency: usize,
+        logical_commits_per_worker: usize,
+    }
+
+    #[derive(Debug, Default)]
+    struct WorkerResult {
+        logical_latencies_us: Vec<u64>,
+        failed_attempt_latencies_us: Vec<u64>,
+        retries: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScenarioResult {
+        backend: &'static str,
+        concurrency: usize,
+        logical_commits: usize,
+        elapsed: Duration,
+        retries: u64,
+        attempt_failures: usize,
+        logical_latency: LatencySummary,
+        failed_attempt_latency: Option<LatencySummary>,
+        counters: StoreCounterSnapshot,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct LatencySummary {
+        avg_ms: f64,
+        p50_ms: f64,
+        p95_ms: f64,
+        p99_ms: f64,
+        max_ms: f64,
+    }
+
+    impl ScenarioResult {
+        fn throughput_ops_per_sec(&self) -> f64 {
+            self.logical_commits as f64 / self.elapsed.as_secs_f64()
+        }
+
+        fn retry_amplification(&self) -> f64 {
+            1.0 + (self.retries as f64 / self.logical_commits as f64)
+        }
+
+        fn object_ops_per_success(&self) -> f64 {
+            self.counters.total_object_ops() as f64 / self.logical_commits as f64
+        }
+    }
+
+    fn summarize_latencies_us(mut latencies_us: Vec<u64>) -> LatencySummary {
+        latencies_us.sort_unstable();
+        let len = latencies_us.len().max(1);
+        let index = |fraction: f64| -> usize { (((len - 1) as f64) * fraction).round() as usize };
+        let sum: u128 = latencies_us.iter().map(|value| u128::from(*value)).sum();
+        LatencySummary {
+            avg_ms: (sum as f64 / len as f64) / 1_000.0,
+            p50_ms: latencies_us[index(0.50)] as f64 / 1_000.0,
+            p95_ms: latencies_us[index(0.95)] as f64 / 1_000.0,
+            p99_ms: latencies_us[index(0.99)] as f64 / 1_000.0,
+            max_ms: latencies_us[len - 1] as f64 / 1_000.0,
+        }
+    }
+
+    fn benchmark_edits(seq: u64, file_ids: &FileIdGenerator) -> Vec<VersionEdit> {
+        vec![
+            VersionEdit::SetWalSegments {
+                segments: vec![WalSegmentRef::new(
+                    seq,
+                    file_ids.generate(),
+                    seq * 4,
+                    seq * 4 + 3,
+                )],
+            },
+            VersionEdit::SetTombstoneWatermark { watermark: seq },
+        ]
+    }
+
+    fn is_retryable_publish_error(err: &ManifestError) -> bool {
+        match err {
+            ManifestError::Backend(FusioManifestError::PreconditionFailed) => true,
+            ManifestError::Backend(FusioManifestError::Io(io_err)) => {
+                let msg = io_err.to_string();
+                msg.contains("not found") || msg.contains("NotFound")
+            }
+            _ => false,
+        }
+    }
+
+    async fn run_manifest_publish_scenario<FS>(
+        backend: &'static str,
+        fixture: ManifestFixture<FS>,
+        config: ScenarioConfig,
+    ) -> ScenarioResult
+    where
+        FS: crate::manifest::ManifestFs<DefaultExecutor> + Send + Sync,
+        <FS as fusio::Fs>::File: fusio::durability::FileCommit,
+        HeadStoreImpl<CountingFs<FS>>: fusio_manifest::HeadStore,
+        SegmentStoreImpl<CountingFs<FS>>: fusio_manifest::SegmentIo,
+        CheckpointStoreImpl<CountingFs<FS>>: fusio_manifest::CheckpointStore,
+        LeaseStoreImpl<CountingFs<FS>, DefaultExecutor>: fusio_manifest::LeaseStore,
+    {
+        let logical_commits = config.concurrency * config.logical_commits_per_worker;
+        let before = fixture.counters.snapshot();
+        let start_barrier = Arc::new(Barrier::new(config.concurrency));
+        let seq = Arc::new(AtomicU64::new(1));
+        let table_id = fixture.table_id;
+        let started_at = Instant::now();
+        let workers = (0..config.concurrency).map(|_| {
+            let barrier = Arc::clone(&start_barrier);
+            let manifest = Arc::clone(&fixture.manifest);
+            let file_ids = Arc::clone(&fixture.file_ids);
+            let seq = Arc::clone(&seq);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let mut result = WorkerResult::default();
+                for _ in 0..config.logical_commits_per_worker {
+                    let logical_started_at = Instant::now();
+                    loop {
+                        let attempt_started_at = Instant::now();
+                        let current_seq = seq.fetch_add(1, Ordering::Relaxed);
+                        let edits = benchmark_edits(current_seq, &file_ids);
+                        match manifest.apply_version_edits(table_id, &edits).await {
+                            Ok(_) => {
+                                let logical_elapsed = logical_started_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64;
+                                result.logical_latencies_us.push(logical_elapsed);
+                                break;
+                            }
+                            Err(err) if is_retryable_publish_error(&err) => {
+                                let failed_elapsed = attempt_started_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64;
+                                result.failed_attempt_latencies_us.push(failed_elapsed);
+                                result.retries = result.retries.saturating_add(1);
+                                tokio::task::yield_now().await;
+                            }
+                            Err(err) => panic!("unexpected manifest publish error: {err:?}"),
+                        }
+                    }
+                }
+                Ok::<WorkerResult, ManifestError>(result)
+            })
+        });
+        let worker_results = try_join_all(workers)
+            .await
+            .expect("join handles should succeed")
+            .into_iter()
+            .map(|result| result.expect("worker should not panic"))
+            .collect::<Vec<_>>();
+        let elapsed = started_at.elapsed();
+        let mut logical_latencies_us = Vec::with_capacity(logical_commits);
+        let mut failed_attempt_latencies_us = Vec::new();
+        let mut retries = 0_u64;
+        for worker in worker_results {
+            logical_latencies_us.extend(worker.logical_latencies_us);
+            failed_attempt_latencies_us.extend(worker.failed_attempt_latencies_us);
+            retries = retries.saturating_add(worker.retries);
+        }
+        let after = fixture.counters.snapshot();
+        ScenarioResult {
+            backend,
+            concurrency: config.concurrency,
+            logical_commits,
+            elapsed,
+            retries,
+            attempt_failures: failed_attempt_latencies_us.len(),
+            logical_latency: summarize_latencies_us(logical_latencies_us),
+            failed_attempt_latency: if failed_attempt_latencies_us.is_empty() {
+                None
+            } else {
+                Some(summarize_latencies_us(failed_attempt_latencies_us))
+            },
+            counters: after.saturating_sub(before),
+        }
+    }
+
+    fn print_scenario(results: &[ScenarioResult]) {
+        println!(
+            "| backend | concurrency | logical_commits | throughput_ops_s | retries | \
+             failed_attempts | retry_amp | logical_p50_ms | logical_p95_ms | failed_p50_ms | \
+             object_ops_per_success |"
+        );
+        println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+        for result in results {
+            let failed_p50_ms = result
+                .failed_attempt_latency
+                .map(|latency| format!("{:.3}", latency.p50_ms))
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "| {} | {} | {} | {:.1} | {} | {} | {:.2} | {:.3} | {:.3} | {} | {:.2} |",
+                result.backend,
+                result.concurrency,
+                result.logical_commits,
+                result.throughput_ops_per_sec(),
+                result.retries,
+                result.attempt_failures,
+                result.retry_amplification(),
+                result.logical_latency.p50_ms,
+                result.logical_latency.p95_ms,
+                failed_p50_ms,
+                result.object_ops_per_success(),
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "benchmark-style probe; run explicitly with -- --ignored --nocapture"]
+    async fn manifest_cas_cost_profile() {
+        let in_memory_configs = [
+            ScenarioConfig {
+                concurrency: 1,
+                logical_commits_per_worker: 128,
+            },
+            ScenarioConfig {
+                concurrency: 2,
+                logical_commits_per_worker: 128,
+            },
+            ScenarioConfig {
+                concurrency: 4,
+                logical_commits_per_worker: 128,
+            },
+            ScenarioConfig {
+                concurrency: 8,
+                logical_commits_per_worker: 128,
+            },
+        ];
+        let local_configs = [
+            ScenarioConfig {
+                concurrency: 1,
+                logical_commits_per_worker: 24,
+            },
+            ScenarioConfig {
+                concurrency: 2,
+                logical_commits_per_worker: 24,
+            },
+            ScenarioConfig {
+                concurrency: 4,
+                logical_commits_per_worker: 24,
+            },
+            ScenarioConfig {
+                concurrency: 8,
+                logical_commits_per_worker: 24,
+            },
+        ];
+        let mut all_results = Vec::new();
+        for config in in_memory_configs {
+            let fixture = build_in_memory_fixture(None).await;
+            all_results.push(run_manifest_publish_scenario("in_memory", fixture, config).await);
+        }
+        for config in in_memory_configs {
+            let fixture = build_in_memory_fixture(Some(Duration::from_millis(1))).await;
+            all_results
+                .push(run_manifest_publish_scenario("in_memory_rtt1ms", fixture, config).await);
+        }
+        for config in local_configs {
+            let fixture = build_local_fixture().await;
+            all_results.push(run_manifest_publish_scenario("local_fs", fixture, config).await);
+        }
+        for config in local_configs {
+            let Some(fixture) = build_s3_fixture().await else {
+                eprintln!(
+                    "skipping s3 backend in manifest_cas_cost_profile; TONBO_S3_BUCKET and \
+                     credentials were not present"
+                );
+                break;
+            };
+            all_results.push(run_manifest_publish_scenario("s3", fixture, config).await);
+        }
+
+        print_scenario(&all_results);
+
+        println!();
+        println!("Detailed per-scenario counters");
+        for result in &all_results {
+            println!(
+                "{} c={} ops={} head_loads={} head_puts={} segment_puts={} segment_lists={} \
+                 lease_puts={} lease_lists={} lease_opens={} lease_removes={} \
+                 logical_avg_ms={:.3} logical_p99_ms={:.3} logical_max_ms={:.3} failed_p99_ms={}",
+                result.backend,
+                result.concurrency,
+                result.counters.total_object_ops(),
+                result.counters.head_loads,
+                result.counters.head_puts,
+                result.counters.segment_puts,
+                result.counters.segment_lists,
+                result.counters.lease_puts,
+                result.counters.lease_lists,
+                result.counters.lease_opens,
+                result.counters.lease_removes,
+                result.logical_latency.avg_ms,
+                result.logical_latency.p99_ms,
+                result.logical_latency.max_ms,
+                result
+                    .failed_attempt_latency
+                    .map(|latency| format!("{:.3}", latency.p99_ms))
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
     }
 }
