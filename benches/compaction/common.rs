@@ -31,12 +31,13 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
 use tonbo::db::{
-    AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder,
-    LeveledPlannerConfig, ObjectSpec, S3Spec, ScanSetupProfile, WalSyncPolicy,
+    AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder, Expr,
+    LeveledPlannerConfig, ObjectSpec, S3Spec, ScalarValue, ScanSetupProfile, Version as DbVersion,
+    WalSyncPolicy,
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 8;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 9;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -58,6 +59,8 @@ const DEFAULT_BACKEND: BenchBackend = BenchBackend::Local;
 const INGEST_RETRY_MAX_ATTEMPTS: usize = 8;
 const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
 const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
+const SWMR_APPEND_SHARE_PCT: u64 = 50;
+const SWMR_OVERWRITE_SHARE_PCT: u64 = 35;
 
 #[derive(Clone)]
 pub(crate) enum BenchmarkDb {
@@ -732,6 +735,7 @@ pub(crate) enum ScenarioWorkload {
     ReadOnly,
     ReadWhileCompaction,
     WriteThroughput,
+    SwmrMixed,
 }
 
 #[derive(Clone)]
@@ -761,6 +765,164 @@ impl WriteWorkloadState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwmrReaderClass {
+    HeadLight,
+    HeadHeavy,
+    PinnedLight,
+    PinnedHeavy,
+}
+
+impl SwmrReaderClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HeadLight => "head_light",
+            Self::HeadHeavy => "head_heavy",
+            Self::PinnedLight => "pinned_light",
+            Self::PinnedHeavy => "pinned_heavy",
+        }
+    }
+
+    fn is_pinned(self) -> bool {
+        matches!(self, Self::PinnedLight | Self::PinnedHeavy)
+    }
+
+    fn is_light(self) -> bool {
+        matches!(self, Self::HeadLight | Self::PinnedLight)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SwmrSetupDescriptor {
+    pub(crate) logical_target_bytes: u64,
+    pub(crate) estimated_row_bytes: u64,
+    pub(crate) estimated_preload_logical_bytes: u64,
+    pub(crate) estimated_steady_logical_bytes: u64,
+    pub(crate) payload_bytes: usize,
+    pub(crate) preload_batches: usize,
+    pub(crate) steady_batches: usize,
+    pub(crate) writer_batches_per_step: usize,
+    pub(crate) pinned_snapshot_ts: u64,
+    pub(crate) reader_count: usize,
+    pub(crate) light_scan_limit: usize,
+    pub(crate) heavy_scan_limit: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct SwmrWorkloadState {
+    schema: SchemaRef,
+    light_projection: SchemaRef,
+    rows_per_batch: usize,
+    payload_bytes: usize,
+    preload_batches: usize,
+    steady_batches: usize,
+    writer_batches_per_step: usize,
+    pinned_version: DbVersion,
+    seed: u64,
+    next_step: Arc<AtomicU64>,
+    next_append_key: Arc<AtomicU64>,
+    light_scan_limit: usize,
+    heavy_scan_limit: usize,
+    estimated_row_bytes: u64,
+    logical_target_bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SwmrWorkloadParams {
+    pub(crate) rows_per_batch: usize,
+    pub(crate) payload_bytes: usize,
+    pub(crate) preload_batches: usize,
+    pub(crate) steady_batches: usize,
+    pub(crate) writer_batches_per_step: usize,
+    pub(crate) seed: u64,
+}
+
+impl SwmrWorkloadState {
+    pub(crate) fn new(
+        schema: SchemaRef,
+        light_projection: SchemaRef,
+        pinned_version: DbVersion,
+        params: SwmrWorkloadParams,
+    ) -> Self {
+        let estimated_row_bytes = estimate_swmr_row_bytes(params.payload_bytes);
+        let next_append_key = params
+            .preload_batches
+            .checked_mul(params.rows_per_batch)
+            .and_then(|rows| u64::try_from(rows).ok())
+            .unwrap_or(u64::MAX);
+        let total_rows = params
+            .preload_batches
+            .saturating_add(params.steady_batches)
+            .saturating_mul(params.rows_per_batch);
+        Self {
+            schema,
+            light_projection,
+            rows_per_batch: params.rows_per_batch,
+            payload_bytes: params.payload_bytes,
+            preload_batches: params.preload_batches,
+            steady_batches: params.steady_batches,
+            writer_batches_per_step: params.writer_batches_per_step.max(1),
+            pinned_version,
+            seed: params.seed,
+            next_step: Arc::new(AtomicU64::new(0)),
+            next_append_key: Arc::new(AtomicU64::new(next_append_key)),
+            light_scan_limit: params.rows_per_batch.max(1),
+            heavy_scan_limit: params.rows_per_batch.saturating_mul(8).max(1),
+            estimated_row_bytes,
+            logical_target_bytes: estimated_row_bytes
+                .saturating_mul(u64::try_from(total_rows).unwrap_or(u64::MAX)),
+        }
+    }
+
+    pub(crate) fn with_scan_limits(
+        mut self,
+        light_scan_limit: usize,
+        heavy_scan_limit: usize,
+    ) -> Self {
+        self.light_scan_limit = light_scan_limit.max(1);
+        self.heavy_scan_limit = heavy_scan_limit.max(1);
+        self
+    }
+
+    pub(crate) fn with_logical_target_bytes(mut self, logical_target_bytes: u64) -> Self {
+        self.logical_target_bytes = logical_target_bytes;
+        self
+    }
+
+    pub(crate) fn setup_descriptor(&self) -> SwmrSetupDescriptor {
+        let preload_rows = self.preload_batches.saturating_mul(self.rows_per_batch);
+        let steady_rows = self.steady_batches.saturating_mul(self.rows_per_batch);
+        SwmrSetupDescriptor {
+            logical_target_bytes: self.logical_target_bytes,
+            estimated_row_bytes: self.estimated_row_bytes,
+            estimated_preload_logical_bytes: self
+                .estimated_row_bytes
+                .saturating_mul(u64::try_from(preload_rows).unwrap_or(u64::MAX)),
+            estimated_steady_logical_bytes: self
+                .estimated_row_bytes
+                .saturating_mul(u64::try_from(steady_rows).unwrap_or(u64::MAX)),
+            payload_bytes: self.payload_bytes,
+            preload_batches: self.preload_batches,
+            steady_batches: self.steady_batches,
+            writer_batches_per_step: self.writer_batches_per_step,
+            pinned_snapshot_ts: self.pinned_version.timestamp.get(),
+            reader_count: 4,
+            light_scan_limit: self.light_scan_limit,
+            heavy_scan_limit: self.heavy_scan_limit,
+        }
+    }
+
+    fn reader_classes(&self) -> [SwmrReaderClass; 4] {
+        [
+            SwmrReaderClass::HeadLight,
+            SwmrReaderClass::HeadHeavy,
+            SwmrReaderClass::PinnedLight,
+            SwmrReaderClass::PinnedHeavy,
+        ]
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ScenarioState {
     pub(crate) scenario_id: &'static str,
@@ -778,6 +940,7 @@ pub(crate) struct ScenarioState {
     pub(crate) volume_before_compaction: StorageVolumeArtifact,
     pub(crate) volume_ready: StorageVolumeArtifact,
     pub(crate) write_state: Option<WriteWorkloadState>,
+    pub(crate) swmr_state: Option<SwmrWorkloadState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -850,6 +1013,7 @@ struct ScenarioSetupArtifact {
     volume_before_compaction: StorageVolumeArtifact,
     volume_ready: StorageVolumeArtifact,
     io: IoCountersArtifact,
+    swmr: Option<SwmrSetupDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -862,6 +1026,7 @@ struct ScenarioSummaryArtifact {
     read_path_latency_ns: Option<ReadPathLatencySummary>,
     read_path_internal_ns: Option<ReadPathInternalSummary>,
     io: IoCountersArtifact,
+    swmr: Option<SwmrSummaryArtifact>,
 }
 
 #[derive(Debug, Serialize)]
@@ -887,6 +1052,7 @@ struct ScenarioMeasurement {
     rows_processed: u64,
     read_path: Option<ReadPathAggregate>,
     io: IoCountersArtifact,
+    swmr: Option<SwmrAggregate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -906,6 +1072,22 @@ struct ReadPathInternalSummary {
     mean_build_scan_streams_ns: f64,
     mean_merge_init_ns: f64,
     mean_package_init_ns: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct SwmrSummaryArtifact {
+    writer_rows_processed: u64,
+    writer_latency_ns: LatencySummary,
+    readers: Vec<SwmrReaderSummaryArtifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct SwmrReaderSummaryArtifact {
+    class: SwmrReaderClass,
+    rows_processed: u64,
+    latency_ns: LatencySummary,
+    read_path_latency_ns: ReadPathLatencySummary,
+    read_path_internal_ns: ReadPathInternalSummary,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1008,9 +1190,109 @@ impl ReadPathAggregate {
     }
 }
 
+#[derive(Default)]
+struct SwmrAggregate {
+    writer_rows_processed: u64,
+    writer_latencies_ns: Vec<u64>,
+    readers: Vec<SwmrReaderAggregate>,
+}
+
+impl SwmrAggregate {
+    fn record(&mut self, result: SwmrOperationResult) {
+        self.writer_rows_processed = self
+            .writer_rows_processed
+            .saturating_add(u64::try_from(result.writer_rows).unwrap_or(u64::MAX));
+        self.writer_latencies_ns.push(result.writer_latency_ns);
+        for reader in result.readers {
+            if let Some(existing) = self
+                .readers
+                .iter_mut()
+                .find(|aggregate| aggregate.class == reader.class)
+            {
+                existing.record(reader);
+            } else {
+                let mut aggregate = SwmrReaderAggregate::new(reader.class);
+                aggregate.record(reader);
+                self.readers.push(aggregate);
+            }
+        }
+        self.readers.sort_by_key(|reader| match reader.class {
+            SwmrReaderClass::HeadLight => 0,
+            SwmrReaderClass::HeadHeavy => 1,
+            SwmrReaderClass::PinnedLight => 2,
+            SwmrReaderClass::PinnedHeavy => 3,
+        });
+    }
+
+    fn to_summary(&self) -> Option<SwmrSummaryArtifact> {
+        if self.writer_latencies_ns.is_empty() && self.readers.is_empty() {
+            return None;
+        }
+        Some(SwmrSummaryArtifact {
+            writer_rows_processed: self.writer_rows_processed,
+            writer_latency_ns: latency_summary(&self.writer_latencies_ns),
+            readers: self
+                .readers
+                .iter()
+                .filter_map(SwmrReaderAggregate::to_summary)
+                .collect(),
+        })
+    }
+}
+
+struct SwmrReaderAggregate {
+    class: SwmrReaderClass,
+    rows_processed: u64,
+    latencies_ns: Vec<u64>,
+    read_path: ReadPathAggregate,
+}
+
+impl SwmrReaderAggregate {
+    fn new(class: SwmrReaderClass) -> Self {
+        Self {
+            class,
+            rows_processed: 0,
+            latencies_ns: Vec::new(),
+            read_path: ReadPathAggregate::default(),
+        }
+    }
+
+    fn record(&mut self, result: SwmrReaderOperationResult) {
+        self.rows_processed = self
+            .rows_processed
+            .saturating_add(u64::try_from(result.rows).unwrap_or(u64::MAX));
+        self.latencies_ns.push(result.latency_ns);
+        self.read_path.record(result.read_path);
+    }
+
+    fn to_summary(&self) -> Option<SwmrReaderSummaryArtifact> {
+        Some(SwmrReaderSummaryArtifact {
+            class: self.class,
+            rows_processed: self.rows_processed,
+            latency_ns: latency_summary(&self.latencies_ns),
+            read_path_latency_ns: self.read_path.to_summary()?,
+            read_path_internal_ns: self.read_path.to_internal_summary()?,
+        })
+    }
+}
+
 struct OperationResult {
     rows: usize,
     read_path: Option<ReadPathBreakdown>,
+    swmr: Option<SwmrOperationResult>,
+}
+
+struct SwmrOperationResult {
+    writer_rows: usize,
+    writer_latency_ns: u64,
+    readers: Vec<SwmrReaderOperationResult>,
+}
+
+struct SwmrReaderOperationResult {
+    class: SwmrReaderClass,
+    rows: usize,
+    latency_ns: u64,
+    read_path: ReadPathBreakdown,
 }
 
 impl ScenarioDimensionsArtifact {
@@ -1052,6 +1334,7 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
             Ok(OperationResult {
                 rows,
                 read_path: Some(read_path),
+                swmr: None,
             })
         }
         ScenarioWorkload::ReadWhileCompaction => {
@@ -1069,6 +1352,7 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
             Ok(OperationResult {
                 rows,
                 read_path: Some(read_path),
+                swmr: None,
             })
         }
         ScenarioWorkload::WriteThroughput => {
@@ -1082,6 +1366,26 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
             Ok(OperationResult {
                 rows,
                 read_path: None,
+                swmr: None,
+            })
+        }
+        ScenarioWorkload::SwmrMixed => {
+            let swmr_state = scenario.swmr_state.as_ref().ok_or_else(|| {
+                BenchError::Message(format!(
+                    "scenario `{}` missing swmr workload state",
+                    scenario.benchmark_id
+                ))
+            })?;
+            let result = run_swmr_mixed_operation(&scenario.db, swmr_state).await?;
+            let reader_rows = result
+                .readers
+                .iter()
+                .fold(0usize, |acc, reader| acc.saturating_add(reader.rows));
+            let rows = result.writer_rows.saturating_add(reader_rows);
+            Ok(OperationResult {
+                rows,
+                read_path: None,
+                swmr: Some(result),
             })
         }
     }
@@ -1121,6 +1425,349 @@ async fn ingest_next_write_batch(
     Err(BenchError::Message(
         "ingest retry loop exited unexpectedly".to_string(),
     ))
+}
+
+async fn run_swmr_mixed_operation(
+    db: &BenchmarkDb,
+    state: &SwmrWorkloadState,
+) -> Result<SwmrOperationResult, BenchError> {
+    let step_idx = state.next_step.fetch_add(1, Ordering::Relaxed);
+    let writer_started = Instant::now();
+    let mut writer_rows = 0usize;
+    for batch_offset in 0..state.writer_batches_per_step {
+        let batch_idx = step_idx
+            .saturating_mul(u64::try_from(state.writer_batches_per_step).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(batch_offset).unwrap_or(u64::MAX));
+        let batch = build_swmr_mixed_batch(state, batch_idx)?;
+        let ingest_result = match db {
+            BenchmarkDb::Local(inner) => inner.ingest_with_tombstones(batch.0, batch.1).await,
+            BenchmarkDb::ObjectStore(inner) => inner.ingest_with_tombstones(batch.0, batch.1).await,
+        };
+        ingest_result?;
+        writer_rows = writer_rows.saturating_add(state.rows_per_batch);
+    }
+    let writer_latency_ns = duration_ns_u64(writer_started.elapsed());
+
+    let mut readers = Vec::with_capacity(4);
+    for class in state.reader_classes() {
+        readers.push(run_swmr_reader(db, state, class).await?);
+    }
+
+    Ok(SwmrOperationResult {
+        writer_rows,
+        writer_latency_ns,
+        readers,
+    })
+}
+
+async fn run_swmr_reader(
+    db: &BenchmarkDb,
+    state: &SwmrWorkloadState,
+    class: SwmrReaderClass,
+) -> Result<SwmrReaderOperationResult, BenchError> {
+    match db {
+        BenchmarkDb::Local(inner) => run_swmr_reader_local(inner, state, class).await,
+        BenchmarkDb::ObjectStore(inner) => run_swmr_reader_object_store(inner, state, class).await,
+    }
+}
+
+async fn run_swmr_reader_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    state: &SwmrWorkloadState,
+    class: SwmrReaderClass,
+) -> Result<SwmrReaderOperationResult, BenchError> {
+    let started = Instant::now();
+    let predicate = swmr_predicate(class);
+    let projection = if class.is_light() {
+        Some(Arc::clone(&state.light_projection))
+    } else {
+        None
+    };
+    let limit = if class.is_light() {
+        state.light_scan_limit
+    } else {
+        state.heavy_scan_limit
+    };
+    let (rows, read_path) = if class.is_pinned() {
+        let snapshot = db
+            .snapshot_at(state.pinned_version.timestamp)
+            .await
+            .map_err(|err| {
+                BenchError::Message(format!(
+                    "swmr pinned snapshot resolution failed for {}: {err}",
+                    class.as_str()
+                ))
+            })?;
+        let plan_started = Instant::now();
+        let (mut stream, profile) = {
+            let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+            if let Some(projection) = projection {
+                builder = builder.projection(projection);
+            }
+            builder.stream_with_profile().await
+        }
+        .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        let prepare_ns = duration_ns_u64(plan_started.elapsed());
+        let consume_started = Instant::now();
+        let mut rows = 0usize;
+        let mut batch_count = 0usize;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+            rows = rows.saturating_add(batch.num_rows());
+            batch_count = batch_count.saturating_add(1);
+        }
+        (
+            rows,
+            ReadPathBreakdown {
+                prepare_ns,
+                consume_ns: duration_ns_u64(consume_started.elapsed()),
+                batch_count,
+                internal: internal_breakdown(profile),
+            },
+        )
+    } else {
+        execute_scan_profiled_local(db, predicate, projection, limit).await?
+    };
+    Ok(SwmrReaderOperationResult {
+        class,
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn run_swmr_reader_object_store(
+    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    state: &SwmrWorkloadState,
+    class: SwmrReaderClass,
+) -> Result<SwmrReaderOperationResult, BenchError> {
+    let started = Instant::now();
+    let predicate = swmr_predicate(class);
+    let projection = if class.is_light() {
+        Some(Arc::clone(&state.light_projection))
+    } else {
+        None
+    };
+    let limit = if class.is_light() {
+        state.light_scan_limit
+    } else {
+        state.heavy_scan_limit
+    };
+    let (rows, read_path) = if class.is_pinned() {
+        let snapshot = db
+            .snapshot_at(state.pinned_version.timestamp)
+            .await
+            .map_err(|err| {
+                BenchError::Message(format!(
+                    "swmr pinned snapshot resolution failed for {}: {err}",
+                    class.as_str()
+                ))
+            })?;
+        let plan_started = Instant::now();
+        let (mut stream, profile) = {
+            let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+            if let Some(projection) = projection {
+                builder = builder.projection(projection);
+            }
+            builder.stream_with_profile().await
+        }
+        .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        let prepare_ns = duration_ns_u64(plan_started.elapsed());
+        let consume_started = Instant::now();
+        let mut rows = 0usize;
+        let mut batch_count = 0usize;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+            rows = rows.saturating_add(batch.num_rows());
+            batch_count = batch_count.saturating_add(1);
+        }
+        (
+            rows,
+            ReadPathBreakdown {
+                prepare_ns,
+                consume_ns: duration_ns_u64(consume_started.elapsed()),
+                batch_count,
+                internal: internal_breakdown(profile),
+            },
+        )
+    } else {
+        execute_scan_profiled_object_store(db, predicate, projection, limit).await?
+    };
+    Ok(SwmrReaderOperationResult {
+        class,
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn execute_scan_profiled_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let (mut stream, profile) = {
+        let mut builder = db.scan().filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream_with_profile().await
+    }
+    .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns: duration_ns_u64(consume_started.elapsed()),
+            batch_count,
+            internal: internal_breakdown(profile),
+        },
+    ))
+}
+
+async fn execute_scan_profiled_object_store(
+    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let (mut stream, profile) = {
+        let mut builder = db.scan().filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream_with_profile().await
+    }
+    .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns: duration_ns_u64(consume_started.elapsed()),
+            batch_count,
+            internal: internal_breakdown(profile),
+        },
+    ))
+}
+
+fn swmr_predicate(class: SwmrReaderClass) -> Expr {
+    match class {
+        SwmrReaderClass::HeadLight | SwmrReaderClass::PinnedLight => Expr::and(vec![
+            Expr::gt_eq("id", ScalarValue::from("hot-00000000")),
+            Expr::lt("id", ScalarValue::from("hot-99999999")),
+        ]),
+        SwmrReaderClass::HeadHeavy | SwmrReaderClass::PinnedHeavy => Expr::and(vec![
+            Expr::gt_eq("id", ScalarValue::from("warm-00000000")),
+            Expr::lt("id", ScalarValue::from("zzzzzzzz")),
+        ]),
+    }
+}
+
+fn build_swmr_mixed_batch(
+    state: &SwmrWorkloadState,
+    batch_idx: u64,
+) -> Result<(RecordBatch, Vec<bool>), BenchError> {
+    let mut ids = Vec::with_capacity(state.rows_per_batch);
+    let mut values = Vec::with_capacity(state.rows_per_batch);
+    let mut payloads = Vec::with_capacity(state.rows_per_batch);
+    let mut tombstones = Vec::with_capacity(state.rows_per_batch);
+
+    for row_idx in 0..state.rows_per_batch {
+        let ordinal = batch_idx
+            .saturating_mul(u64::try_from(state.rows_per_batch).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(row_idx).unwrap_or(u64::MAX));
+        let selector = deterministic_mix_u64(ordinal, state.seed) % 100;
+        let (id, tombstone) = if selector < SWMR_APPEND_SHARE_PCT {
+            let key = state.next_append_key.fetch_add(1, Ordering::Relaxed);
+            (format!("append-{key:08}"), false)
+        } else if selector < SWMR_APPEND_SHARE_PCT + SWMR_OVERWRITE_SHARE_PCT {
+            (swmr_existing_key(ordinal, state.seed, true), false)
+        } else {
+            (swmr_existing_key(ordinal, state.seed, false), true)
+        };
+        ids.push(id);
+        values.push(
+            i64::try_from(deterministic_mix_u64(ordinal ^ 0x51_4D_57_52, state.seed))
+                .unwrap_or(i64::MAX),
+        );
+        payloads.push(swmr_payload(state.payload_bytes, ordinal));
+        tombstones.push(tombstone);
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&state.schema),
+        vec![
+            Arc::new(StringArray::from(ids)) as _,
+            Arc::new(Int64Array::from(values)) as _,
+            Arc::new(StringArray::from(payloads)) as _,
+        ],
+    )?;
+    Ok((batch, tombstones))
+}
+
+fn swmr_existing_key(ordinal: u64, seed: u64, allow_warm: bool) -> String {
+    let mixed = deterministic_mix_u64(ordinal ^ 0xC0_11_4D, seed);
+    let hot_slot = mixed % 16_384;
+    if allow_warm && mixed % 10 >= 7 {
+        let warm_slot = mixed % 32_768;
+        format!("warm-{warm_slot:08}")
+    } else {
+        format!("hot-{hot_slot:08}")
+    }
+}
+
+fn swmr_payload(payload_bytes: usize, ordinal: u64) -> String {
+    if payload_bytes == 0 {
+        return String::new();
+    }
+    let prefix = format!("{ordinal:016x}");
+    if payload_bytes <= prefix.len() {
+        return prefix[..payload_bytes].to_string();
+    }
+    let mut payload = String::with_capacity(payload_bytes);
+    payload.push_str(&prefix);
+    while payload.len() < payload_bytes {
+        payload.push('p');
+    }
+    payload.truncate(payload_bytes);
+    payload
+}
+
+fn estimate_swmr_row_bytes(payload_bytes: usize) -> u64 {
+    let fixed = 32u64;
+    fixed.saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX))
+}
+
+fn deterministic_mix_u64(ordinal: u64, seed: u64) -> u64 {
+    ordinal
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(seed.rotate_left(13))
+        .wrapping_add(0xA11C_E5D5)
 }
 
 fn is_retryable_ingest_error(err: &DBError) -> bool {
@@ -1280,6 +1927,21 @@ pub(crate) fn print_directional_report(artifact: &BenchmarkArtifact, config: &Re
 }
 
 pub(crate) fn benchmark_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int64, false),
+    ]))
+}
+
+pub(crate) fn swmr_benchmark_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int64, false),
+        Field::new("payload", DataType::Utf8, false),
+    ]))
+}
+
+pub(crate) fn swmr_light_projection_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int64, false),
@@ -1515,6 +2177,30 @@ pub(crate) async fn ingest_workload(
     Ok(())
 }
 
+pub(crate) async fn preload_swmr_workload(
+    db: &BenchmarkDb,
+    schema: &SchemaRef,
+    rows_per_batch: usize,
+    payload_bytes: usize,
+    preload_batches: usize,
+    seed: u64,
+) -> Result<(), BenchError> {
+    for batch_idx in 0..preload_batches {
+        let batch = build_swmr_preload_batch(
+            schema,
+            rows_per_batch,
+            payload_bytes,
+            u64::try_from(batch_idx).unwrap_or(u64::MAX),
+            seed,
+        )?;
+        match db {
+            BenchmarkDb::Local(inner) => inner.ingest(batch).await?,
+            BenchmarkDb::ObjectStore(inner) => inner.ingest(batch).await?,
+        }
+    }
+    Ok(())
+}
+
 fn build_batch(
     schema: &SchemaRef,
     rows_per_batch: usize,
@@ -1542,6 +2228,48 @@ fn build_batch(
         ],
     )
     .map_err(BenchError::from)
+}
+
+fn build_swmr_preload_batch(
+    schema: &SchemaRef,
+    rows_per_batch: usize,
+    payload_bytes: usize,
+    batch_idx: u64,
+    seed: u64,
+) -> Result<RecordBatch, BenchError> {
+    let mut ids = Vec::with_capacity(rows_per_batch);
+    let mut values = Vec::with_capacity(rows_per_batch);
+    let mut payloads = Vec::with_capacity(rows_per_batch);
+
+    for row_idx in 0..rows_per_batch {
+        let ordinal = batch_idx
+            .saturating_mul(u64::try_from(rows_per_batch).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(row_idx).unwrap_or(u64::MAX));
+        let key_idx = usize::try_from(ordinal).unwrap_or(usize::MAX);
+        ids.push(swmr_preload_key(key_idx));
+        values.push(i64::try_from(deterministic_mix_u64(ordinal, seed)).unwrap_or(i64::MAX));
+        payloads.push(swmr_payload(payload_bytes, ordinal));
+    }
+
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(StringArray::from(ids)) as _,
+            Arc::new(Int64Array::from(values)) as _,
+            Arc::new(StringArray::from(payloads)) as _,
+        ],
+    )
+    .map_err(BenchError::from)
+}
+
+fn swmr_preload_key(index: usize) -> String {
+    if index < 16_384 {
+        format!("hot-{index:08}")
+    } else if index < 49_152 {
+        format!("warm-{:08}", index - 16_384)
+    } else {
+        format!("cold-{:08}", index - 49_152)
+    }
 }
 
 fn deterministic_key_slot(global_idx: usize, key_space: usize, seed: u64) -> usize {
@@ -1772,6 +2500,7 @@ fn measure_scenario(
         let mut latencies_ns = Vec::with_capacity(iterations);
         let mut rows_processed = 0u64;
         let mut read_path = ReadPathAggregate::default();
+        let mut swmr = SwmrAggregate::default();
         let started = Instant::now();
         for _ in 0..iterations {
             let op_started = Instant::now();
@@ -1779,6 +2508,9 @@ fn measure_scenario(
             rows_processed = rows_processed.saturating_add(usize_to_u64(result.rows));
             if let Some(breakdown) = result.read_path {
                 read_path.record(breakdown);
+            }
+            if let Some(swmr_result) = result.swmr {
+                swmr.record(swmr_result);
             }
             black_box(result.rows);
             latencies_ns.push(duration_ns_u64(op_started.elapsed()));
@@ -1794,6 +2526,11 @@ fn measure_scenario(
                 None
             },
             io: scenario.io_probe.snapshot(),
+            swmr: if !swmr.writer_latencies_ns.is_empty() || !swmr.readers.is_empty() {
+                Some(swmr)
+            } else {
+                None
+            },
         })
     })
 }
@@ -1847,6 +2584,10 @@ fn to_scenario_artifact(
             volume_before_compaction: scenario.volume_before_compaction.clone(),
             volume_ready: scenario.volume_ready.clone(),
             io: scenario.setup_io.clone(),
+            swmr: scenario
+                .swmr_state
+                .as_ref()
+                .map(SwmrWorkloadState::setup_descriptor),
         },
         summary: ScenarioSummaryArtifact {
             iterations: measurement.iterations,
@@ -1857,6 +2598,10 @@ fn to_scenario_artifact(
             read_path_latency_ns: read_path_latency,
             read_path_internal_ns: read_path_internal,
             io: measurement.io,
+            swmr: measurement
+                .swmr
+                .as_ref()
+                .and_then(SwmrAggregate::to_summary),
         },
     }
 }
