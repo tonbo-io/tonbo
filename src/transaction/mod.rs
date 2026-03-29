@@ -79,6 +79,11 @@ impl Snapshot {
         self.read_view
     }
 
+    /// MVCC read timestamp captured when the snapshot was created.
+    pub fn read_timestamp(&self) -> Timestamp {
+        self.read_view.read_ts()
+    }
+
     /// Manifest head describing the table state visible to the snapshot.
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn head(&self) -> &TableHead {

@@ -10,14 +10,15 @@ mod common;
 use common::{
     BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
     ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
-    ScenarioWorkload, StorageVolumeArtifact, SwmrWorkloadParams, SwmrWorkloadState, VersionSummary,
-    WriteWorkloadState, artifact_path, benchmark_schema, build_artifact, build_run_id,
-    build_runtime, ingest_workload, latest_version_summary, latest_version_summary_if_any,
-    open_benchmark_db, open_object_store_benchmark_db, preload_swmr_workload,
-    print_directional_report, read_all_rows, run_criterion, scenario_root,
+    ScenarioWorkload, StorageVolumeArtifact, SwmrReaderClass, SwmrReaderExpectationArtifact,
+    SwmrWorkloadParams, SwmrWorkloadState, VersionSummary, WriteWorkloadState, artifact_path,
+    benchmark_schema, build_artifact, build_run_id, build_runtime, cleanup_local_storage_volume,
+    cleanup_object_store_storage_volume, ingest_workload, latest_version_summary,
+    latest_version_summary_if_any, open_benchmark_db, open_object_store_benchmark_db,
+    preload_swmr_workload, print_directional_report, read_all_rows, run_criterion, scenario_root,
     snapshot_local_storage_volume, snapshot_object_store_storage_volume, swmr_benchmark_schema,
-    swmr_light_projection_schema, wait_for_compaction_quiesced, wait_for_first_compaction_observed,
-    write_artifact_json,
+    swmr_light_projection_schema, swmr_reader_observation_for_snapshot,
+    wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
 };
 
 #[derive(Clone)]
@@ -168,6 +169,10 @@ fn compaction_local(c: &mut Criterion) {
     print_directional_report(&artifact, &config);
 
     run_criterion(c, &runtime, &scenarios, config.criterion_sample_size);
+
+    if let Err(err) = runtime.block_on(cleanup_scenarios(&scenarios, &storage, &run_id)) {
+        eprintln!("tonbo benchmark cleanup warning: {err}");
+    }
 }
 
 async fn prepare_scenarios(
@@ -759,7 +764,112 @@ async fn prepare_swmr_gb_scale_mixed(
         );
     };
     ensure_ssts_present(scenario_id, version_before_compaction)?;
-    let pinned_version = latest_version_info(&db).await?;
+    let pinned_manifest_version = latest_version_info(&db).await?;
+    let pinned_snapshot = match &db {
+        common::BenchmarkDb::Local(inner) => inner.begin_snapshot().await,
+        common::BenchmarkDb::ObjectStore(inner) => inner.begin_snapshot().await,
+    }
+    .map_err(|err| BenchError::Message(format!("begin_snapshot failed: {err}")))?;
+    let mut reader_expectations = Vec::new();
+    let mut manifest_reconstruction_observations = Vec::new();
+    let reconstructed_snapshot = match &db {
+        common::BenchmarkDb::Local(inner) => {
+            inner.snapshot_at(pinned_manifest_version.timestamp).await
+        }
+        common::BenchmarkDb::ObjectStore(inner) => {
+            inner.snapshot_at(pinned_manifest_version.timestamp).await
+        }
+    }
+    .map_err(|err| {
+        BenchError::Message(format!(
+            "swmr pinned manifest reconstruction failed at ts {}: {err}",
+            pinned_manifest_version.timestamp.get()
+        ))
+    })?;
+    for class in [
+        SwmrReaderClass::HeadLight,
+        SwmrReaderClass::HeadHeavy,
+        SwmrReaderClass::PinnedLight,
+        SwmrReaderClass::PinnedHeavy,
+    ] {
+        let expected_observation = swmr_reader_observation_for_snapshot(
+            &db,
+            &pinned_snapshot,
+            class,
+            &light_projection,
+            swmr.light_scan_limit,
+            swmr.heavy_scan_limit,
+        )
+        .await?;
+        reader_expectations.push(SwmrReaderExpectationArtifact {
+            class,
+            key_band: class.key_band(),
+            validation_model: class.validation_model(),
+            expected_rows_per_scan: expected_observation.rows_per_scan,
+            expected_first_key: expected_observation.first_key,
+            expected_last_key: expected_observation.last_key,
+            expected_key_fingerprint: expected_observation.key_fingerprint,
+        });
+
+        let reconstructed_observation = swmr_reader_observation_for_snapshot(
+            &db,
+            &reconstructed_snapshot,
+            class,
+            &light_projection,
+            swmr.light_scan_limit,
+            swmr.heavy_scan_limit,
+        )
+        .await?;
+        let expectation = reader_expectations.last().ok_or_else(|| {
+            BenchError::Message(format!(
+                "missing setup expectation immediately after building `{}`",
+                class.as_str()
+            ))
+        })?;
+        let rows_match_expected =
+            reconstructed_observation.rows_per_scan == expectation.expected_rows_per_scan;
+        let first_key_matches_expected =
+            reconstructed_observation.first_key.as_ref() == expectation.expected_first_key.as_ref();
+        let last_key_matches_expected =
+            reconstructed_observation.last_key.as_ref() == expectation.expected_last_key.as_ref();
+        let fingerprint_matches_expected =
+            reconstructed_observation.key_fingerprint == expectation.expected_key_fingerprint;
+        let valid = match expectation.validation_model {
+            common::SwmrReaderValidationModel::ExactShapeStable => {
+                rows_match_expected
+                    && reconstructed_observation.all_keys_in_expected_band
+                    && first_key_matches_expected
+                    && last_key_matches_expected
+                    && fingerprint_matches_expected
+            }
+            common::SwmrReaderValidationModel::CountAndKeyBand => {
+                rows_match_expected && reconstructed_observation.all_keys_in_expected_band
+            }
+        };
+        manifest_reconstruction_observations.push(common::SwmrReaderObservationArtifact {
+            class,
+            rows_per_scan: reconstructed_observation.rows_per_scan,
+            first_key: reconstructed_observation.first_key,
+            last_key: reconstructed_observation.last_key,
+            key_fingerprint: reconstructed_observation.key_fingerprint,
+            rows_match_expected,
+            all_keys_in_expected_band: reconstructed_observation.all_keys_in_expected_band,
+            first_key_matches_expected,
+            last_key_matches_expected,
+            fingerprint_matches_expected,
+            valid,
+        });
+    }
+    for expectation in &reader_expectations {
+        if expectation.expected_rows_per_scan == 0 {
+            return Err(BenchError::Message(format!(
+                "swmr setup invalid: reader `{}` matched 0 rows in the held pinned snapshot at ts \
+                 {}",
+                expectation.class.as_str(),
+                pinned_snapshot.read_timestamp().get()
+            )));
+        }
+    }
     let version_ready = latest_version_summary(&db).await?;
     let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
@@ -768,7 +878,10 @@ async fn prepare_swmr_gb_scale_mixed(
     let swmr_state = SwmrWorkloadState::new(
         Arc::clone(&schema),
         Arc::clone(&light_projection),
-        pinned_version,
+        pinned_snapshot,
+        pinned_manifest_version,
+        reader_expectations,
+        manifest_reconstruction_observations,
         SwmrWorkloadParams {
             rows_per_batch: swmr.rows_per_batch,
             payload_bytes: swmr.payload_bytes,
@@ -824,6 +937,33 @@ async fn latest_version_info(db: &common::BenchmarkDb) -> Result<tonbo::db::Vers
         .into_iter()
         .next()
         .ok_or_else(|| BenchError::Message("list_versions returned no versions".to_string()))
+}
+
+async fn cleanup_scenarios(
+    scenarios: &[ScenarioState],
+    storage: &ScenarioStorage,
+    run_id: &str,
+) -> Result<(), BenchError> {
+    for scenario in scenarios {
+        match storage.backend {
+            BenchBackend::Local => {
+                let root = scenario_root(run_id, &scenario.benchmark_id);
+                cleanup_local_storage_volume(&root).await?;
+            }
+            BenchBackend::ObjectStore => {
+                let Some(object_store) = &storage.object_store else {
+                    return Err(BenchError::Message(
+                        "object_store backend selected without resolved object-store config for \
+                         cleanup"
+                            .to_string(),
+                    ));
+                };
+                let spec = object_store.object_spec(run_id, &scenario.benchmark_id);
+                cleanup_object_store_storage_volume(&spec).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn open_scenario_db(

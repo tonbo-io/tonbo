@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     env,
     path::{Path, PathBuf},
     pin::Pin,
@@ -32,12 +32,12 @@ use thiserror::Error;
 use tokio::{runtime::Runtime, time::sleep};
 use tonbo::db::{
     AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder, Expr,
-    LeveledPlannerConfig, ObjectSpec, S3Spec, ScalarValue, ScanSetupProfile, Version as DbVersion,
-    WalSyncPolicy,
+    LeveledPlannerConfig, ObjectSpec, S3Spec, ScalarValue, ScanSetupProfile,
+    Snapshot as DbSnapshot, Version as DbVersion, WalSyncPolicy,
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 9;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 10;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -61,6 +61,8 @@ const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
 const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
 const SWMR_APPEND_SHARE_PCT: u64 = 50;
 const SWMR_OVERWRITE_SHARE_PCT: u64 = 35;
+const SWMR_FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const SWMR_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[derive(Clone)]
 pub(crate) enum BenchmarkDb {
@@ -775,7 +777,7 @@ pub(crate) enum SwmrReaderClass {
 }
 
 impl SwmrReaderClass {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::HeadLight => "head_light",
             Self::HeadHeavy => "head_heavy",
@@ -791,6 +793,49 @@ impl SwmrReaderClass {
     fn is_light(self) -> bool {
         matches!(self, Self::HeadLight | Self::PinnedLight)
     }
+
+    pub(crate) fn key_band(self) -> SwmrReaderKeyBand {
+        match self {
+            Self::HeadLight | Self::PinnedLight => SwmrReaderKeyBand::Hot,
+            Self::HeadHeavy | Self::PinnedHeavy => SwmrReaderKeyBand::Warm,
+        }
+    }
+
+    pub(crate) fn validation_model(self) -> SwmrReaderValidationModel {
+        match self {
+            Self::HeadLight => SwmrReaderValidationModel::CountAndKeyBand,
+            Self::HeadHeavy | Self::PinnedLight | Self::PinnedHeavy => {
+                SwmrReaderValidationModel::ExactShapeStable
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwmrReaderKeyBand {
+    Hot,
+    Warm,
+}
+
+impl SwmrReaderKeyBand {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Hot => "hot-",
+            Self::Warm => "warm-",
+        }
+    }
+
+    fn contains_key(self, key: &str) -> bool {
+        key.starts_with(self.prefix())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwmrReaderValidationModel {
+    ExactShapeStable,
+    CountAndKeyBand,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -803,10 +848,14 @@ pub(crate) struct SwmrSetupDescriptor {
     pub(crate) preload_batches: usize,
     pub(crate) steady_batches: usize,
     pub(crate) writer_batches_per_step: usize,
+    pub(crate) pinned_snapshot_mode: SwmrPinnedSnapshotMode,
     pub(crate) pinned_snapshot_ts: u64,
+    pub(crate) pinned_manifest_version_ts: u64,
     pub(crate) reader_count: usize,
     pub(crate) light_scan_limit: usize,
     pub(crate) heavy_scan_limit: usize,
+    pub(crate) held_snapshot_expectations: Vec<SwmrReaderExpectationArtifact>,
+    pub(crate) manifest_reconstruction_observations: Vec<SwmrReaderObservationArtifact>,
 }
 
 #[derive(Clone)]
@@ -818,7 +867,8 @@ pub(crate) struct SwmrWorkloadState {
     preload_batches: usize,
     steady_batches: usize,
     writer_batches_per_step: usize,
-    pinned_version: DbVersion,
+    pinned_snapshot: DbSnapshot,
+    pinned_manifest_version: DbVersion,
     seed: u64,
     next_step: Arc<AtomicU64>,
     next_append_key: Arc<AtomicU64>,
@@ -826,6 +876,40 @@ pub(crate) struct SwmrWorkloadState {
     heavy_scan_limit: usize,
     estimated_row_bytes: u64,
     logical_target_bytes: u64,
+    reader_expectations: Vec<SwmrReaderExpectationArtifact>,
+    manifest_reconstruction_observations: Vec<SwmrReaderObservationArtifact>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwmrPinnedSnapshotMode {
+    HeldSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SwmrReaderExpectationArtifact {
+    pub(crate) class: SwmrReaderClass,
+    pub(crate) key_band: SwmrReaderKeyBand,
+    pub(crate) validation_model: SwmrReaderValidationModel,
+    pub(crate) expected_rows_per_scan: usize,
+    pub(crate) expected_first_key: Option<String>,
+    pub(crate) expected_last_key: Option<String>,
+    pub(crate) expected_key_fingerprint: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SwmrReaderObservationArtifact {
+    pub(crate) class: SwmrReaderClass,
+    pub(crate) rows_per_scan: usize,
+    pub(crate) first_key: Option<String>,
+    pub(crate) last_key: Option<String>,
+    pub(crate) key_fingerprint: u64,
+    pub(crate) rows_match_expected: bool,
+    pub(crate) all_keys_in_expected_band: bool,
+    pub(crate) first_key_matches_expected: bool,
+    pub(crate) last_key_matches_expected: bool,
+    pub(crate) fingerprint_matches_expected: bool,
+    pub(crate) valid: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -842,7 +926,10 @@ impl SwmrWorkloadState {
     pub(crate) fn new(
         schema: SchemaRef,
         light_projection: SchemaRef,
-        pinned_version: DbVersion,
+        pinned_snapshot: DbSnapshot,
+        pinned_manifest_version: DbVersion,
+        reader_expectations: Vec<SwmrReaderExpectationArtifact>,
+        manifest_reconstruction_observations: Vec<SwmrReaderObservationArtifact>,
         params: SwmrWorkloadParams,
     ) -> Self {
         let estimated_row_bytes = estimate_swmr_row_bytes(params.payload_bytes);
@@ -863,7 +950,8 @@ impl SwmrWorkloadState {
             preload_batches: params.preload_batches,
             steady_batches: params.steady_batches,
             writer_batches_per_step: params.writer_batches_per_step.max(1),
-            pinned_version,
+            pinned_snapshot,
+            pinned_manifest_version,
             seed: params.seed,
             next_step: Arc::new(AtomicU64::new(0)),
             next_append_key: Arc::new(AtomicU64::new(next_append_key)),
@@ -872,6 +960,8 @@ impl SwmrWorkloadState {
             estimated_row_bytes,
             logical_target_bytes: estimated_row_bytes
                 .saturating_mul(u64::try_from(total_rows).unwrap_or(u64::MAX)),
+            reader_expectations,
+            manifest_reconstruction_observations,
         }
     }
 
@@ -906,10 +996,14 @@ impl SwmrWorkloadState {
             preload_batches: self.preload_batches,
             steady_batches: self.steady_batches,
             writer_batches_per_step: self.writer_batches_per_step,
-            pinned_snapshot_ts: self.pinned_version.timestamp.get(),
+            pinned_snapshot_mode: SwmrPinnedSnapshotMode::HeldSnapshot,
+            pinned_snapshot_ts: self.pinned_snapshot.read_timestamp().get(),
+            pinned_manifest_version_ts: self.pinned_manifest_version.timestamp.get(),
             reader_count: 4,
             light_scan_limit: self.light_scan_limit,
             heavy_scan_limit: self.heavy_scan_limit,
+            held_snapshot_expectations: self.reader_expectations.clone(),
+            manifest_reconstruction_observations: self.manifest_reconstruction_observations.clone(),
         }
     }
 
@@ -920,6 +1014,95 @@ impl SwmrWorkloadState {
             SwmrReaderClass::PinnedLight,
             SwmrReaderClass::PinnedHeavy,
         ]
+    }
+
+    fn expectation_for(&self, class: SwmrReaderClass) -> Option<&SwmrReaderExpectationArtifact> {
+        self.reader_expectations
+            .iter()
+            .find(|expectation| expectation.class == class)
+    }
+
+    fn observation_for(
+        &self,
+        class: SwmrReaderClass,
+        observation: SwmrReaderScanObservation,
+    ) -> Result<SwmrReaderObservationArtifact, BenchError> {
+        let Some(expectation) = self.expectation_for(class) else {
+            return Err(BenchError::Message(format!(
+                "missing swmr expectation for reader `{}`",
+                class.as_str()
+            )));
+        };
+        let rows_match_expected = observation.rows_per_scan == expectation.expected_rows_per_scan;
+        let first_key_matches_expected =
+            observation.first_key.as_ref() == expectation.expected_first_key.as_ref();
+        let last_key_matches_expected =
+            observation.last_key.as_ref() == expectation.expected_last_key.as_ref();
+        let fingerprint_matches_expected =
+            observation.key_fingerprint == expectation.expected_key_fingerprint;
+        let valid = match expectation.validation_model {
+            SwmrReaderValidationModel::ExactShapeStable => {
+                rows_match_expected
+                    && observation.all_keys_in_expected_band
+                    && first_key_matches_expected
+                    && last_key_matches_expected
+                    && fingerprint_matches_expected
+            }
+            SwmrReaderValidationModel::CountAndKeyBand => {
+                rows_match_expected && observation.all_keys_in_expected_band
+            }
+        };
+
+        Ok(SwmrReaderObservationArtifact {
+            class,
+            rows_per_scan: observation.rows_per_scan,
+            first_key: observation.first_key,
+            last_key: observation.last_key,
+            key_fingerprint: observation.key_fingerprint,
+            rows_match_expected,
+            all_keys_in_expected_band: observation.all_keys_in_expected_band,
+            first_key_matches_expected,
+            last_key_matches_expected,
+            fingerprint_matches_expected,
+            valid,
+        })
+    }
+
+    fn validate_reader_observation(
+        &self,
+        class: SwmrReaderClass,
+        observation: &SwmrReaderObservationArtifact,
+    ) -> Result<(), BenchError> {
+        if observation.valid {
+            return Ok(());
+        }
+
+        let Some(expectation) = self.expectation_for(class) else {
+            return Err(BenchError::Message(format!(
+                "missing swmr expectation for reader `{}`",
+                class.as_str()
+            )));
+        };
+
+        Err(BenchError::Message(format!(
+            "swmr reader `{}` violated {:?} validity: rows={} expected_rows={} first_key={:?} \
+             expected_first_key={:?} last_key={:?} expected_last_key={:?} fingerprint={} \
+             expected_fingerprint={} all_keys_in_expected_band={} pinned_snapshot_ts={} \
+             pinned_manifest_version_ts={}",
+            class.as_str(),
+            expectation.validation_model,
+            observation.rows_per_scan,
+            expectation.expected_rows_per_scan,
+            observation.first_key,
+            expectation.expected_first_key,
+            observation.last_key,
+            expectation.expected_last_key,
+            observation.key_fingerprint,
+            expectation.expected_key_fingerprint,
+            observation.all_keys_in_expected_band,
+            self.pinned_snapshot.read_timestamp().get(),
+            self.pinned_manifest_version.timestamp.get()
+        )))
     }
 }
 
@@ -1084,7 +1267,23 @@ struct SwmrSummaryArtifact {
 #[derive(Debug, Serialize)]
 struct SwmrReaderSummaryArtifact {
     class: SwmrReaderClass,
+    key_band: SwmrReaderKeyBand,
+    validation_model: SwmrReaderValidationModel,
+    expected_rows_per_scan: usize,
+    expected_first_key: Option<String>,
+    expected_last_key: Option<String>,
+    expected_key_fingerprint: u64,
     rows_processed: u64,
+    mean_rows_per_scan: f64,
+    min_rows_per_scan: usize,
+    max_rows_per_scan: usize,
+    unique_key_fingerprints: usize,
+    all_rows_match_expected: bool,
+    all_keys_in_expected_band: bool,
+    all_first_key_matches_expected: bool,
+    all_last_key_matches_expected: bool,
+    all_fingerprints_match_expected: bool,
+    valid: bool,
     latency_ns: LatencySummary,
     read_path_latency_ns: ReadPathLatencySummary,
     read_path_internal_ns: ReadPathInternalSummary,
@@ -1224,7 +1423,7 @@ impl SwmrAggregate {
         });
     }
 
-    fn to_summary(&self) -> Option<SwmrSummaryArtifact> {
+    fn to_summary(&self, state: &SwmrWorkloadState) -> Option<SwmrSummaryArtifact> {
         if self.writer_latencies_ns.is_empty() && self.readers.is_empty() {
             return None;
         }
@@ -1234,7 +1433,7 @@ impl SwmrAggregate {
             readers: self
                 .readers
                 .iter()
-                .filter_map(SwmrReaderAggregate::to_summary)
+                .filter_map(|reader| reader.to_summary(state))
                 .collect(),
         })
     }
@@ -1242,33 +1441,88 @@ impl SwmrAggregate {
 
 struct SwmrReaderAggregate {
     class: SwmrReaderClass,
+    samples: usize,
     rows_processed: u64,
+    min_rows_per_scan: usize,
+    max_rows_per_scan: usize,
     latencies_ns: Vec<u64>,
     read_path: ReadPathAggregate,
+    all_rows_match_expected: bool,
+    all_keys_in_expected_band: bool,
+    all_first_key_matches_expected: bool,
+    all_last_key_matches_expected: bool,
+    all_fingerprints_match_expected: bool,
+    valid: bool,
+    key_fingerprints: BTreeSet<u64>,
 }
 
 impl SwmrReaderAggregate {
     fn new(class: SwmrReaderClass) -> Self {
         Self {
             class,
+            samples: 0,
             rows_processed: 0,
+            min_rows_per_scan: usize::MAX,
+            max_rows_per_scan: 0,
             latencies_ns: Vec::new(),
             read_path: ReadPathAggregate::default(),
+            all_rows_match_expected: true,
+            all_keys_in_expected_band: true,
+            all_first_key_matches_expected: true,
+            all_last_key_matches_expected: true,
+            all_fingerprints_match_expected: true,
+            valid: true,
+            key_fingerprints: BTreeSet::new(),
         }
     }
 
     fn record(&mut self, result: SwmrReaderOperationResult) {
+        self.samples = self.samples.saturating_add(1);
         self.rows_processed = self
             .rows_processed
             .saturating_add(u64::try_from(result.rows).unwrap_or(u64::MAX));
+        self.min_rows_per_scan = self.min_rows_per_scan.min(result.rows);
+        self.max_rows_per_scan = self.max_rows_per_scan.max(result.rows);
         self.latencies_ns.push(result.latency_ns);
         self.read_path.record(result.read_path);
+        self.all_rows_match_expected &= result.observation.rows_match_expected;
+        self.all_keys_in_expected_band &= result.observation.all_keys_in_expected_band;
+        self.all_first_key_matches_expected &= result.observation.first_key_matches_expected;
+        self.all_last_key_matches_expected &= result.observation.last_key_matches_expected;
+        self.all_fingerprints_match_expected &= result.observation.fingerprint_matches_expected;
+        self.valid &= result.observation.valid;
+        let _ = self
+            .key_fingerprints
+            .insert(result.observation.key_fingerprint);
     }
 
-    fn to_summary(&self) -> Option<SwmrReaderSummaryArtifact> {
+    fn to_summary(&self, state: &SwmrWorkloadState) -> Option<SwmrReaderSummaryArtifact> {
+        let expectation = state.expectation_for(self.class)?;
+        let scans = self.samples.max(1) as f64;
+        let mean_rows_per_scan = self.rows_processed as f64 / scans;
         Some(SwmrReaderSummaryArtifact {
             class: self.class,
+            key_band: expectation.key_band,
+            validation_model: expectation.validation_model,
+            expected_rows_per_scan: expectation.expected_rows_per_scan,
+            expected_first_key: expectation.expected_first_key.clone(),
+            expected_last_key: expectation.expected_last_key.clone(),
+            expected_key_fingerprint: expectation.expected_key_fingerprint,
             rows_processed: self.rows_processed,
+            mean_rows_per_scan,
+            min_rows_per_scan: if self.samples == 0 {
+                0
+            } else {
+                self.min_rows_per_scan
+            },
+            max_rows_per_scan: self.max_rows_per_scan,
+            unique_key_fingerprints: self.key_fingerprints.len(),
+            all_rows_match_expected: self.all_rows_match_expected,
+            all_keys_in_expected_band: self.all_keys_in_expected_band,
+            all_first_key_matches_expected: self.all_first_key_matches_expected,
+            all_last_key_matches_expected: self.all_last_key_matches_expected,
+            all_fingerprints_match_expected: self.all_fingerprints_match_expected,
+            valid: self.valid,
             latency_ns: latency_summary(&self.latencies_ns),
             read_path_latency_ns: self.read_path.to_summary()?,
             read_path_internal_ns: self.read_path.to_internal_summary()?,
@@ -1291,8 +1545,54 @@ struct SwmrOperationResult {
 struct SwmrReaderOperationResult {
     class: SwmrReaderClass,
     rows: usize,
+    observation: SwmrReaderObservationArtifact,
     latency_ns: u64,
     read_path: ReadPathBreakdown,
+}
+
+pub(crate) struct SwmrReaderScanObservation {
+    key_band: SwmrReaderKeyBand,
+    pub(crate) rows_per_scan: usize,
+    pub(crate) first_key: Option<String>,
+    pub(crate) last_key: Option<String>,
+    pub(crate) key_fingerprint: u64,
+    pub(crate) all_keys_in_expected_band: bool,
+}
+
+impl SwmrReaderScanObservation {
+    fn new(key_band: SwmrReaderKeyBand) -> Self {
+        Self {
+            key_band,
+            rows_per_scan: 0,
+            first_key: None,
+            last_key: None,
+            key_fingerprint: swmr_fingerprint_seed(key_band),
+            all_keys_in_expected_band: true,
+        }
+    }
+
+    fn observe_batch(&mut self, batch: &RecordBatch) -> Result<(), BenchError> {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                BenchError::Message(
+                    "swmr reader expected Utf8 id column at projection index 0".to_string(),
+                )
+            })?;
+        for row_idx in 0..batch.num_rows() {
+            let key = ids.value(row_idx);
+            self.all_keys_in_expected_band &= self.key_band.contains_key(key);
+            if self.first_key.is_none() {
+                self.first_key = Some(key.to_string());
+            }
+            self.last_key = Some(key.to_string());
+            self.key_fingerprint = swmr_fingerprint_update(self.key_fingerprint, key.as_bytes());
+            self.rows_per_scan = self.rows_per_scan.saturating_add(1);
+        }
+        Ok(())
+    }
 }
 
 impl ScenarioDimensionsArtifact {
@@ -1478,6 +1778,7 @@ async fn run_swmr_reader_local(
 ) -> Result<SwmrReaderOperationResult, BenchError> {
     let started = Instant::now();
     let predicate = swmr_predicate(class);
+    let key_band = class.key_band();
     let projection = if class.is_light() {
         Some(Arc::clone(&state.light_projection))
     } else {
@@ -1488,19 +1789,14 @@ async fn run_swmr_reader_local(
     } else {
         state.heavy_scan_limit
     };
-    let (rows, read_path) = if class.is_pinned() {
-        let snapshot = db
-            .snapshot_at(state.pinned_version.timestamp)
-            .await
-            .map_err(|err| {
-                BenchError::Message(format!(
-                    "swmr pinned snapshot resolution failed for {}: {err}",
-                    class.as_str()
-                ))
-            })?;
+    let (observation, read_path) = if class.is_pinned() {
         let plan_started = Instant::now();
         let (mut stream, profile) = {
-            let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+            let mut builder = state
+                .pinned_snapshot
+                .scan(db)
+                .filter(predicate)
+                .limit(limit);
             if let Some(projection) = projection {
                 builder = builder.projection(projection);
             }
@@ -1509,16 +1805,16 @@ async fn run_swmr_reader_local(
         .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
         let prepare_ns = duration_ns_u64(plan_started.elapsed());
         let consume_started = Instant::now();
-        let mut rows = 0usize;
+        let mut observation = SwmrReaderScanObservation::new(class.key_band());
         let mut batch_count = 0usize;
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result
                 .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
-            rows = rows.saturating_add(batch.num_rows());
+            observation.observe_batch(&batch)?;
             batch_count = batch_count.saturating_add(1);
         }
         (
-            rows,
+            observation,
             ReadPathBreakdown {
                 prepare_ns,
                 consume_ns: duration_ns_u64(consume_started.elapsed()),
@@ -1527,11 +1823,14 @@ async fn run_swmr_reader_local(
             },
         )
     } else {
-        execute_scan_profiled_local(db, predicate, projection, limit).await?
+        execute_scan_profiled_local(db, predicate, projection, limit, key_band).await?
     };
+    let artifact = state.observation_for(class, observation)?;
+    state.validate_reader_observation(class, &artifact)?;
     Ok(SwmrReaderOperationResult {
         class,
-        rows,
+        rows: artifact.rows_per_scan,
+        observation: artifact,
         latency_ns: duration_ns_u64(started.elapsed()),
         read_path,
     })
@@ -1544,6 +1843,7 @@ async fn run_swmr_reader_object_store(
 ) -> Result<SwmrReaderOperationResult, BenchError> {
     let started = Instant::now();
     let predicate = swmr_predicate(class);
+    let key_band = class.key_band();
     let projection = if class.is_light() {
         Some(Arc::clone(&state.light_projection))
     } else {
@@ -1554,19 +1854,14 @@ async fn run_swmr_reader_object_store(
     } else {
         state.heavy_scan_limit
     };
-    let (rows, read_path) = if class.is_pinned() {
-        let snapshot = db
-            .snapshot_at(state.pinned_version.timestamp)
-            .await
-            .map_err(|err| {
-                BenchError::Message(format!(
-                    "swmr pinned snapshot resolution failed for {}: {err}",
-                    class.as_str()
-                ))
-            })?;
+    let (observation, read_path) = if class.is_pinned() {
         let plan_started = Instant::now();
         let (mut stream, profile) = {
-            let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+            let mut builder = state
+                .pinned_snapshot
+                .scan(db)
+                .filter(predicate)
+                .limit(limit);
             if let Some(projection) = projection {
                 builder = builder.projection(projection);
             }
@@ -1575,16 +1870,16 @@ async fn run_swmr_reader_object_store(
         .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
         let prepare_ns = duration_ns_u64(plan_started.elapsed());
         let consume_started = Instant::now();
-        let mut rows = 0usize;
+        let mut observation = SwmrReaderScanObservation::new(class.key_band());
         let mut batch_count = 0usize;
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result
                 .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
-            rows = rows.saturating_add(batch.num_rows());
+            observation.observe_batch(&batch)?;
             batch_count = batch_count.saturating_add(1);
         }
         (
-            rows,
+            observation,
             ReadPathBreakdown {
                 prepare_ns,
                 consume_ns: duration_ns_u64(consume_started.elapsed()),
@@ -1593,11 +1888,14 @@ async fn run_swmr_reader_object_store(
             },
         )
     } else {
-        execute_scan_profiled_object_store(db, predicate, projection, limit).await?
+        execute_scan_profiled_object_store(db, predicate, projection, limit, key_band).await?
     };
+    let artifact = state.observation_for(class, observation)?;
+    state.validate_reader_observation(class, &artifact)?;
     Ok(SwmrReaderOperationResult {
         class,
-        rows,
+        rows: artifact.rows_per_scan,
+        observation: artifact,
         latency_ns: duration_ns_u64(started.elapsed()),
         read_path,
     })
@@ -1608,7 +1906,8 @@ async fn execute_scan_profiled_local(
     predicate: Expr,
     projection: Option<SchemaRef>,
     limit: usize,
-) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    key_band: SwmrReaderKeyBand,
+) -> Result<(SwmrReaderScanObservation, ReadPathBreakdown), BenchError> {
     let plan_started = Instant::now();
     let (mut stream, profile) = {
         let mut builder = db.scan().filter(predicate).limit(limit);
@@ -1620,16 +1919,16 @@ async fn execute_scan_profiled_local(
     .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
     let prepare_ns = duration_ns_u64(plan_started.elapsed());
     let consume_started = Instant::now();
-    let mut rows = 0usize;
+    let mut observation = SwmrReaderScanObservation::new(key_band);
     let mut batch_count = 0usize;
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result
             .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
-        rows = rows.saturating_add(batch.num_rows());
+        observation.observe_batch(&batch)?;
         batch_count = batch_count.saturating_add(1);
     }
     Ok((
-        rows,
+        observation,
         ReadPathBreakdown {
             prepare_ns,
             consume_ns: duration_ns_u64(consume_started.elapsed()),
@@ -1644,7 +1943,8 @@ async fn execute_scan_profiled_object_store(
     predicate: Expr,
     projection: Option<SchemaRef>,
     limit: usize,
-) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    key_band: SwmrReaderKeyBand,
+) -> Result<(SwmrReaderScanObservation, ReadPathBreakdown), BenchError> {
     let plan_started = Instant::now();
     let (mut stream, profile) = {
         let mut builder = db.scan().filter(predicate).limit(limit);
@@ -1656,16 +1956,16 @@ async fn execute_scan_profiled_object_store(
     .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
     let prepare_ns = duration_ns_u64(plan_started.elapsed());
     let consume_started = Instant::now();
-    let mut rows = 0usize;
+    let mut observation = SwmrReaderScanObservation::new(key_band);
     let mut batch_count = 0usize;
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result
             .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
-        rows = rows.saturating_add(batch.num_rows());
+        observation.observe_batch(&batch)?;
         batch_count = batch_count.saturating_add(1);
     }
     Ok((
-        rows,
+        observation,
         ReadPathBreakdown {
             prepare_ns,
             consume_ns: duration_ns_u64(consume_started.elapsed()),
@@ -1686,6 +1986,93 @@ fn swmr_predicate(class: SwmrReaderClass) -> Expr {
             Expr::lt("id", ScalarValue::from("zzzzzzzz")),
         ]),
     }
+}
+
+pub(crate) async fn swmr_reader_observation_for_snapshot(
+    db: &BenchmarkDb,
+    snapshot: &DbSnapshot,
+    class: SwmrReaderClass,
+    light_projection: &SchemaRef,
+    light_scan_limit: usize,
+    heavy_scan_limit: usize,
+) -> Result<SwmrReaderScanObservation, BenchError> {
+    let predicate = swmr_predicate(class);
+    let key_band = class.key_band();
+    let projection = if class.is_light() {
+        Some(Arc::clone(light_projection))
+    } else {
+        None
+    };
+    let limit = if class.is_light() {
+        light_scan_limit
+    } else {
+        heavy_scan_limit
+    };
+
+    match db {
+        BenchmarkDb::Local(inner) => {
+            execute_snapshot_scan_row_count_local(
+                inner, snapshot, predicate, projection, limit, key_band,
+            )
+            .await
+        }
+        BenchmarkDb::ObjectStore(inner) => {
+            execute_snapshot_scan_row_count_object_store(
+                inner, snapshot, predicate, projection, limit, key_band,
+            )
+            .await
+        }
+    }
+}
+
+async fn execute_snapshot_scan_row_count_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    snapshot: &DbSnapshot,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+    key_band: SwmrReaderKeyBand,
+) -> Result<SwmrReaderScanObservation, BenchError> {
+    let mut stream = {
+        let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream().await
+    }
+    .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+    let mut observation = SwmrReaderScanObservation::new(key_band);
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        observation.observe_batch(&batch)?;
+    }
+    Ok(observation)
+}
+
+async fn execute_snapshot_scan_row_count_object_store(
+    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    snapshot: &DbSnapshot,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+    key_band: SwmrReaderKeyBand,
+) -> Result<SwmrReaderScanObservation, BenchError> {
+    let mut stream = {
+        let mut builder = snapshot.scan(db).filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream().await
+    }
+    .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+    let mut observation = SwmrReaderScanObservation::new(key_band);
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("swmr scan stream failed: {err}")))?;
+        observation.observe_batch(&batch)?;
+    }
+    Ok(observation)
 }
 
 fn build_swmr_mixed_batch(
@@ -1756,6 +2143,19 @@ fn swmr_payload(payload_bytes: usize, ordinal: u64) -> String {
     }
     payload.truncate(payload_bytes);
     payload
+}
+
+fn swmr_fingerprint_seed(key_band: SwmrReaderKeyBand) -> u64 {
+    swmr_fingerprint_update(SWMR_FINGERPRINT_OFFSET_BASIS, key_band.prefix().as_bytes())
+}
+
+fn swmr_fingerprint_update(mut fingerprint: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(SWMR_FINGERPRINT_PRIME);
+    }
+    fingerprint = fingerprint.wrapping_mul(SWMR_FINGERPRINT_PRIME);
+    fingerprint
 }
 
 fn estimate_swmr_row_bytes(payload_bytes: usize) -> u64 {
@@ -2039,6 +2439,26 @@ pub(crate) async fn snapshot_object_store_storage_volume(
     snapshot_storage_volume_with_fs(fs.as_ref(), &root).await
 }
 
+pub(crate) async fn cleanup_local_storage_volume(root: &Path) -> Result<(), BenchError> {
+    let fs = LocalFs {};
+    let absolute = absolutize(root)?;
+    let root_path = FusioPath::from_filesystem_path(&absolute).map_err(|err| {
+        BenchError::Message(format!(
+            "failed to convert benchmark root `{}` to fusio path: {err}",
+            absolute.display()
+        ))
+    })?;
+    cleanup_storage_root_with_fs(&fs, &root_path).await
+}
+
+pub(crate) async fn cleanup_object_store_storage_volume(
+    object_spec: &ObjectSpec,
+) -> Result<(), BenchError> {
+    let probe = IoProbe::default();
+    let (fs, root) = build_probed_object_store_fs(object_spec, &probe)?;
+    cleanup_storage_root_with_fs(fs.as_ref(), &root).await
+}
+
 fn build_probed_object_store_fs(
     object_spec: &ObjectSpec,
     io_probe: &IoProbe,
@@ -2139,6 +2559,50 @@ async fn snapshot_storage_volume_with_fs<FS: Fs>(
         }
     }
     Ok(volume)
+}
+
+async fn cleanup_storage_root_with_fs<FS: Fs>(fs: &FS, root: &FusioPath) -> Result<(), BenchError> {
+    let mut pending = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut files = Vec::new();
+    pending.push_back(root.clone());
+    while let Some(dir) = pending.pop_front() {
+        if !visited.insert(dir.to_string()) {
+            continue;
+        }
+        let stream = fs.list(&dir).await.map_err(|err| {
+            BenchError::Message(format!(
+                "failed to list storage for cleanup under `{}`: {err}",
+                dir.as_ref()
+            ))
+        })?;
+        futures::pin_mut!(stream);
+        while let Some(meta_result) = stream.next().await {
+            let meta = meta_result.map_err(|err| {
+                BenchError::Message(format!(
+                    "failed to read storage metadata for cleanup under `{}`: {err}",
+                    dir.as_ref()
+                ))
+            })?;
+            if is_probably_file_path(meta.path.as_ref()) {
+                files.push(meta.path);
+            } else {
+                pending.push_back(meta.path);
+            }
+        }
+    }
+
+    files.sort_by(|left, right| right.as_ref().cmp(left.as_ref()));
+    for path in files {
+        fs.remove(&path).await.map_err(|err| {
+            BenchError::Message(format!(
+                "failed to remove benchmark artifact `{}`: {err}",
+                path.as_ref()
+            ))
+        })?;
+    }
+
+    Ok(())
 }
 
 fn is_probably_file_path(path: &str) -> bool {
@@ -2598,10 +3062,12 @@ fn to_scenario_artifact(
             read_path_latency_ns: read_path_latency,
             read_path_internal_ns: read_path_internal,
             io: measurement.io,
-            swmr: measurement
-                .swmr
-                .as_ref()
-                .and_then(SwmrAggregate::to_summary),
+            swmr: measurement.swmr.as_ref().and_then(|swmr| {
+                scenario
+                    .swmr_state
+                    .as_ref()
+                    .and_then(|state| swmr.to_summary(state))
+            }),
         },
     }
 }
