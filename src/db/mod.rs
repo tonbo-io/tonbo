@@ -48,7 +48,7 @@ pub use crate::{
     mode::DynModeConfig,
     query::{Expr, ScalarValue},
     schema::SchemaBuilder,
-    transaction::{CommitAckMode, Transaction},
+    transaction::{CommitAckMode, Snapshot, SnapshotError, Transaction},
     wal::WalSyncPolicy,
 };
 use crate::{
@@ -66,7 +66,7 @@ use crate::{
         metadata::{ParquetMetadataCache, default_parquet_metadata_cache},
         sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     },
-    transaction::{Snapshot as TxSnapshot, SnapshotError, TransactionDurability, TransactionError},
+    transaction::{Snapshot as TxSnapshot, TransactionDurability, TransactionError},
     wal::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
         replay::Replayer, state::WalStateHandle,

@@ -10,11 +10,14 @@ mod common;
 use common::{
     BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
     ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
-    ScenarioWorkload, StorageVolumeArtifact, VersionSummary, WriteWorkloadState, artifact_path,
-    benchmark_schema, build_artifact, build_run_id, build_runtime, ingest_workload,
-    latest_version_summary, latest_version_summary_if_any, open_benchmark_db,
-    open_object_store_benchmark_db, print_directional_report, read_all_rows, run_criterion,
-    scenario_root, snapshot_local_storage_volume, snapshot_object_store_storage_volume,
+    ScenarioWorkload, StorageVolumeArtifact, SwmrReaderClass, SwmrReaderExpectationArtifact,
+    SwmrWorkloadParams, SwmrWorkloadState, VersionSummary, WriteWorkloadState, artifact_path,
+    benchmark_schema, build_artifact, build_run_id, build_runtime, cleanup_local_storage_volume,
+    cleanup_object_store_storage_volume, ingest_workload, latest_version_summary,
+    latest_version_summary_if_any, open_benchmark_db, open_object_store_benchmark_db,
+    preload_swmr_workload, print_directional_report, read_all_rows, run_criterion, scenario_root,
+    snapshot_local_storage_volume, snapshot_object_store_storage_volume, swmr_benchmark_schema,
+    swmr_light_projection_schema, swmr_reader_observation_for_snapshot,
     wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
 };
 
@@ -22,6 +25,93 @@ use common::{
 struct ScenarioStorage {
     backend: BenchBackend,
     object_store: Option<ObjectStoreBenchConfig>,
+}
+
+#[derive(Clone, Copy)]
+struct SwmrBenchConfig {
+    logical_target_bytes: u64,
+    rows_per_batch: usize,
+    payload_bytes: usize,
+    preload_fraction_pct: usize,
+    light_scan_limit: usize,
+    heavy_scan_limit: usize,
+}
+
+impl SwmrBenchConfig {
+    fn from_env() -> Result<Self, BenchError> {
+        let logical_target_bytes = match std::env::var("TONBO_SWMR_BENCH_LOGICAL_BYTES") {
+            Ok(raw) => raw.parse::<u64>().map_err(|_| BenchError::InvalidEnv {
+                name: "TONBO_SWMR_BENCH_LOGICAL_BYTES",
+                value: raw,
+            })?,
+            Err(std::env::VarError::NotPresent) => {
+                let gb_raw = std::env::var("TONBO_SWMR_BENCH_LOGICAL_GB")
+                    .unwrap_or_else(|_| "1".to_string());
+                let gb = gb_raw.parse::<u64>().map_err(|_| BenchError::InvalidEnv {
+                    name: "TONBO_SWMR_BENCH_LOGICAL_GB",
+                    value: gb_raw,
+                })?;
+                gb.saturating_mul(1024 * 1024 * 1024)
+            }
+            Err(err) => {
+                return Err(BenchError::Message(format!(
+                    "failed reading TONBO_SWMR_BENCH_LOGICAL_BYTES: {err}"
+                )));
+            }
+        };
+        let rows_per_batch = env_usize_local("TONBO_SWMR_BENCH_ROWS_PER_BATCH", 256)?;
+        let payload_bytes = env_usize_local("TONBO_SWMR_BENCH_PAYLOAD_BYTES", 4096)?;
+        let preload_fraction_pct = env_usize_local("TONBO_SWMR_BENCH_PRELOAD_FRACTION_PCT", 90)?;
+        let light_scan_limit = env_usize_local("TONBO_SWMR_BENCH_LIGHT_SCAN_LIMIT", 256)?;
+        let heavy_scan_limit = env_usize_local("TONBO_SWMR_BENCH_HEAVY_SCAN_LIMIT", 4096)?;
+        if rows_per_batch == 0 {
+            return Err(BenchError::InvalidEnv {
+                name: "TONBO_SWMR_BENCH_ROWS_PER_BATCH",
+                value: "must be > 0".to_string(),
+            });
+        }
+        if preload_fraction_pct > 99 {
+            return Err(BenchError::InvalidEnv {
+                name: "TONBO_SWMR_BENCH_PRELOAD_FRACTION_PCT",
+                value: "must be in 0..=99".to_string(),
+            });
+        }
+        Ok(Self {
+            logical_target_bytes,
+            rows_per_batch,
+            payload_bytes,
+            preload_fraction_pct,
+            light_scan_limit,
+            heavy_scan_limit,
+        })
+    }
+
+    fn estimated_row_bytes(self) -> u64 {
+        32u64.saturating_add(u64::try_from(self.payload_bytes).unwrap_or(u64::MAX))
+    }
+
+    fn total_rows(self) -> usize {
+        let row_bytes = self.estimated_row_bytes().max(1);
+        let rows = self.logical_target_bytes.saturating_add(row_bytes - 1) / row_bytes;
+        usize::try_from(rows).unwrap_or(usize::MAX)
+    }
+
+    fn total_batches(self) -> usize {
+        let total_rows = self.total_rows();
+        total_rows.saturating_add(self.rows_per_batch - 1) / self.rows_per_batch
+    }
+
+    fn preload_batches(self) -> usize {
+        let total_batches = self.total_batches().max(1);
+        let preload = total_batches.saturating_mul(self.preload_fraction_pct) / 100;
+        preload.clamp(1, total_batches.saturating_sub(1).max(1))
+    }
+
+    fn steady_batches(self) -> usize {
+        self.total_batches()
+            .saturating_sub(self.preload_batches())
+            .max(1)
+    }
 }
 
 fn compaction_local(c: &mut Criterion) {
@@ -79,6 +169,10 @@ fn compaction_local(c: &mut Criterion) {
     print_directional_report(&artifact, &config);
 
     run_criterion(c, &runtime, &scenarios, config.criterion_sample_size);
+
+    if let Err(err) = runtime.block_on(cleanup_scenarios(&scenarios, &storage, &run_id)) {
+        eprintln!("tonbo benchmark cleanup warning: {err}");
+    }
 }
 
 async fn prepare_scenarios(
@@ -104,6 +198,12 @@ async fn prepare_scenarios(
         push_prepared_scenario(
             &mut scenarios,
             prepare_read_compaction_quiesced(config, run_id, storage).await,
+        )?;
+    }
+    if should_prepare_scenario(&selected, "swmr_gb_scale_mixed") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_swmr_gb_scale_mixed(config, run_id, storage).await,
         )?;
     }
 
@@ -138,12 +238,13 @@ async fn prepare_scenarios(
 }
 
 fn selected_scenario_filter() -> Option<HashSet<&'static str>> {
-    const KNOWN_SCENARIOS: [&str; 5] = [
+    const KNOWN_SCENARIOS: [&str; 6] = [
         "read_baseline",
         "read_after_first_compaction_observed",
         "read_compaction_quiesced",
         "read_while_compaction",
         "write_throughput_vs_compaction_frequency",
+        "swmr_gb_scale_mixed",
     ];
     let mut selected = HashSet::new();
     for arg in std::env::args().skip(1) {
@@ -289,6 +390,7 @@ async fn prepare_read_baseline(
         volume_before_compaction,
         volume_ready,
         write_state: None,
+        swmr_state: None,
     })
 }
 
@@ -412,6 +514,7 @@ async fn prepare_read_compaction_state(
         volume_before_compaction,
         volume_ready,
         write_state: None,
+        swmr_state: None,
     })
 }
 
@@ -503,6 +606,7 @@ async fn prepare_read_while_compaction(
         volume_before_compaction,
         volume_ready,
         write_state: Some(write_state),
+        swmr_state: None,
     })
 }
 
@@ -595,7 +699,271 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         volume_before_compaction,
         volume_ready,
         write_state: Some(write_state),
+        swmr_state: None,
     })
+}
+
+async fn prepare_swmr_gb_scale_mixed(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    let scenario_id = "swmr_gb_scale_mixed";
+    let swmr = SwmrBenchConfig::from_env()?;
+    let scenario_variant_id = format!(
+        "logical{}gb_payload{}_rpb{}",
+        swmr.logical_target_bytes / (1024 * 1024 * 1024),
+        swmr.payload_bytes,
+        swmr.rows_per_batch
+    );
+    let benchmark_id = format!("{scenario_id}__{scenario_variant_id}");
+    let schema = swmr_benchmark_schema();
+    let light_projection = swmr_light_projection_schema();
+    let io_probe = common::IoProbe::default();
+    let mut timing = PrepTimingReport::default();
+
+    let phase_started = Instant::now();
+    let db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Default {
+            periodic_tick_ms: config.compaction_periodic_tick_ms,
+        },
+        &io_probe,
+    )
+    .await?;
+    timing.record("open_db", phase_started);
+
+    let preload_batches = swmr.preload_batches();
+    let steady_batches = swmr.steady_batches();
+    let writer_batches_per_step = steady_batches
+        .saturating_add(config.artifact_iterations.saturating_sub(1))
+        / config.artifact_iterations.max(1);
+
+    let phase_started = Instant::now();
+    preload_swmr_workload(
+        &db,
+        &schema,
+        swmr.rows_per_batch,
+        swmr.payload_bytes,
+        preload_batches,
+        config.seed ^ 0x0055_7A11,
+    )
+    .await?;
+    timing.record("preload", phase_started);
+
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let Some(version_before_compaction) = latest_version_summary_if_any(&db).await? else {
+        return scenario_skipped(
+            scenario_id,
+            "preload produced no manifest versions; increase TONBO_SWMR_BENCH_LOGICAL_GB or \
+             payload",
+        );
+    };
+    ensure_ssts_present(scenario_id, version_before_compaction)?;
+    let pinned_manifest_version = latest_version_info(&db).await?;
+    let pinned_snapshot = match &db {
+        common::BenchmarkDb::Local(inner) => inner.begin_snapshot().await,
+        common::BenchmarkDb::ObjectStore(inner) => inner.begin_snapshot().await,
+    }
+    .map_err(|err| BenchError::Message(format!("begin_snapshot failed: {err}")))?;
+    let mut reader_expectations = Vec::new();
+    let mut manifest_reconstruction_observations = Vec::new();
+    let reconstructed_snapshot = match &db {
+        common::BenchmarkDb::Local(inner) => {
+            inner.snapshot_at(pinned_manifest_version.timestamp).await
+        }
+        common::BenchmarkDb::ObjectStore(inner) => {
+            inner.snapshot_at(pinned_manifest_version.timestamp).await
+        }
+    }
+    .map_err(|err| {
+        BenchError::Message(format!(
+            "swmr pinned manifest reconstruction failed at ts {}: {err}",
+            pinned_manifest_version.timestamp.get()
+        ))
+    })?;
+    for class in [
+        SwmrReaderClass::HeadLight,
+        SwmrReaderClass::HeadHeavy,
+        SwmrReaderClass::PinnedLight,
+        SwmrReaderClass::PinnedHeavy,
+    ] {
+        let expected_observation = swmr_reader_observation_for_snapshot(
+            &db,
+            &pinned_snapshot,
+            class,
+            &light_projection,
+            swmr.light_scan_limit,
+            swmr.heavy_scan_limit,
+        )
+        .await?;
+        reader_expectations.push(SwmrReaderExpectationArtifact {
+            class,
+            key_band: class.key_band(),
+            validation_model: class.validation_model(),
+            expected_rows_per_scan: expected_observation.rows_per_scan,
+            expected_first_key: expected_observation.first_key,
+            expected_last_key: expected_observation.last_key,
+            expected_key_fingerprint: expected_observation.key_fingerprint,
+        });
+
+        let reconstructed_observation = swmr_reader_observation_for_snapshot(
+            &db,
+            &reconstructed_snapshot,
+            class,
+            &light_projection,
+            swmr.light_scan_limit,
+            swmr.heavy_scan_limit,
+        )
+        .await?;
+        let expectation = reader_expectations.last().ok_or_else(|| {
+            BenchError::Message(format!(
+                "missing setup expectation immediately after building `{}`",
+                class.as_str()
+            ))
+        })?;
+        let rows_match_expected =
+            reconstructed_observation.rows_per_scan == expectation.expected_rows_per_scan;
+        let first_key_matches_expected =
+            reconstructed_observation.first_key.as_ref() == expectation.expected_first_key.as_ref();
+        let last_key_matches_expected =
+            reconstructed_observation.last_key.as_ref() == expectation.expected_last_key.as_ref();
+        let fingerprint_matches_expected =
+            reconstructed_observation.key_fingerprint == expectation.expected_key_fingerprint;
+        let valid = match expectation.validation_model {
+            common::SwmrReaderValidationModel::ExactShapeStable => {
+                rows_match_expected
+                    && reconstructed_observation.all_keys_in_expected_band
+                    && first_key_matches_expected
+                    && last_key_matches_expected
+                    && fingerprint_matches_expected
+            }
+            common::SwmrReaderValidationModel::CountAndKeyBand => {
+                rows_match_expected && reconstructed_observation.all_keys_in_expected_band
+            }
+        };
+        manifest_reconstruction_observations.push(common::SwmrReaderObservationArtifact {
+            class,
+            rows_per_scan: reconstructed_observation.rows_per_scan,
+            first_key: reconstructed_observation.first_key,
+            last_key: reconstructed_observation.last_key,
+            key_fingerprint: reconstructed_observation.key_fingerprint,
+            rows_match_expected,
+            all_keys_in_expected_band: reconstructed_observation.all_keys_in_expected_band,
+            first_key_matches_expected,
+            last_key_matches_expected,
+            fingerprint_matches_expected,
+            valid,
+        });
+    }
+    for expectation in &reader_expectations {
+        if expectation.expected_rows_per_scan == 0 {
+            return Err(BenchError::Message(format!(
+                "swmr setup invalid: reader `{}` matched 0 rows in the held pinned snapshot at ts \
+                 {}",
+                expectation.class.as_str(),
+                pinned_snapshot.read_timestamp().get()
+            )));
+        }
+    }
+    let version_ready = latest_version_summary(&db).await?;
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let setup_io = io_probe.snapshot();
+    timing.emit(scenario_id);
+
+    let swmr_state = SwmrWorkloadState::new(
+        Arc::clone(&schema),
+        Arc::clone(&light_projection),
+        pinned_snapshot,
+        pinned_manifest_version,
+        reader_expectations,
+        manifest_reconstruction_observations,
+        SwmrWorkloadParams {
+            rows_per_batch: swmr.rows_per_batch,
+            payload_bytes: swmr.payload_bytes,
+            preload_batches,
+            steady_batches,
+            writer_batches_per_step: writer_batches_per_step.max(1),
+            seed: config.seed ^ 0x5157_4D52,
+        },
+    )
+    .with_scan_limits(swmr.light_scan_limit, swmr.heavy_scan_limit)
+    .with_logical_target_bytes(swmr.logical_target_bytes);
+    let rows_per_op_hint = swmr
+        .rows_per_batch
+        .saturating_mul(writer_batches_per_step.max(1))
+        .saturating_add(swmr.light_scan_limit.saturating_mul(2))
+        .saturating_add(swmr.heavy_scan_limit.saturating_mul(2));
+
+    Ok(ScenarioState {
+        scenario_id,
+        scenario_name: format!(
+            "SWMR GB Scale Mixed [logical_target_gb={}, preload_batches={}, steady_batches={}]",
+            swmr.logical_target_bytes / (1024 * 1024 * 1024),
+            preload_batches,
+            steady_batches
+        ),
+        scenario_variant_id: scenario_variant_id.clone(),
+        benchmark_id,
+        workload: ScenarioWorkload::SwmrMixed,
+        dimensions: ScenarioDimensionsArtifact::baseline(
+            scenario_variant_id,
+            ScenarioWorkload::SwmrMixed,
+        ),
+        db,
+        io_probe,
+        setup_io,
+        rows_per_op_hint,
+        version_before_compaction,
+        version_ready,
+        volume_before_compaction,
+        volume_ready,
+        write_state: None,
+        swmr_state: Some(swmr_state),
+    })
+}
+
+async fn latest_version_info(db: &common::BenchmarkDb) -> Result<tonbo::db::Version, BenchError> {
+    let versions = match db {
+        common::BenchmarkDb::Local(inner) => inner.list_versions(1).await,
+        common::BenchmarkDb::ObjectStore(inner) => inner.list_versions(1).await,
+    }
+    .map_err(|err| BenchError::Message(format!("list_versions failed: {err}")))?;
+    versions
+        .into_iter()
+        .next()
+        .ok_or_else(|| BenchError::Message("list_versions returned no versions".to_string()))
+}
+
+async fn cleanup_scenarios(
+    scenarios: &[ScenarioState],
+    storage: &ScenarioStorage,
+    run_id: &str,
+) -> Result<(), BenchError> {
+    for scenario in scenarios {
+        match storage.backend {
+            BenchBackend::Local => {
+                let root = scenario_root(run_id, &scenario.benchmark_id);
+                cleanup_local_storage_volume(&root).await?;
+            }
+            BenchBackend::ObjectStore => {
+                let Some(object_store) = &storage.object_store else {
+                    return Err(BenchError::Message(
+                        "object_store backend selected without resolved object-store config for \
+                         cleanup"
+                            .to_string(),
+                    ));
+                };
+                let spec = object_store.object_spec(run_id, &scenario.benchmark_id);
+                cleanup_object_store_storage_volume(&spec).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn open_scenario_db(
@@ -689,6 +1057,18 @@ fn scenario_skipped<T>(scenario_id: &str, reason: impl Into<String>) -> Result<T
         scenario_id: scenario_id.to_string(),
         reason: reason.into(),
     })
+}
+
+fn env_usize_local(name: &'static str, default: usize) -> Result<usize, BenchError> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<usize>()
+            .map_err(|_| BenchError::InvalidEnv { name, value: raw }),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
 }
 
 criterion_group!(benches, compaction_local);

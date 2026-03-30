@@ -17,7 +17,7 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
     let builder = if primary_key.len() == 1 {
         builder.primary_key(primary_key[0].to_string())
     } else {
-        builder.composite_key(primary_key.iter().copied().collect::<Vec<_>>())
+        builder.composite_key(primary_key.to_vec())
     }
     .with_metadata();
 
