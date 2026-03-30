@@ -36,6 +36,87 @@ This current document remains intentionally narrower: it validates
 `read_after_compaction` first, then points to the next scenarios and
 instrumentation work needed to grow into that larger program.
 
+### Local vs Standard S3 Topology Follow-up
+
+As of March 30, 2026, this branch now has one valid first-pass comparison for
+`read_compaction_quiesced` between local storage and standard S3 from a
+non-EC2 host, plus one partially blocked higher-scale follow-up.
+
+Reference run note:
+
+- `benches/compaction/results/compaction_topology_2026-03-30.md`
+
+Reference artifacts:
+
+- valid local `scale=1`:
+  `target/tonbo-bench/compaction_local-1774884026526-2253191.json`
+- valid standard S3 `scale=1`:
+  `target/tonbo-bench/compaction_local-1774884042845-2253870.json`
+- invalid standard S3 `scale=4` after extended compaction wait:
+  `target/tonbo-bench/compaction_local-1774884882909-2283436.json`
+
+What changed before these runs:
+
+- the earlier object-store benchmark path used a probed S3 wrapper in the DB
+  read path,
+- that path produced invalid object-store artifacts during benchmark setup:
+  - `rows_per_scan = 0`
+  - `rows_processed = 0`
+  - `read_ops = 0`
+- a focused public-API S3 reopen-with-compaction test passed on the native
+  object-store path,
+- the benchmark was therefore switched back to the native object-store builder
+  path for correctness.
+
+Tradeoff of that benchmark fix:
+
+- local benchmark I/O counters remain valid,
+- object-store row visibility and latency are now valid again for the passing
+  cells,
+- object-store request counters (`read_ops`, `bytes_read`) should currently be
+  treated as unsupported until the probe wrapper is fixed.
+
+Valid `scale=1` comparison from this host:
+
+| Cell | Mean | p95 | Rows Processed | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `local, scale=1` | `41.19 ms` | `47.31 ms` | `16,384` | valid |
+| `standard S3, scale=1` | `1.678 s` | `1.726 s` | `16,384` | valid |
+
+Interpretation:
+
+- On this non-EC2 host, standard S3 is about `40x` slower than local on mean
+  latency for this small `read_compaction_quiesced` cell.
+- The standard-S3 cost is dominated by setup:
+  - mean prepare: about `1.652 s`
+  - mean consume: about `25.7 ms`
+  - mean snapshot stage alone: about `537 ms`
+- This means the branch is currently paying a large fixed object-store cost on
+  this topology before it starts streaming rows.
+
+Current block at `scale=4`:
+
+- local `scale=4` completed with valid rows,
+- standard S3 `scale=4` remained invalid even after increasing the compaction
+  wait timeout from `20 s` to `120 s`,
+- the run finished, but returned:
+  - `setup.rows_per_scan = 0`
+  - `summary.rows_processed = 0`
+
+Current conclusion:
+
+- We now have a real local-versus-standard-S3 comparison at `scale=1`.
+- We do not yet have a trustworthy standard-S3 `scale=4` comparison from this
+  host.
+- We still do not have EC2 or S3 Express numbers.
+
+Practical next step:
+
+- move to an EC2 instance in-region and run `ec2_s3` first,
+- then retry `scale=4`,
+- then attempt S3 Express from an instance in the same AZ as the directory
+  bucket.
+
 ### SWMR Pinned-Snapshot Follow-up
 
 As of March 27, 2026, the pinned-reader validity gap in the earlier local
