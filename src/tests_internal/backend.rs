@@ -80,8 +80,15 @@ pub fn local_harness(
     })
 }
 
-fn s3_env() -> Option<(String, String, String, String, String, Option<String>)> {
-    let endpoint = env::var("TONBO_S3_ENDPOINT").ok()?;
+fn s3_env() -> Option<(
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+)> {
+    let endpoint = env::var("TONBO_S3_ENDPOINT").ok();
     let bucket = env::var("TONBO_S3_BUCKET").ok()?;
     let region = env::var("TONBO_S3_REGION").ok()?;
     let access = env::var("TONBO_S3_ACCESS_KEY").ok()?;
@@ -113,7 +120,7 @@ pub fn maybe_s3_harness(
     };
 
     let mut s3 = S3Spec::new(bucket.clone(), unique_label(label), credentials);
-    s3.endpoint = Some(endpoint);
+    s3.endpoint = endpoint;
     s3.region = Some(region);
     s3.sign_payload = Some(true);
 

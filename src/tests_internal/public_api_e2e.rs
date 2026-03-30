@@ -1,13 +1,13 @@
 #![cfg(feature = "tokio")]
 
-use std::{error::Error, sync::Arc};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 
 use crate::{
-    db::{BatchesThreshold, DB, DbBuilder, Expr, NeverSeal, ScalarValue},
+    db::{BatchesThreshold, CompactionOptions, DB, DbBuilder, Expr, NeverSeal, ScalarValue},
     tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
     wal::{WalExt, WalSyncPolicy},
 };
@@ -437,6 +437,106 @@ async fn snapshot_and_merge_s3(
     Ok(())
 }
 
+async fn compaction_reopen_scan_s3(
+    schema: Arc<Schema>,
+    harness: S3Harness,
+) -> Result<(), Box<dyn Error>> {
+    let mut inner = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .open()
+        .await?
+        .into_inner();
+    inner.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+
+    let batch_count = 16usize;
+    let rows_per_batch = 64usize;
+    for batch_idx in 0..batch_count {
+        let ids: Vec<String> = (0..rows_per_batch)
+            .map(|row_idx| format!("bench-{batch_idx:02}-{row_idx:02}"))
+            .collect();
+        let vals: Vec<i32> = (0..rows_per_batch)
+            .map(|row_idx| i32::try_from(batch_idx * rows_per_batch + row_idx).unwrap_or(i32::MAX))
+            .collect();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(ids)) as _,
+                Arc::new(Int32Array::from(vals)) as _,
+            ],
+        )?;
+        inner.ingest(batch).await?;
+    }
+
+    let versions_before = inner.list_versions(4).await?;
+    let before_latest = versions_before
+        .first()
+        .ok_or("expected manifest versions before reopen")?;
+    assert!(
+        before_latest.sst_count >= 4,
+        "expected multiple SSTs before compaction, got {}",
+        before_latest.sst_count
+    );
+
+    drop(inner);
+
+    let reopened: DB<_, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .with_compaction_options(CompactionOptions::new().periodic_tick(Duration::from_millis(50)))
+        .open()
+        .await?;
+
+    let mut latest = reopened
+        .list_versions(1)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("expected manifest version after reopen")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut stable_polls = 0usize;
+    while tokio::time::Instant::now() < deadline {
+        if latest.sst_count < before_latest.sst_count && latest.level_count >= 2 {
+            stable_polls = stable_polls.saturating_add(1);
+            if stable_polls >= 3 {
+                break;
+            }
+        } else {
+            stable_polls = 0;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        latest = reopened
+            .list_versions(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or("expected manifest version while polling compaction")?;
+    }
+    assert!(
+        stable_polls >= 3,
+        "timed out waiting for quiesced compaction; before_ssts={} latest_ssts={} latest_levels={}",
+        before_latest.sst_count,
+        latest.sst_count,
+        latest.level_count
+    );
+
+    let predicate = Expr::is_not_null("id");
+    let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
+    assert_eq!(
+        rows.len(),
+        batch_count * rows_per_batch,
+        "reopened S3 compaction path should preserve visibility after compaction"
+    );
+
+    let mut inner = reopened.into_inner();
+    inner.disable_wal().await?;
+    Ok(())
+}
+
 /// Public knobs only: force minor compaction + manifest updates, then restart and time-travel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_compaction_publishes_manifest_versions() -> Result<(), Box<dyn std::error::Error>> {
@@ -473,6 +573,20 @@ async fn public_snapshot_and_merge_scan() -> Result<(), Box<dyn std::error::Erro
         wal_tuning(WalSyncPolicy::IntervalBytes(1)),
     )? {
         snapshot_and_merge_s3(schema, h).await?;
+    }
+    Ok(())
+}
+
+/// Reopen an S3-backed DB with compaction enabled and verify scans stay visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_s3_reopen_with_compaction_preserves_visibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = build_schema();
+    if let Some(h) = maybe_s3_harness(
+        "public-s3-reopen-compaction",
+        wal_tuning(WalSyncPolicy::Always),
+    )? {
+        compaction_reopen_scan_s3(schema, h).await?;
     }
     Ok(())
 }

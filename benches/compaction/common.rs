@@ -37,7 +37,7 @@ use tonbo::db::{
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 10;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 11;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -67,7 +67,7 @@ const SWMR_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 #[derive(Clone)]
 pub(crate) enum BenchmarkDb {
     Local(DB<ProbedFs<LocalFs>, TokioExecutor>),
-    ObjectStore(DB<ProbedFs<AmazonS3>, TokioExecutor>),
+    ObjectStore(DB<AmazonS3, TokioExecutor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1132,8 +1132,106 @@ pub(crate) struct BenchmarkArtifact {
     pub(crate) benchmark_id: &'static str,
     pub(crate) run_id: String,
     pub(crate) generated_at_unix_ms: u64,
+    pub(crate) topology: BenchmarkTopologyArtifact,
     pub(crate) config: ResolvedConfigArtifact,
     pub(crate) scenarios: Vec<ScenarioArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkTopologyArtifact {
+    runner_env: Option<String>,
+    runner_region: Option<String>,
+    runner_az: Option<String>,
+    runner_instance_type: Option<String>,
+    bucket_region: Option<String>,
+    bucket_az: Option<String>,
+    object_store_flavor: Option<String>,
+    endpoint_kind: Option<String>,
+    network_path: Option<String>,
+    median_rtt_ms: Option<f64>,
+    same_region: Option<bool>,
+    same_az: Option<bool>,
+}
+
+impl BenchmarkTopologyArtifact {
+    pub(crate) fn from_env() -> Result<Self, BenchError> {
+        let runner_region = env_optional_trimmed("TONBO_BENCH_RUNNER_REGION")?;
+        let runner_az = env_optional_trimmed("TONBO_BENCH_RUNNER_AZ")?;
+        let bucket_region = env_optional_trimmed("TONBO_BENCH_BUCKET_REGION")?;
+        let bucket_az = env_optional_trimmed("TONBO_BENCH_BUCKET_AZ")?;
+        let same_region = match (&runner_region, &bucket_region) {
+            (Some(runner), Some(bucket)) => Some(runner == bucket),
+            _ => None,
+        };
+        let same_az = match (&runner_az, &bucket_az) {
+            (Some(runner), Some(bucket)) => Some(runner == bucket),
+            _ => None,
+        };
+
+        Ok(Self {
+            runner_env: env_optional_trimmed("TONBO_BENCH_RUNNER_ENV")?,
+            runner_region,
+            runner_az,
+            runner_instance_type: env_optional_trimmed("TONBO_BENCH_RUNNER_INSTANCE_TYPE")?,
+            bucket_region,
+            bucket_az,
+            object_store_flavor: env_optional_trimmed("TONBO_BENCH_OBJECT_STORE_FLAVOR")?,
+            endpoint_kind: env_optional_trimmed("TONBO_BENCH_ENDPOINT_KIND")?,
+            network_path: env_optional_trimmed("TONBO_BENCH_NETWORK_PATH")?,
+            median_rtt_ms: env_optional_f64("TONBO_BENCH_MEDIAN_RTT_MS")?,
+            same_region,
+            same_az,
+        })
+    }
+
+    fn has_any_signal(&self) -> bool {
+        self.runner_env.is_some()
+            || self.runner_region.is_some()
+            || self.runner_az.is_some()
+            || self.runner_instance_type.is_some()
+            || self.bucket_region.is_some()
+            || self.bucket_az.is_some()
+            || self.object_store_flavor.is_some()
+            || self.endpoint_kind.is_some()
+            || self.network_path.is_some()
+            || self.median_rtt_ms.is_some()
+            || self.same_region.is_some()
+            || self.same_az.is_some()
+    }
+
+    fn summary_line(&self) -> Option<String> {
+        if !self.has_any_signal() {
+            return None;
+        }
+        let mut fields = Vec::new();
+        push_topology_field(&mut fields, "runner_env", self.runner_env.as_deref());
+        push_topology_field(&mut fields, "runner_region", self.runner_region.as_deref());
+        push_topology_field(&mut fields, "runner_az", self.runner_az.as_deref());
+        push_topology_field(
+            &mut fields,
+            "runner_instance_type",
+            self.runner_instance_type.as_deref(),
+        );
+        push_topology_field(&mut fields, "bucket_region", self.bucket_region.as_deref());
+        push_topology_field(&mut fields, "bucket_az", self.bucket_az.as_deref());
+        push_topology_field(
+            &mut fields,
+            "object_store_flavor",
+            self.object_store_flavor.as_deref(),
+        );
+        push_topology_field(&mut fields, "endpoint_kind", self.endpoint_kind.as_deref());
+        push_topology_field(&mut fields, "network_path", self.network_path.as_deref());
+        if let Some(rtt) = self.median_rtt_ms {
+            fields.push(format!("median_rtt_ms={rtt:.2}"));
+        }
+        if let Some(same_region) = self.same_region {
+            fields.push(format!("same_region={same_region}"));
+        }
+        if let Some(same_az) = self.same_az {
+            fields.push(format!("same_az={same_az}"));
+        }
+        Some(fields.join(", "))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1837,7 +1935,7 @@ async fn run_swmr_reader_local(
 }
 
 async fn run_swmr_reader_object_store(
-    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    db: &DB<AmazonS3, TokioExecutor>,
     state: &SwmrWorkloadState,
     class: SwmrReaderClass,
 ) -> Result<SwmrReaderOperationResult, BenchError> {
@@ -1939,7 +2037,7 @@ async fn execute_scan_profiled_local(
 }
 
 async fn execute_scan_profiled_object_store(
-    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    db: &DB<AmazonS3, TokioExecutor>,
     predicate: Expr,
     projection: Option<SchemaRef>,
     limit: usize,
@@ -2051,7 +2149,7 @@ async fn execute_snapshot_scan_row_count_local(
 }
 
 async fn execute_snapshot_scan_row_count_object_store(
-    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    db: &DB<AmazonS3, TokioExecutor>,
     snapshot: &DbSnapshot,
     predicate: Expr,
     projection: Option<SchemaRef>,
@@ -2252,6 +2350,7 @@ pub(crate) fn build_artifact(
         benchmark_id: BENCH_ID,
         run_id: run_id.to_string(),
         generated_at_unix_ms: unix_epoch_ms(),
+        topology: BenchmarkTopologyArtifact::from_env()?,
         config: config.artifact(),
         scenarios: scenario_artifacts,
     })
@@ -2306,6 +2405,9 @@ pub(crate) fn print_directional_report(artifact: &BenchmarkArtifact, config: &Re
     eprintln!("  Scenario Set: compaction.read_baseline vs compaction.read_compaction_quiesced");
     eprintln!("  Dataset Scale: {}", config.dataset_scale);
     eprintln!("  Backend: {}", config.backend.as_str());
+    if let Some(summary) = artifact.topology.summary_line() {
+        eprintln!("  Topology: {summary}");
+    }
     eprintln!(
         "  Latency (ns): baseline(mean={:.2}, p50={}, p95={}, p99={}) quiesced(mean={:.2}, \
          p50={}, p95={}, p99={})",
@@ -2392,11 +2494,11 @@ pub(crate) async fn open_object_store_benchmark_db(
     object_spec: &ObjectSpec,
     config: &ResolvedConfig,
     compaction_profile: &CompactionProfile,
-    io_probe: &IoProbe,
+    _io_probe: &IoProbe,
 ) -> Result<BenchmarkDb, BenchError> {
-    let (fs, root) = build_probed_object_store_fs(object_spec, io_probe)?;
     let mut builder = DbBuilder::from_schema_key_name(Arc::clone(schema), "id")?
-        .object_store_with_fs(fs, root)?
+        .object_store(object_spec.clone())
+        .map_err(BenchError::from)?
         .wal_sync_policy(config.wal_sync_policy.clone())
         .with_minor_compaction(1, 0);
 
@@ -2900,7 +3002,7 @@ async fn read_all_rows_local(
 }
 
 async fn read_all_rows_object_store(
-    db: &DB<ProbedFs<AmazonS3>, TokioExecutor>,
+    db: &DB<AmazonS3, TokioExecutor>,
 ) -> Result<(usize, ReadPathBreakdown), BenchError> {
     let plan_started = Instant::now();
     let (mut stream, profile) = db
@@ -3344,6 +3446,49 @@ fn env_backend(name: &'static str, default: BenchBackend) -> Result<BenchBackend
         Err(err) => Err(BenchError::Message(format!(
             "failed reading environment variable `{name}`: {err}"
         ))),
+    }
+}
+
+fn env_optional_trimmed(name: &'static str) -> Result<Option<String>, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn env_optional_f64(name: &'static str) -> Result<Option<f64>, BenchError> {
+    match env::var(name) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let value = trimmed.parse::<f64>().map_err(|_| BenchError::InvalidEnv {
+                name,
+                value: raw.clone(),
+            })?;
+            Ok(Some(value))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(BenchError::Message(format!(
+            "failed reading environment variable `{name}`: {err}"
+        ))),
+    }
+}
+
+fn push_topology_field(fields: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        fields.push(format!("{label}={value}"));
     }
 }
 
