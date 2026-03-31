@@ -103,19 +103,112 @@ Current block at `scale=4`:
   - `setup.rows_per_scan = 0`
   - `summary.rows_processed = 0`
 
+Current conclusion from the non-EC2 first pass:
+
+- We had a real local-versus-standard-S3 comparison at `scale=1`.
+- We did not yet have a trustworthy standard-S3 `scale=4` comparison from that
+  host.
+- The next step was to move the comparison onto EC2 and retry there.
+
+### EC2 Same-Host Topology Follow-up
+
+As of March 31, 2026, this branch now has a valid same-host EC2 comparison for:
+
+- `read_compaction_quiesced` at `scale=1`
+- `read_compaction_quiesced` at `scale=4`
+- `swmr_gb_scale_mixed` at `~1 GB logical`
+
+Reference run note:
+
+- `benches/compaction/results/ec2_same_host_topology_2026-03-31.md`
+
+Reference artifacts:
+
+- directional local `scale=1`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774959138050-20408.json`
+- directional local `scale=4`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774959154810-20444.json`
+- directional standard S3 `scale=1`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774950219198-9849.json`
+- directional standard S3 `scale=4`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774954499953-19743.json`
+- SWMR local `1 GB`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774959331220-20736.json`
+- SWMR standard S3 `1 GB`:
+  `target/tonbo-bench/ec2-euc1/compaction_local-1774959375012-20910.json`
+
+Same-host EC2 directional comparison:
+
+| Cell | Mean | p95 | Rows Processed |
+| --- | ---: | ---: | ---: |
+| `ec2 local, scale=1` | `28.88 ms` | `29.30 ms` | `24,576` |
+| `ec2 standard S3, scale=1` | `747.19 ms` | `793.70 ms` | `24,576` |
+| `ec2 local, scale=4` | `81.18 ms` | `82.58 ms` | `24,576` |
+| `ec2 standard S3, scale=4` | `1263.28 ms` | `1284.84 ms` | `24,576` |
+
+Observed ratio on the same EC2 host:
+
+- `scale=1` mean: `25.9x`
+- `scale=1` p95: `27.1x`
+- `scale=4` mean: `15.6x`
+- `scale=4` p95: `15.6x`
+
+Interpretation:
+
+- same-region EC2 materially improves the standard-S3 numbers relative to the
+  non-EC2 remote host, but standard S3 is still an order of magnitude slower
+  than local on the same machine,
+- the standard-S3 cost remains heavily prepare/setup-dominated on this
+  scenario,
+- the earlier EC2 `scale=4` invalid artifact was a benchmark-harness bug, not
+  a proven generic engine reopen/read bug.
+
+Same-host EC2 SWMR `1 GB` comparison:
+
+| Cell | Mean Step (s) | p95 Step (s) | Throughput | Writer Mean (s) | Head Light (s) | Head Heavy (s) | Pinned Light (s) | Pinned Heavy (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ec2 local, ~1 GB logical` | `0.211` | `0.283` | `37.57 Krows/s` | `0.148` | `0.0076` | `0.0356` | `0.0028` | `0.0176` |
+| `ec2 standard S3, ~1 GB logical` | `9.642` | `11.950` | `823 rows/s` | `5.840` | `0.887` | `1.617` | `0.275` | `1.022` |
+
+Observed ratio on the same EC2 host:
+
+- whole mixed step mean: `45.7x`
+- writer mean: `39.5x`
+- `head_light`: `117.3x`
+- `head_heavy`: `45.4x`
+- `pinned_light`: `99.6x`
+- `pinned_heavy`: `58.1x`
+
+Interpretation:
+
+- the same-host `1 GB` result shows the branch deteriorates materially as state
+  size and workload realism increase,
+- the main wall is still the writer path on standard S3, but the reader costs
+  are also large enough to matter,
+- both same-host `1 GB` artifacts are correctness-valid, so these are usable
+  comparison numbers.
+
+### S3 Express Status
+
+This branch also investigated S3 Express enablement directly.
+
+What was proven:
+
+- `eu-central-1` was not usable for the intended Express run from the current
+  environments because the regional control endpoint did not resolve there,
+- a real S3 Express directory bucket was created and exercised successfully in
+  `us-east-1`,
+- Tonbo/Fusio still could not use that directory bucket for benchmark/test
+  object-store access.
+
 Current conclusion:
 
-- We now have a real local-versus-standard-S3 comparison at `scale=1`.
-- We do not yet have a trustworthy standard-S3 `scale=4` comparison from this
-  host.
-- We still do not have EC2 or S3 Express numbers.
-
-Practical next step:
-
-- move to an EC2 instance in-region and run `ec2_s3` first,
-- then retry `scale=4`,
-- then attempt S3 Express from an instance in the same AZ as the directory
-  bucket.
+- S3 Express is not blocked on AWS account setup anymore.
+- It is blocked on lower-layer client support for:
+  - zonal virtual-hosted object endpoints
+  - `CreateSession` credential flow
+- This should therefore be treated as follow-up client work rather than
+  continued benchmark-harness work on this branch.
 
 ### SWMR Pinned-Snapshot Follow-up
 
