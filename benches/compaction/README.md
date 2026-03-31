@@ -267,6 +267,10 @@ Cell-specific environment expected by `run_matrix.sh`:
   - `TONBO_MATRIX_EXPRESS_S3_REGION`
   - `TONBO_MATRIX_EXPRESS_S3_ENDPOINT`
   - `TONBO_MATRIX_EXPRESS_S3_BUCKET_AZ`
+  - `run_matrix.sh` now preflights both the regional control endpoint
+    (`s3express-control.<region>.amazonaws.com`) and the configured zonal endpoint.
+    If either hostname does not resolve from the current host, the Express cell is
+    marked `skipped` in the report instead of failing mid-run.
 - Credentials:
   - either `TONBO_S3_ACCESS_KEY` / `TONBO_S3_SECRET_KEY`
   - or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`

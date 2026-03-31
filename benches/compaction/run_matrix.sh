@@ -33,6 +33,29 @@ trim() {
     printf '%s' "${value}"
 }
 
+endpoint_hostname() {
+    local endpoint="$1"
+    endpoint="${endpoint#http://}"
+    endpoint="${endpoint#https://}"
+    endpoint="${endpoint%%/*}"
+    endpoint="${endpoint%%:*}"
+    printf '%s' "${endpoint}"
+}
+
+hostname_resolves() {
+    local host="$1"
+    python3 - "${host}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+try:
+    socket.getaddrinfo(host, None)
+except socket.gaierror:
+    sys.exit(1)
+PY
+}
+
 require_var() {
     local name="$1"
     if [[ -z "${!name:-}" ]]; then
@@ -172,6 +195,7 @@ run_cell() {
     local s3_bucket=""
     local s3_region=""
     local s3_endpoint=""
+    local skip_reason=""
 
     started_marker="$(mktemp)"
     touch "${started_marker}"
@@ -300,6 +324,26 @@ run_cell() {
     append_report "- backend: \`${backend}\`"
     append_report "- object_store_flavor: \`${object_store_flavor}\`"
     append_report "- scenario: \`${SCENARIO}\`"
+
+    if [[ "${object_store_flavor}" == "s3_express" ]]; then
+        local control_host zonal_host
+        control_host="s3express-control.${s3_region}.amazonaws.com"
+        zonal_host="$(endpoint_hostname "${s3_endpoint}")"
+        if ! hostname_resolves "${control_host}"; then
+            skip_reason="S3 Express control endpoint does not resolve from this host: ${control_host}"
+        elif ! hostname_resolves "${zonal_host}"; then
+            skip_reason="S3 Express zonal endpoint does not resolve from this host: ${zonal_host}"
+        fi
+        if [[ -n "${skip_reason}" ]]; then
+            append_report "- status: skipped"
+            append_report "- object_prefix: \`${prefix}\`"
+            append_report "- notes:"
+            append_report "  ${skip_reason}"
+            rm -f "${started_marker}"
+            printf 'skipping %s scale=%s: %s\n' "${cell}" "${scale}" "${skip_reason}" >&2
+            return 0
+        fi
+    fi
 
     if [[ "${RUN_MODE}" == "print" ]]; then
         printf '%q ' "${cmd[@]}"

@@ -2838,7 +2838,7 @@ fn swmr_preload_key(index: usize) -> String {
     }
 }
 
-fn deterministic_key_slot(global_idx: usize, key_space: usize, seed: u64) -> usize {
+pub(crate) fn deterministic_key_slot(global_idx: usize, key_space: usize, seed: u64) -> usize {
     if key_space <= 1 {
         return 0;
     }

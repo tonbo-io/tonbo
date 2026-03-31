@@ -1,6 +1,10 @@
 #![cfg(feature = "tokio")]
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -488,8 +492,20 @@ async fn prepare_read_compaction_state(
     }
     timing.record("wait_for_compaction_state", phase_started);
     let version_ready = latest_version_summary(&db).await?;
+    drop(db);
+
     let phase_started = Instant::now();
-    let (rows_per_scan, _) = read_all_rows(&db).await?;
+    let expected_rows_per_scan = expected_benchmark_visible_rows(config);
+    let (db, rows_per_scan) = reopen_measurement_db_until_visible(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &io_probe,
+        expected_rows_per_scan,
+    )
+    .await?;
     timing.record("read_all_rows", phase_started);
     let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
     let setup_io = io_probe.snapshot();
@@ -516,6 +532,59 @@ async fn prepare_read_compaction_state(
         write_state: None,
         swmr_state: None,
     })
+}
+
+fn expected_benchmark_visible_rows(config: &ResolvedConfig) -> usize {
+    let total_rows = config.ingest_batches.saturating_mul(config.rows_per_batch);
+    let mut keys = HashSet::with_capacity(config.key_space.min(total_rows));
+    for global_idx in 0..total_rows {
+        keys.insert(common::deterministic_key_slot(
+            global_idx,
+            config.key_space,
+            config.seed,
+        ));
+    }
+    keys.len()
+}
+
+async fn reopen_measurement_db_until_visible(
+    storage: &ScenarioStorage,
+    schema: &arrow_schema::SchemaRef,
+    run_id: &str,
+    benchmark_id: &str,
+    config: &ResolvedConfig,
+    io_probe: &common::IoProbe,
+    expected_rows_per_scan: usize,
+) -> Result<(common::BenchmarkDb, usize), BenchError> {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(config.compaction_wait_timeout_ms.max(5_000));
+    let poll = Duration::from_millis(config.compaction_poll_interval_ms.max(50));
+    loop {
+        let db = open_scenario_db(
+            storage,
+            schema,
+            run_id,
+            benchmark_id,
+            config,
+            &CompactionProfile::Disabled,
+            io_probe,
+        )
+        .await?;
+        let (rows_per_scan, _) = read_all_rows(&db).await?;
+        if rows_per_scan == expected_rows_per_scan {
+            return Ok((db, rows_per_scan));
+        }
+        drop(db);
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(BenchError::Message(format!(
+                "reopened measurement db never reached expected visibility: rows={} \
+                 expected_rows={}",
+                rows_per_scan, expected_rows_per_scan
+            )));
+        }
+        tokio::time::sleep(poll).await;
+    }
 }
 
 async fn prepare_read_while_compaction(

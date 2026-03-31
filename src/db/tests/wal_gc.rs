@@ -243,6 +243,26 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     );
 
     db.disable_wal().await?;
+    drop(db);
+
+    // Reopen after all WAL segments have been garbage-collected. Visibility now
+    // depends entirely on manifest/SST state plus whatever recovery initializes
+    // the read timestamp from.
+    let reopen_after_gc = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let recovered_after_gc = DB::<LocalFs, TokioExecutor>::builder(reopen_after_gc)
+        .on_disk(root_str.clone())?
+        .wal_segment_bytes(512)
+        .wal_flush_interval(Duration::from_millis(1))
+        .wal_sync_policy(WalSyncPolicy::Disabled)
+        .open_with_executor(Arc::clone(&executor))
+        .await?;
+    assert_eq!(rows_from_db(&recovered_after_gc).await, {
+        let mut rows = ingested_rows.clone();
+        rows.sort();
+        rows
+    });
+    recovered_after_gc.into_inner().disable_wal().await?;
+
     fs::remove_dir_all(&temp_root)?;
     Ok(())
 }
