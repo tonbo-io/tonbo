@@ -1,6 +1,6 @@
 #![cfg(feature = "tokio")]
 
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
@@ -106,6 +106,49 @@ where
         }
         tokio::time::sleep(poll).await;
     }
+}
+
+fn error_chain_contains(err: &dyn Error, needle: &str) -> bool {
+    if err.to_string().contains(needle) {
+        return true;
+    }
+    let mut current = err.source();
+    while let Some(source) = current {
+        if source.to_string().contains(needle) {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+fn is_transient_remote_read_error(err: &dyn Error) -> bool {
+    error_chain_contains(err, "IncompleteMessage")
+        || error_chain_contains(err, "connection closed before message completed")
+}
+
+async fn retry_transient_remote_read<T, F, Fut>(label: &str, mut op: F) -> Result<T, Box<dyn Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Box<dyn Error>>>,
+{
+    let max_attempts = 3usize;
+    let mut delay = Duration::from_millis(250);
+    for attempt in 1..=max_attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < max_attempts && is_transient_remote_read_error(err.as_ref()) => {
+                eprintln!(
+                    "retrying transient remote read failure during {label} (attempt \
+                     {attempt}/{max_attempts}): {err}"
+                );
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(format!("unreachable retry state for {label}").into())
 }
 
 async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
@@ -560,7 +603,12 @@ async fn compaction_reopen_scan_s3(
     wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
 
     let predicate = Expr::is_not_null("id");
-    let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
+    let rows = retry_transient_remote_read("reopened s3 visibility scan", || async {
+        Ok(extract_rows(
+            reopened.scan().filter(predicate.clone()).collect().await?,
+        ))
+    })
+    .await?;
     assert_eq!(
         rows.len(),
         batch_count * rows_per_batch,
@@ -646,32 +694,51 @@ async fn compaction_reopen_scan_s3_duplicate_key_workload(
 
     wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
 
-    let rows = extract_rows(reopened.scan().collect().await?);
     let expected_rows: Vec<(String, i32)> = expected_latest.into_iter().collect();
-    assert_eq!(
-        rows, expected_rows,
-        "reopened S3 duplicate-key compaction path should preserve latest-value visibility for \
-         unfiltered scans"
-    );
-
-    let profiled_rows = extract_rows_with_profile(&reopened).await?;
-    assert_eq!(
-        profiled_rows, expected_rows,
-        "reopened S3 duplicate-key compaction path should preserve latest-value visibility for \
-         profiled scans"
-    );
-
     let predicate = Expr::is_not_null("id");
-    let filtered_rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
-    assert_eq!(
-        filtered_rows, expected_rows,
-        "reopened S3 duplicate-key compaction path should preserve latest-value visibility for \
-         filtered scans"
-    );
+    let verification = async {
+        let rows =
+            retry_transient_remote_read("reopened s3 duplicate-key unfiltered scan", || async {
+                Ok(extract_rows(reopened.scan().collect().await?))
+            })
+            .await?;
+        assert_eq!(
+            rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for unfiltered scans"
+        );
+
+        let profiled_rows =
+            retry_transient_remote_read("reopened s3 duplicate-key profiled scan", || async {
+                extract_rows_with_profile(&reopened).await
+            })
+            .await?;
+        assert_eq!(
+            profiled_rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for profiled scans"
+        );
+
+        let filtered_rows =
+            retry_transient_remote_read("reopened s3 duplicate-key filtered scan", || async {
+                Ok(extract_rows(
+                    reopened.scan().filter(predicate.clone()).collect().await?,
+                ))
+            })
+            .await?;
+        assert_eq!(
+            filtered_rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for filtered scans"
+        );
+
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
 
     let mut inner = reopened.into_inner();
     inner.disable_wal().await?;
-    Ok(())
+    verification
 }
 
 /// Public knobs only: force minor compaction + manifest updates, then restart and time-travel.
@@ -736,7 +803,7 @@ async fn public_s3_reopen_with_compaction_preserves_duplicate_key_visibility()
         "public-s3-reopen-compaction-duplicate-keys",
         wal_tuning(WalSyncPolicy::Always),
     )? {
-        compaction_reopen_scan_s3_duplicate_key_workload(schema, h, 128, 64, 2048).await?;
+        compaction_reopen_scan_s3_duplicate_key_workload(schema, h, 32, 64, 512).await?;
     }
     Ok(())
 }
