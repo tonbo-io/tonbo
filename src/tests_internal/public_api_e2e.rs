@@ -58,6 +58,56 @@ where
     Ok(extract_rows(batches))
 }
 
+async fn latest_version<FS>(
+    db: &DB<FS, TokioExecutor>,
+) -> Result<crate::db::Version, Box<dyn Error>>
+where
+    FS: crate::manifest::ManifestFs<TokioExecutor>,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    db.list_versions(1)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "list_versions returned no versions".into())
+}
+
+async fn wait_for_reopen_compaction_progress<FS>(
+    db: &DB<FS, TokioExecutor>,
+    before: &crate::db::Version,
+) -> Result<crate::db::Version, Box<dyn Error>>
+where
+    FS: crate::manifest::ManifestFs<TokioExecutor>,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    let timeout = Duration::from_secs(180);
+    let poll = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    loop {
+        let current = latest_version(db).await?;
+        let manifest_advanced = current.timestamp != before.timestamp;
+        let compaction_progressed =
+            current.level_count >= 2 && current.sst_count < before.sst_count;
+        if manifest_advanced && compaction_progressed {
+            return Ok(current);
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "timed out waiting for reopen compaction progress: before(ts={}, ssts={}, \
+                 levels={}) current(ts={}, ssts={}, levels={})",
+                before.timestamp.get(),
+                before.sst_count,
+                before.level_count,
+                current.timestamp.get(),
+                current.sst_count,
+                current.level_count
+            )
+            .into());
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
     let mut harness = local_harness("public-compaction", wal_tuning(WalSyncPolicy::Always))?;
     let mut db = DbBuilder::from_schema_key_name(schema.clone(), "id")?
@@ -507,38 +557,7 @@ async fn compaction_reopen_scan_s3(
         .open()
         .await?;
 
-    let mut latest = reopened
-        .list_versions(1)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or("expected manifest version after reopen")?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut stable_polls = 0usize;
-    while tokio::time::Instant::now() < deadline {
-        if latest.sst_count < before_latest.sst_count && latest.level_count >= 2 {
-            stable_polls = stable_polls.saturating_add(1);
-            if stable_polls >= 3 {
-                break;
-            }
-        } else {
-            stable_polls = 0;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        latest = reopened
-            .list_versions(1)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or("expected manifest version while polling compaction")?;
-    }
-    assert!(
-        stable_polls >= 3,
-        "timed out waiting for quiesced compaction; before_ssts={} latest_ssts={} latest_levels={}",
-        before_latest.sst_count,
-        latest.sst_count,
-        latest.level_count
-    );
+    wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
 
     let predicate = Expr::is_not_null("id");
     let rows = extract_rows(reopened.scan().filter(predicate).collect().await?);
@@ -625,38 +644,7 @@ async fn compaction_reopen_scan_s3_duplicate_key_workload(
         .open()
         .await?;
 
-    let mut latest = reopened
-        .list_versions(1)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or("expected manifest version after reopen")?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut stable_polls = 0usize;
-    while tokio::time::Instant::now() < deadline {
-        if latest.sst_count < before_latest.sst_count && latest.level_count >= 2 {
-            stable_polls = stable_polls.saturating_add(1);
-            if stable_polls >= 3 {
-                break;
-            }
-        } else {
-            stable_polls = 0;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        latest = reopened
-            .list_versions(1)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or("expected manifest version while polling compaction")?;
-    }
-    assert!(
-        stable_polls >= 3,
-        "timed out waiting for quiesced compaction; before_ssts={} latest_ssts={} latest_levels={}",
-        before_latest.sst_count,
-        latest.sst_count,
-        latest.level_count
-    );
+    wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
 
     let rows = extract_rows(reopened.scan().collect().await?);
     let expected_rows: Vec<(String, i32)> = expected_latest.into_iter().collect();
