@@ -188,27 +188,177 @@ Interpretation:
 - both same-host `1 GB` artifacts are correctness-valid, so these are usable
   comparison numbers.
 
-### S3 Express Status
+### S3 Express Follow-up
 
-This branch also investigated S3 Express enablement directly.
+As of April 1, 2026, the branch no longer stops at S3 Express investigation.
+S3 Express now works end to end against a real directory bucket when Tonbo is
+linked to the local Fusio checkout with explicit Express support.
 
-What was proven:
+Reference run note:
 
-- `eu-central-1` was not usable for the intended Express run from the current
-  environments because the regional control endpoint did not resolve there,
-- a real S3 Express directory bucket was created and exercised successfully in
-  `us-east-1`,
-- Tonbo/Fusio still could not use that directory bucket for benchmark/test
-  object-store access.
+- `benches/compaction/results/ec2_s3_express_cross_region_2026-04-01.md`
+
+Reference artifacts:
+
+- Express `scale=1`:
+  `/home/ubuntu/tonbo/target/tonbo-bench/compaction_local-1774974760820-43953.json`
+- Express `scale=4`:
+  `/home/ubuntu/tonbo/target/tonbo-bench/compaction_local-1774990219851-46818.json`
+- Express `1 GB` SWMR:
+  `/home/ubuntu/tonbo/target/tonbo-bench/compaction_local-1774991631101-47482.json`
+
+What changed to make Express work:
+
+- Fusio now has explicit `s3_express` handling for zonal virtual-hosted
+  endpoints plus `CreateSession` support.
+- Tonbo now exposes and wires `S3Spec.s3_express` through tests and benchmarks.
+- The benchmark harness now propagates `spec.s3_express` to the separate
+  object-store FS used for snapshot/cleanup metadata walking.
+
+That harness fix matters because the initial failing benchmark path was not the
+core DB path. It was the metadata walk rebuilding an S3 client without Express
+mode and then hitting the real Express endpoint with the wrong signing flow.
+
+Environment actually measured:
+
+- runner: EC2 `c7i.large` in `eu-central-1 / euc1-az1`
+- directory bucket: `us-east-1 / use1-az6`
+- endpoint kind: zonal virtual-hosted
+- network path: `public_internet_cross_region`
+
+Express directional comparison against the same EC2 host baselines:
+
+| Cell | Mean | p95 | Rows Processed |
+| --- | ---: | ---: | ---: |
+| `ec2 local, scale=1` | `28.88 ms` | `29.30 ms` | `24,576` |
+| `ec2 standard S3, scale=1` | `747.19 ms` | `793.70 ms` | `24,576` |
+| `ec2 S3 Express, scale=1` | `18.188 s` | `18.890 s` | `24,576` |
+| `ec2 local, scale=4` | `81.18 ms` | `82.58 ms` | `24,576` |
+| `ec2 standard S3, scale=4` | `1263.28 ms` | `1284.84 ms` | `24,576` |
+| `ec2 S3 Express, scale=4` | `9.356 s` | `9.651 s` | `24,576` |
+
+Express `1 GB` SWMR comparison against the same EC2 host baselines:
+
+| Cell | Mean Step (s) | p95 Step (s) | Throughput | Writer Mean (s) | Head Light (s) | Head Heavy (s) | Pinned Light (s) | Pinned Heavy (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ec2 local, ~1 GB logical` | `0.211` | `0.283` | `37.57 Krows/s` | `0.148` | `0.0076` | `0.0356` | `0.0028` | `0.0176` |
+| `ec2 standard S3, ~1 GB logical` | `9.642` | `11.950` | `823 rows/s` | `5.840` | `0.887` | `1.617` | `0.275` | `1.022` |
+| `ec2 S3 Express, ~1 GB logical` | `77.088` | `84.092` | `102.95 rows/s` | `42.486` | `9.523` | `13.860` | `2.978` | `8.241` |
+
+Interpretation:
+
+- These Express numbers prove functional enablement, not product advantage.
+- In this branch's only working topology, Express is much slower than the
+  same-host same-region standard-S3 cells:
+  - `scale=1` mean: `24.3x` slower than standard S3
+  - `scale=4` mean: `7.4x` slower than standard S3
+  - `1 GB` SWMR mixed-step mean: `8.0x` slower than standard S3
+- The directional Express cells are almost entirely prepare-dominated:
+  - `scale=1`: `99.5%` prepare
+  - `scale=4`: `98.8%` prepare
+- That strongly suggests the measured penalty is cross-region setup/request
+  establishment overhead, not the low-latency same-AZ story S3 Express is
+  designed for.
 
 Current conclusion:
 
-- S3 Express is not blocked on AWS account setup anymore.
-- It is blocked on lower-layer client support for:
-  - zonal virtual-hosted object endpoints
-  - `CreateSession` credential flow
-- This should therefore be treated as follow-up client work rather than
-  continued benchmark-harness work on this branch.
+- The branch no longer has an S3 Express client-capability gap.
+- The remaining question is deployment topology.
+- The next meaningful Express comparison is:
+  - same-region EC2 runner
+  - ideally same-AZ runner
+  - standard-S3 control run from that same host
+
+### S3 Express Same-Region Same-Host Follow-up
+
+As of April 1, 2026, the branch also has the first directly comparable
+same-host runs between standard S3 and S3 Express in `us-east-1`.
+
+Reference run note:
+
+- `benches/compaction/results/ec2_use1_same_region_2026-04-01.md`
+
+Reference artifacts:
+
+- standard S3 `scale=1`:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775037685933-15549.json`
+- Express `scale=1`:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775037800005-15703.json`
+- standard S3 `scale=4`:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775038027706-15936.json`
+- Express `scale=4`:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775038376217-16364.json`
+- standard S3 `1 GB` SWMR:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775039166401-16780.json`
+- Express `1 GB` SWMR:
+  `/home/ubuntu/workspace/tonbo/target/tonbo-bench/compaction_local-1775040119330-17177.json`
+
+Environment actually measured:
+
+- runner: EC2 `c7i.large` in `us-east-1 / use1-az6`
+- standard S3 control bucket: `us-east-1`
+- Express directory bucket: `us-east-1 / use1-az6`
+- Express network placement: same region, same AZ
+
+Same-host directional comparison:
+
+| Cell | Mean | p95 | Rows Processed |
+| --- | ---: | ---: | ---: |
+| `use1 standard S3, scale=1` | `873.05 ms` | `1263.49 ms` | `24,576` |
+| `use1 S3 Express same-AZ, scale=1` | `2278.97 ms` | `2621.39 ms` | `24,576` |
+| `use1 standard S3, scale=4` | `2478.59 ms` | `2768.13 ms` | `24,576` |
+| `use1 S3 Express same-AZ, scale=4` | `4071.72 ms` | `4264.24 ms` | `24,576` |
+
+Same-host `1 GB` SWMR comparison:
+
+| Cell | Mean Step (s) | p95 Step (s) | Throughput | Writer Mean (s) | Head Light (s) | Head Heavy (s) | Pinned Light (s) | Pinned Heavy (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `use1 standard S3, ~1 GB logical` | `11.644` | `13.747` | `681.57 rows/s` | `7.571` | `1.034` | `1.690` | `0.289` | `1.060` |
+| `use1 S3 Express same-AZ, ~1 GB logical` | `40.162` | `42.338` | `197.60 rows/s` | `21.575` | `4.777` | `8.102` | `0.962` | `4.744` |
+
+What this changes relative to the earlier cross-region Express result:
+
+- the old absurd cross-region penalty was real and misleading
+- same-region same-AZ Express is much better than the earlier cross-region
+  Express runs
+- but it still does not beat the same-host standard-S3 control in the current
+  Tonbo/Fusio path
+
+Observed ratio on the same `us-east-1` host:
+
+- `scale=1` mean: Express `2.61x` slower than standard S3
+- `scale=4` mean: Express `1.64x` slower than standard S3
+- `1 GB` SWMR mixed-step mean: Express `3.45x` slower than standard S3
+
+Why this is still useful:
+
+- it proves the remaining gap is not just “wrong region”
+- it narrows the remaining problem to the current storage path itself
+
+Focused debug result:
+
+- a same-host Express debug rerun with `FUSIO_S3_EXPRESS_DEBUG=1` logged:
+  - `CreateSession` count: `1`
+  - Express list failures: `0`
+
+That matters because it means the old repeated-session bug is not the current
+dominant explanation for the same-host gap.
+
+Current interpretation:
+
+- the current Express path is still paying a larger fixed setup/write-path cost
+  than the standard-S3 path in Tonbo/Fusio
+- that gap grows especially large in write-heavy shapes:
+  - Express `1 GB` preload time: `2331.777 s`
+  - standard S3 `1 GB` preload time: `699.734 s`
+
+Current conclusion:
+
+- S3 Express is functionally working in the intended same-region same-AZ
+  topology
+- but the current implementation is not yet delivering a performance win
+- the next meaningful work is instrumentation and path-level cost accounting,
+  not more benchmark topologies
 
 ### SWMR Pinned-Snapshot Follow-up
 

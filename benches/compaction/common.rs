@@ -349,6 +349,10 @@ where
     async fn link(&self, from: &FusioPath, to: &FusioPath) -> Result<(), FusioError> {
         self.inner.link(from, to).await
     }
+
+    async fn exists(&self, path: &FusioPath) -> Result<bool, FusioError> {
+        self.inner.exists(path).await
+    }
 }
 
 impl<FS> FsCas for ProbedFs<FS>
@@ -421,6 +425,7 @@ pub(crate) struct ObjectStoreBenchConfig {
     pub(crate) access_key: String,
     pub(crate) secret_key: String,
     pub(crate) session_token: Option<String>,
+    pub(crate) s3_express: bool,
     pub(crate) prefix_base: String,
 }
 
@@ -460,6 +465,10 @@ impl ObjectStoreBenchConfig {
             .map_err(|err| format!("failed reading TONBO_S3_SECRET_KEY: {err}"))?;
         let endpoint = env::var("TONBO_S3_ENDPOINT").ok();
         let session_token = env::var("TONBO_S3_SESSION_TOKEN").ok();
+        let s3_express = matches!(
+            env::var("TONBO_BENCH_OBJECT_STORE_FLAVOR").ok().as_deref(),
+            Some("s3_express")
+        );
         let prefix_base =
             env::var("TONBO_BENCH_OBJECT_PREFIX").unwrap_or_else(|_| "tonbo-bench".to_string());
 
@@ -470,6 +479,7 @@ impl ObjectStoreBenchConfig {
             access_key,
             secret_key,
             session_token,
+            s3_express,
             prefix_base,
         })
     }
@@ -490,6 +500,7 @@ impl ObjectStoreBenchConfig {
         );
         s3.region = Some(self.region.clone());
         s3.endpoint = self.endpoint.clone();
+        s3.s3_express = Some(self.s3_express);
         s3.sign_payload = Some(true);
         ObjectSpec::s3(s3)
     }
@@ -2582,6 +2593,9 @@ fn build_probed_object_store_fs(
         token: spec.credentials.session_token.clone(),
     };
     builder = builder.credential(credential);
+    if let Some(s3_express) = spec.s3_express {
+        builder = builder.s3_express(s3_express);
+    }
     if let Some(sign) = spec.sign_payload {
         builder = builder.sign_payload(sign);
     }

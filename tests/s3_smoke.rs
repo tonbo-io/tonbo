@@ -56,6 +56,10 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let session_token = std::env::var("TONBO_S3_SESSION_TOKEN").ok();
+    let s3_express = matches!(
+        std::env::var("TONBO_S3_EXPRESS").ok().as_deref(),
+        Some("1" | "true" | "TRUE")
+    );
 
     let config = config_with_pk(
         vec![
@@ -80,6 +84,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let mut s3 = S3Spec::new(bucket.clone(), label.clone(), credentials);
     s3.endpoint = Some(endpoint);
     s3.region = Some(region);
+    s3.s3_express = Some(s3_express);
     s3.sign_payload = Some(true);
 
     let db: DB<AmazonS3, TokioExecutor> = DB::<AmazonS3, TokioExecutor>::builder(config)

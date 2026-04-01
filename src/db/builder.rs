@@ -531,6 +531,8 @@ pub struct S3Spec {
     pub checksum: Option<bool>,
     /// Optional flag indicating that the bucket is versioned.
     pub versioned: Option<bool>,
+    /// Optional flag enabling S3 Express One Zone directory-bucket mode.
+    pub s3_express: Option<bool>,
 }
 
 impl S3Spec {
@@ -551,6 +553,7 @@ impl S3Spec {
             sign_payload: None,
             checksum: None,
             versioned: None,
+            s3_express: None,
         }
     }
 }
@@ -709,6 +712,10 @@ fn build_s3_fs(
 
     if let Some(endpoint) = &spec.endpoint {
         builder = builder.endpoint(endpoint.clone());
+    }
+
+    if let Some(s3_express) = spec.s3_express {
+        builder = builder.s3_express(s3_express);
     }
 
     let credential = AwsCredential {
