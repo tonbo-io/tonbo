@@ -1,13 +1,14 @@
 #![cfg(feature = "tokio")]
 
-use std::{error::Error, sync::Arc};
+use std::{error::Error, future::Future, sync::Arc, time::Duration};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
+use futures::StreamExt;
 
 use crate::{
-    db::{BatchesThreshold, DB, DbBuilder, Expr, NeverSeal, ScalarValue},
+    db::{BatchesThreshold, CompactionOptions, DB, DbBuilder, Expr, NeverSeal, ScalarValue},
     tests_internal::backend::{S3Harness, local_harness, maybe_s3_harness, wal_tuning},
     wal::{WalExt, WalSyncPolicy},
 };
@@ -40,6 +41,114 @@ fn extract_rows(batches: Vec<RecordBatch>) -> Vec<(String, i32)> {
     }
     rows.sort();
     rows
+}
+
+async fn extract_rows_with_profile<FS>(
+    db: &DB<FS, TokioExecutor>,
+) -> Result<Vec<(String, i32)>, Box<dyn Error>>
+where
+    FS: crate::manifest::ManifestFs<TokioExecutor>,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    let (mut stream, _profile) = db.scan().stream_with_profile().await?;
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next().await {
+        batches.push(batch?);
+    }
+    Ok(extract_rows(batches))
+}
+
+async fn latest_version<FS>(
+    db: &DB<FS, TokioExecutor>,
+) -> Result<crate::db::Version, Box<dyn Error>>
+where
+    FS: crate::manifest::ManifestFs<TokioExecutor>,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    db.list_versions(1)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "list_versions returned no versions".into())
+}
+
+async fn wait_for_reopen_compaction_progress<FS>(
+    db: &DB<FS, TokioExecutor>,
+    before: &crate::db::Version,
+) -> Result<crate::db::Version, Box<dyn Error>>
+where
+    FS: crate::manifest::ManifestFs<TokioExecutor>,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    let timeout = Duration::from_secs(180);
+    let poll = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    loop {
+        let current = latest_version(db).await?;
+        let manifest_advanced = current.timestamp != before.timestamp;
+        let compaction_progressed =
+            current.level_count >= 2 && current.sst_count < before.sst_count;
+        if manifest_advanced && compaction_progressed {
+            return Ok(current);
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "timed out waiting for reopen compaction progress: before(ts={}, ssts={}, \
+                 levels={}) current(ts={}, ssts={}, levels={})",
+                before.timestamp.get(),
+                before.sst_count,
+                before.level_count,
+                current.timestamp.get(),
+                current.sst_count,
+                current.level_count
+            )
+            .into());
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+fn error_chain_contains(err: &dyn Error, needle: &str) -> bool {
+    if err.to_string().contains(needle) {
+        return true;
+    }
+    let mut current = err.source();
+    while let Some(source) = current {
+        if source.to_string().contains(needle) {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+fn is_transient_remote_read_error(err: &dyn Error) -> bool {
+    error_chain_contains(err, "IncompleteMessage")
+        || error_chain_contains(err, "connection closed before message completed")
+}
+
+async fn retry_transient_remote_read<T, F, Fut>(label: &str, mut op: F) -> Result<T, Box<dyn Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Box<dyn Error>>>,
+{
+    let max_attempts = 3usize;
+    let mut delay = Duration::from_millis(250);
+    for attempt in 1..=max_attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < max_attempts && is_transient_remote_read_error(err.as_ref()) => {
+                eprintln!(
+                    "retrying transient remote read failure during {label} (attempt \
+                     {attempt}/{max_attempts}): {err}"
+                );
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(format!("unreachable retry state for {label}").into())
 }
 
 async fn public_compaction_local(schema: Arc<Schema>) -> Result<(), Box<dyn Error>> {
@@ -437,6 +546,201 @@ async fn snapshot_and_merge_s3(
     Ok(())
 }
 
+async fn compaction_reopen_scan_s3(
+    schema: Arc<Schema>,
+    harness: S3Harness,
+) -> Result<(), Box<dyn Error>> {
+    let mut inner = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .open()
+        .await?
+        .into_inner();
+    inner.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+
+    let batch_count = 16usize;
+    let rows_per_batch = 64usize;
+    for batch_idx in 0..batch_count {
+        let ids: Vec<String> = (0..rows_per_batch)
+            .map(|row_idx| format!("bench-{batch_idx:02}-{row_idx:02}"))
+            .collect();
+        let vals: Vec<i32> = (0..rows_per_batch)
+            .map(|row_idx| i32::try_from(batch_idx * rows_per_batch + row_idx).unwrap_or(i32::MAX))
+            .collect();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(ids)) as _,
+                Arc::new(Int32Array::from(vals)) as _,
+            ],
+        )?;
+        inner.ingest(batch).await?;
+    }
+
+    let versions_before = inner.list_versions(4).await?;
+    let before_latest = versions_before
+        .first()
+        .ok_or("expected manifest versions before reopen")?;
+    assert!(
+        before_latest.sst_count >= 4,
+        "expected multiple SSTs before compaction, got {}",
+        before_latest.sst_count
+    );
+
+    drop(inner);
+
+    let reopened: DB<_, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .with_compaction_options(CompactionOptions::new().periodic_tick(Duration::from_millis(50)))
+        .open()
+        .await?;
+
+    wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
+
+    let predicate = Expr::is_not_null("id");
+    let rows = retry_transient_remote_read("reopened s3 visibility scan", || async {
+        Ok(extract_rows(
+            reopened.scan().filter(predicate.clone()).collect().await?,
+        ))
+    })
+    .await?;
+    assert_eq!(
+        rows.len(),
+        batch_count * rows_per_batch,
+        "reopened S3 compaction path should preserve visibility after compaction"
+    );
+
+    let mut inner = reopened.into_inner();
+    inner.disable_wal().await?;
+    Ok(())
+}
+
+async fn compaction_reopen_scan_s3_duplicate_key_workload(
+    schema: Arc<Schema>,
+    harness: S3Harness,
+    batch_count: usize,
+    rows_per_batch: usize,
+    key_space: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut inner = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .open()
+        .await?
+        .into_inner();
+    inner.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+
+    let mut expected_latest = std::collections::BTreeMap::new();
+    for batch_idx in 0..batch_count {
+        let ids: Vec<String> = (0..rows_per_batch)
+            .map(|row_idx| {
+                let global_idx = batch_idx
+                    .saturating_mul(rows_per_batch)
+                    .saturating_add(row_idx);
+                let key_idx = global_idx % key_space;
+                format!("k{key_idx:08}")
+            })
+            .collect();
+        let vals: Vec<i32> = (0..rows_per_batch)
+            .map(|row_idx| {
+                i32::try_from(
+                    batch_idx
+                        .saturating_mul(rows_per_batch)
+                        .saturating_add(row_idx),
+                )
+                .unwrap_or(i32::MAX)
+            })
+            .collect();
+        for (id, value) in ids.iter().zip(vals.iter()) {
+            expected_latest.insert(id.clone(), *value);
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(ids)) as _,
+                Arc::new(Int32Array::from(vals)) as _,
+            ],
+        )?;
+        inner.ingest(batch).await?;
+    }
+
+    let versions_before = inner.list_versions(4).await?;
+    let before_latest = versions_before
+        .first()
+        .ok_or("expected manifest versions before reopen")?;
+    assert!(
+        before_latest.sst_count >= 4,
+        "expected multiple SSTs before compaction, got {}",
+        before_latest.sst_count
+    );
+
+    drop(inner);
+
+    let reopened: DB<_, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .object_store(harness.object.clone())
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_config(harness.wal_config.clone())
+        .with_minor_compaction(1, 0)
+        .with_compaction_options(CompactionOptions::new().periodic_tick(Duration::from_millis(50)))
+        .open()
+        .await?;
+
+    wait_for_reopen_compaction_progress(&reopened, before_latest).await?;
+
+    let expected_rows: Vec<(String, i32)> = expected_latest.into_iter().collect();
+    let predicate = Expr::is_not_null("id");
+    let verification = async {
+        let rows =
+            retry_transient_remote_read("reopened s3 duplicate-key unfiltered scan", || async {
+                Ok(extract_rows(reopened.scan().collect().await?))
+            })
+            .await?;
+        assert_eq!(
+            rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for unfiltered scans"
+        );
+
+        let profiled_rows =
+            retry_transient_remote_read("reopened s3 duplicate-key profiled scan", || async {
+                extract_rows_with_profile(&reopened).await
+            })
+            .await?;
+        assert_eq!(
+            profiled_rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for profiled scans"
+        );
+
+        let filtered_rows =
+            retry_transient_remote_read("reopened s3 duplicate-key filtered scan", || async {
+                Ok(extract_rows(
+                    reopened.scan().filter(predicate.clone()).collect().await?,
+                ))
+            })
+            .await?;
+        assert_eq!(
+            filtered_rows, expected_rows,
+            "reopened S3 duplicate-key compaction path should preserve latest-value visibility \
+             for filtered scans"
+        );
+
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
+
+    let mut inner = reopened.into_inner();
+    inner.disable_wal().await?;
+    verification
+}
+
 /// Public knobs only: force minor compaction + manifest updates, then restart and time-travel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_compaction_publishes_manifest_versions() -> Result<(), Box<dyn std::error::Error>> {
@@ -473,6 +777,33 @@ async fn public_snapshot_and_merge_scan() -> Result<(), Box<dyn std::error::Erro
         wal_tuning(WalSyncPolicy::IntervalBytes(1)),
     )? {
         snapshot_and_merge_s3(schema, h).await?;
+    }
+    Ok(())
+}
+
+/// Reopen an S3-backed DB with compaction enabled and verify scans stay visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_s3_reopen_with_compaction_preserves_visibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = build_schema();
+    if let Some(h) = maybe_s3_harness(
+        "public-s3-reopen-compaction",
+        wal_tuning(WalSyncPolicy::Always),
+    )? {
+        compaction_reopen_scan_s3(schema, h).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_s3_reopen_with_compaction_preserves_duplicate_key_visibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = build_schema();
+    if let Some(h) = maybe_s3_harness(
+        "public-s3-reopen-compaction-duplicate-keys",
+        wal_tuning(WalSyncPolicy::Always),
+    )? {
+        compaction_reopen_scan_s3_duplicate_key_workload(schema, h, 32, 64, 512).await?;
     }
     Ok(())
 }

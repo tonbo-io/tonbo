@@ -428,7 +428,7 @@ mod tests {
         mem::fs::InMemoryFs,
         path::{Path as FusioPath, PathPart},
     };
-    use fusio_manifest::LeaseStore;
+    use fusio_manifest::{LeaseKind, LeaseStore};
     use futures::TryStreamExt;
 
     use super::*;
@@ -460,7 +460,7 @@ mod tests {
             executor,
         );
         let lease = lease_store
-            .create(1, None, Duration::from_secs(30))
+            .create(1, None, None, LeaseKind::Read, Duration::from_secs(30))
             .await
             .expect("lease created");
 

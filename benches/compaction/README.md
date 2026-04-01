@@ -36,6 +36,28 @@ and scenario design should evolve toward that larger program.
 - `TONBO_BENCH_OBJECT_PREFIX` (optional; default: `tonbo-bench`)
   - Prefix used for object-store benchmark runs.
 
+- Topology metadata env vars (optional, but recommended for cross-environment comparison)
+  - `TONBO_BENCH_RUNNER_ENV`
+    - Example: `dev`, `ec2`
+  - `TONBO_BENCH_RUNNER_REGION`
+    - Example: `eu-central-1`
+  - `TONBO_BENCH_RUNNER_AZ`
+    - Example: `euc1-az1` or `eu-central-1a` if AZ ID is not available
+  - `TONBO_BENCH_RUNNER_INSTANCE_TYPE`
+    - Example: `c7i.large`
+  - `TONBO_BENCH_BUCKET_REGION`
+    - Region of the target bucket
+  - `TONBO_BENCH_BUCKET_AZ`
+    - Directory-bucket zone for S3 Express cells
+  - `TONBO_BENCH_OBJECT_STORE_FLAVOR`
+    - Example: `standard_s3`, `s3_express`
+  - `TONBO_BENCH_ENDPOINT_KIND`
+    - Example: `regional`, `zonal`, `custom`
+  - `TONBO_BENCH_NETWORK_PATH`
+    - Example: `public_internet`, `vpc_gateway_endpoint`
+  - `TONBO_BENCH_MEDIAN_RTT_MS`
+    - Optional measured median RTT for the runner -> endpoint path
+
 ## Object-Store Configuration
 
 When `TONBO_BENCH_BACKEND=object_store`, these env vars must be set:
@@ -90,6 +112,41 @@ export TONBO_S3_BUCKET=tonbo-smoke-euc1-232814779190-1772115011
 export TONBO_S3_REGION=eu-central-1
 ```
 
+Set topology fields for a standard regional S3 run from a developer machine:
+
+```bash
+export TONBO_BENCH_RUNNER_ENV=dev
+export TONBO_BENCH_RUNNER_REGION=eu-central-1
+export TONBO_BENCH_BUCKET_REGION=eu-central-1
+export TONBO_BENCH_OBJECT_STORE_FLAVOR=standard_s3
+export TONBO_BENCH_ENDPOINT_KIND=regional
+export TONBO_BENCH_NETWORK_PATH=public_internet
+```
+
+Matrix helper script:
+
+```bash
+chmod +x benches/compaction/run_matrix.sh
+```
+
+Example: run only the developer-machine cells and generate a report under
+`target/tonbo-bench/reports/`:
+
+```bash
+export TONBO_MATRIX_CELLS=dev_local,dev_s3
+export TONBO_MATRIX_STD_S3_BUCKET=tonbo-smoke-euc1-232814779190-1772115011
+export TONBO_MATRIX_STD_S3_REGION=eu-central-1
+benches/compaction/run_matrix.sh
+```
+
+Example: print the EC2 commands without executing them:
+
+```bash
+export TONBO_MATRIX_RUN_MODE=print
+export TONBO_MATRIX_CELLS=ec2_s3,ec2_s3express
+benches/compaction/run_matrix.sh
+```
+
 Run a directional cell:
 
 ```bash
@@ -113,6 +170,137 @@ TONBO_BENCH_BACKEND=local TONBO_BENCH_DATASET_SCALE=10 TONBO_COMPACTION_BENCH_IN
 TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=1  TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s1-$(date +%s)  cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
 TONBO_BENCH_BACKEND=object_store TONBO_BENCH_DATASET_SCALE=10 TONBO_COMPACTION_BENCH_INGEST_BATCHES=640 TONBO_BENCH_OBJECT_PREFIX=tonbo-dir-object_store-s10-$(date +%s) cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
 ```
+
+Cross-environment comparison matrix for this branch, using smaller first-pass scales:
+
+```bash
+# Common first-pass scale knobs. These are intended to keep runs cheap while still
+# exposing remote latency floors and compaction/read directionality.
+export TONBO_COMPACTION_BENCH_ROWS_PER_BATCH=64
+export TONBO_COMPACTION_BENCH_INGEST_BATCHES=160
+export TONBO_COMPACTION_BENCH_ARTIFACT_ITERATIONS=12
+export TONBO_COMPACTION_BENCH_CRITERION_SAMPLE_SIZE=10
+export TONBO_COMPACTION_BENCH_ENABLE_READ_WHILE_COMPACTION=0
+export TONBO_COMPACTION_BENCH_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY=0
+
+# Cell 1: dev machine, local
+TONBO_BENCH_BACKEND=local \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_BENCH_RUNNER_ENV=dev \
+TONBO_BENCH_OBJECT_STORE_FLAVOR=local_fs \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+
+# Cell 2: dev machine, standard S3
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-compare-dev-s3-s1-$(date +%s) \
+TONBO_BENCH_RUNNER_ENV=dev \
+TONBO_BENCH_RUNNER_REGION=eu-central-1 \
+TONBO_BENCH_BUCKET_REGION=eu-central-1 \
+TONBO_BENCH_OBJECT_STORE_FLAVOR=standard_s3 \
+TONBO_BENCH_ENDPOINT_KIND=regional \
+TONBO_BENCH_NETWORK_PATH=public_internet \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+
+# Cell 3: dev machine, S3 Express smoke-test only. This requires a real directory
+# bucket endpoint and may need a CreateSession-capable client path before it works.
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-compare-dev-s3express-s1-$(date +%s) \
+TONBO_BENCH_RUNNER_ENV=dev \
+TONBO_BENCH_RUNNER_REGION=eu-central-1 \
+TONBO_BENCH_BUCKET_REGION=eu-central-1 \
+TONBO_BENCH_BUCKET_AZ=euc1-az1 \
+TONBO_BENCH_OBJECT_STORE_FLAVOR=s3_express \
+TONBO_BENCH_ENDPOINT_KIND=zonal \
+TONBO_BENCH_NETWORK_PATH=public_internet \
+TONBO_S3_ENDPOINT=<directory-bucket-zonal-endpoint> \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+
+# Cell 4: EC2 same-region, standard S3
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-compare-ec2-s3-s1-$(date +%s) \
+TONBO_BENCH_RUNNER_ENV=ec2 \
+TONBO_BENCH_RUNNER_REGION=eu-central-1 \
+TONBO_BENCH_RUNNER_AZ=euc1-az1 \
+TONBO_BENCH_RUNNER_INSTANCE_TYPE=c7i.large \
+TONBO_BENCH_BUCKET_REGION=eu-central-1 \
+TONBO_BENCH_OBJECT_STORE_FLAVOR=standard_s3 \
+TONBO_BENCH_ENDPOINT_KIND=regional \
+TONBO_BENCH_NETWORK_PATH=vpc_gateway_endpoint \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+
+# Cell 5: EC2 same-AZ, S3 Express
+TONBO_BENCH_BACKEND=object_store \
+TONBO_BENCH_DATASET_SCALE=1 \
+TONBO_BENCH_OBJECT_PREFIX=tonbo-compare-ec2-s3express-s1-$(date +%s) \
+TONBO_BENCH_RUNNER_ENV=ec2 \
+TONBO_BENCH_RUNNER_REGION=eu-central-1 \
+TONBO_BENCH_RUNNER_AZ=euc1-az1 \
+TONBO_BENCH_RUNNER_INSTANCE_TYPE=c7i.large \
+TONBO_BENCH_BUCKET_REGION=eu-central-1 \
+TONBO_BENCH_BUCKET_AZ=euc1-az1 \
+TONBO_BENCH_OBJECT_STORE_FLAVOR=s3_express \
+TONBO_BENCH_ENDPOINT_KIND=zonal \
+TONBO_BENCH_NETWORK_PATH=vpc_gateway_endpoint \
+TONBO_S3_ENDPOINT=<directory-bucket-zonal-endpoint> \
+cargo bench -p tonbo --bench compaction_local -- read_compaction_quiesced --nocapture
+```
+
+The helper script uses the same cell names:
+
+- `dev_local`
+- `dev_s3`
+- `dev_s3express`
+- `ec2_s3`
+- `ec2_s3express`
+
+Cell-specific environment expected by `run_matrix.sh`:
+
+- Standard S3 cells:
+  - `TONBO_MATRIX_STD_S3_BUCKET`
+  - `TONBO_MATRIX_STD_S3_REGION`
+  - optional `TONBO_MATRIX_STD_S3_ENDPOINT`
+- S3 Express cells:
+  - `TONBO_MATRIX_EXPRESS_S3_BUCKET`
+  - `TONBO_MATRIX_EXPRESS_S3_REGION`
+  - `TONBO_MATRIX_EXPRESS_S3_ENDPOINT`
+  - `TONBO_MATRIX_EXPRESS_S3_BUCKET_AZ`
+  - `run_matrix.sh` now preflights both the regional control endpoint
+    (`s3express-control.<region>.amazonaws.com`) and the configured zonal endpoint.
+    If either hostname does not resolve from the current host, the Express cell is
+    marked `skipped` in the report instead of failing mid-run.
+- Credentials:
+  - either `TONBO_S3_ACCESS_KEY` / `TONBO_S3_SECRET_KEY`
+  - or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+- Optional host metadata overrides:
+  - `TONBO_MATRIX_DEV_RUNNER_REGION`
+  - `TONBO_MATRIX_DEV_RUNNER_AZ`
+  - `TONBO_MATRIX_EC2_RUNNER_REGION`
+  - `TONBO_MATRIX_EC2_RUNNER_AZ`
+  - `TONBO_MATRIX_EC2_INSTANCE_TYPE`
+  - `TONBO_MATRIX_DEV_MEDIAN_RTT_MS`
+  - `TONBO_MATRIX_EC2_MEDIAN_RTT_MS`
+
+Suggested first-pass scales:
+
+- `TONBO_BENCH_DATASET_SCALE=1`
+- `TONBO_BENCH_DATASET_SCALE=4`
+- `TONBO_BENCH_DATASET_SCALE=8`
+
+These scales are usually enough to expose:
+
+- fixed remote setup cost,
+- regional vs zonal latency floor differences,
+- whether compaction meaningfully changes read cost,
+- whether the EC2-in-region / EC2-in-AZ path changes the result materially.
+
+Move to `~1 GB` only if:
+
+- the direction changes at higher scales,
+- the smaller scales are too noisy,
+- or you need stronger throughput claims rather than a first topology comparison.
 
 High-scale object-store tuned profile (reduces small-operation amplification while preserving
 benchmark intent):
@@ -234,6 +422,12 @@ Planned artifact growth for the broader benchmark program:
   depth, CPU, RSS, and network throughput
 - stable configuration snapshots so each run can be traced back to WAL mode,
   compaction settings, and workload shape
+
+Current artifact note:
+
+- schema `11+` artifacts now include a top-level `topology` object populated
+  from the optional `TONBO_BENCH_*` topology env vars above
+- the directional report also prints a one-line topology summary when present
 
 Interpretation guideline:
 
