@@ -112,8 +112,20 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.toml') }}-coverage
           cache-on-failure: false
 
-      - name: Run coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines "$COVERAGE_LINES_MIN"
+      - name: Collect coverage (main suite)
+        run: >
+          cargo llvm-cov --no-report --workspace
+          -- --skip compaction_correctness_model_randomized
+
+      - name: Collect coverage (randomized correctness)
+        run: >
+          cargo llvm-cov --no-report --lib
+          -- compaction_correctness_model_randomized --test-threads=1
+
+      - name: Generate coverage report
+        run: >
+          cargo llvm-cov report --lcov --output-path lcov.info
+          --fail-under-lines "$COVERAGE_LINES_MIN"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
