@@ -6,8 +6,8 @@ This note captures a narrow follow-up on top of `feat/swmr-benchmark-first-pass`
 
 The branch already established that the next useful step was instrumentation of
 the write/setup path rather than more topology hunting. This note records the
-first local Phase 1 attribution pass for the `swmr_gb_scale_mixed` workload at
-`~1 GB logical` state.
+first local attribution pass for the `swmr_gb_scale_mixed` workload at `~1 GB`
+logical state.
 
 Scope:
 
@@ -90,5 +90,5 @@ The local attribution supports a narrower next-step conclusion:
 - It does not prove that object-store cells have the exact same percentages.
 - It does not replace object-store request accounting or manifest-path
   attribution work.
-- It should be read as Phase 1 local attribution, not as the final performance
+- It should be read as local attribution, not as the final performance
   explanation for all backends.

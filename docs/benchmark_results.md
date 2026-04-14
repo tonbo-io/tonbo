@@ -819,7 +819,7 @@ serverless object-store analytics under live mixed traffic.
 
 The gap between those statements is exactly what the next scenarios must close.
 
-A local Phase 1 attribution pass for `swmr_gb_scale_mixed` at `~1 GB` also
+A local attribution pass for `swmr_gb_scale_mixed` at `~1 GB` also
 clarified the current writer cost shape. In that local smoke run, the
 foreground writer path was dominated by inline minor compaction (`229.18 ms`)
 and WAL durability (`218.31 ms` combined append + commit), with mutable insert
