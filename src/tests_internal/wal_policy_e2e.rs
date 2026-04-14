@@ -8,7 +8,7 @@ use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as 
 use tokio::time::sleep;
 
 use crate::{
-    db::{BatchesThreshold, WalSyncPolicy},
+    db::WalSyncPolicy,
     test_support::{TestFsWalStateStore, TestWalExt as WalExt},
     tests_internal::common::config_with_pk,
 };
@@ -78,11 +78,9 @@ async fn wal_interval_bytes_syncs() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(temp_root.to_string_lossy().into_owned())?
         .wal_config(wal_cfg)
-        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
-    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     write_rows(&mut db, &schema, 0).await?;
     write_rows(&mut db, &schema, 100).await?;
@@ -128,11 +126,9 @@ async fn wal_interval_time_syncs() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = crate::db::DB::<LocalFs, TokioExecutor>::builder(config)
         .on_disk(temp_root.to_string_lossy().into_owned())?
         .wal_config(wal_cfg)
-        .with_minor_compaction(1, 0)
         .open_with_executor(Arc::clone(&executor))
         .await?
         .into_inner();
-    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     write_rows(&mut db, &schema, 0).await?;
 
