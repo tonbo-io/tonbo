@@ -819,6 +819,15 @@ serverless object-store analytics under live mixed traffic.
 
 The gap between those statements is exactly what the next scenarios must close.
 
+A local Phase 1 attribution pass for `swmr_gb_scale_mixed` at `~1 GB` also
+clarified the current writer cost shape. In that local smoke run, the
+foreground writer path was dominated by inline minor compaction (`229.18 ms`)
+and WAL durability (`218.31 ms` combined append + commit), with mutable insert
+materially smaller (`109.17 ms`). This should be read as local attribution, not
+as a final object-store percentage claim, but it strengthens the current
+conclusion that the next useful work is write/setup-path instrumentation rather
+than more topology hunting.
+
 For positioning, the target comparison set is not only embedded analytical engines. It is also
 systems that care about object-store-native or serverless execution economics, including:
 

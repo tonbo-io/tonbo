@@ -94,6 +94,77 @@ pub struct Version {
     pub level_count: usize,
 }
 
+/// Write-path timing breakdown for a single ingest operation.
+///
+/// Values are measured in nanoseconds and cover the major phases of
+/// `ingest_with_tombstones` after the caller has already constructed the input
+/// `RecordBatch`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WritePathProfile {
+    partition_ns: u64,
+    wal_append_ns: u64,
+    wal_commit_ns: u64,
+    mutable_insert_ns: u64,
+    seal_ns: u64,
+    minor_compaction_ns: u64,
+    total_ns: u64,
+}
+
+impl WritePathProfile {
+    /// Time spent partitioning the incoming batch into upsert/delete payloads.
+    pub fn partition_ns(&self) -> u64 {
+        self.partition_ns
+    }
+
+    /// Time spent appending write payloads to the WAL and waiting for durable acks.
+    pub fn wal_append_ns(&self) -> u64 {
+        self.wal_append_ns
+    }
+
+    /// Time spent writing the WAL commit marker and waiting for durability.
+    pub fn wal_commit_ns(&self) -> u64 {
+        self.wal_commit_ns
+    }
+
+    /// Time spent applying upserts/deletes into the mutable memtable.
+    pub fn mutable_insert_ns(&self) -> u64 {
+        self.mutable_insert_ns
+    }
+
+    /// Time spent evaluating and executing post-insert sealing.
+    pub fn seal_ns(&self) -> u64 {
+        self.seal_ns
+    }
+
+    /// Time spent in opportunistic minor compaction triggered by the ingest.
+    pub fn minor_compaction_ns(&self) -> u64 {
+        self.minor_compaction_ns
+    }
+
+    /// End-to-end time for the profiled ingest operation.
+    pub fn total_ns(&self) -> u64 {
+        self.total_ns
+    }
+
+    /// Combine two write profiles using saturating addition per field.
+    #[must_use]
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            partition_ns: self.partition_ns.saturating_add(other.partition_ns),
+            wal_append_ns: self.wal_append_ns.saturating_add(other.wal_append_ns),
+            wal_commit_ns: self.wal_commit_ns.saturating_add(other.wal_commit_ns),
+            mutable_insert_ns: self
+                .mutable_insert_ns
+                .saturating_add(other.mutable_insert_ns),
+            seal_ns: self.seal_ns.saturating_add(other.seal_ns),
+            minor_compaction_ns: self
+                .minor_compaction_ns
+                .saturating_add(other.minor_compaction_ns),
+            total_ns: self.total_ns.saturating_add(other.total_ns),
+        }
+    }
+}
+
 /// State bundle for opportunistic minor compaction.
 struct MinorCompactionState {
     compactor: MinorCompactor,
@@ -353,6 +424,18 @@ where
     ) -> Result<(), DBError> {
         self.inner
             .ingest_with_tombstones(batch, tombstones)
+            .await
+            .map_err(DBError::Key)
+    }
+
+    /// Ingest a batch and return a write-path timing breakdown.
+    pub async fn ingest_with_tombstones_with_profile(
+        &self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+    ) -> Result<WritePathProfile, DBError> {
+        self.inner
+            .ingest_with_tombstones_with_profile(batch, tombstones)
             .await
             .map_err(DBError::Key)
     }

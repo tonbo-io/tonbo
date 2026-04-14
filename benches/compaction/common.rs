@@ -33,11 +33,11 @@ use tokio::{runtime::Runtime, time::sleep};
 use tonbo::db::{
     AwsCreds, CompactionOptions, CompactionStrategy, DB, DBError, DbBuildError, DbBuilder, Expr,
     LeveledPlannerConfig, ObjectSpec, S3Spec, ScalarValue, ScanSetupProfile,
-    Snapshot as DbSnapshot, Version as DbVersion, WalSyncPolicy,
+    Snapshot as DbSnapshot, Version as DbVersion, WalSyncPolicy, WritePathProfile,
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 11;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 12;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -1367,9 +1367,21 @@ struct ReadPathInternalSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct WritePathSummary {
+    mean_partition_ns: f64,
+    mean_wal_append_ns: f64,
+    mean_wal_commit_ns: f64,
+    mean_mutable_insert_ns: f64,
+    mean_seal_ns: f64,
+    mean_minor_compaction_ns: f64,
+    mean_total_ns: f64,
+}
+
+#[derive(Debug, Serialize)]
 struct SwmrSummaryArtifact {
     writer_rows_processed: u64,
     writer_latency_ns: LatencySummary,
+    writer_path_ns: WritePathSummary,
     readers: Vec<SwmrReaderSummaryArtifact>,
 }
 
@@ -1499,9 +1511,65 @@ impl ReadPathAggregate {
 }
 
 #[derive(Default)]
+struct WritePathAggregate {
+    samples: usize,
+    partition_ns_total: u128,
+    wal_append_ns_total: u128,
+    wal_commit_ns_total: u128,
+    mutable_insert_ns_total: u128,
+    seal_ns_total: u128,
+    minor_compaction_ns_total: u128,
+    total_ns_total: u128,
+}
+
+impl WritePathAggregate {
+    fn record(&mut self, profile: WritePathProfile) {
+        self.samples = self.samples.saturating_add(1);
+        self.partition_ns_total = self
+            .partition_ns_total
+            .saturating_add(u128::from(profile.partition_ns()));
+        self.wal_append_ns_total = self
+            .wal_append_ns_total
+            .saturating_add(u128::from(profile.wal_append_ns()));
+        self.wal_commit_ns_total = self
+            .wal_commit_ns_total
+            .saturating_add(u128::from(profile.wal_commit_ns()));
+        self.mutable_insert_ns_total = self
+            .mutable_insert_ns_total
+            .saturating_add(u128::from(profile.mutable_insert_ns()));
+        self.seal_ns_total = self
+            .seal_ns_total
+            .saturating_add(u128::from(profile.seal_ns()));
+        self.minor_compaction_ns_total = self
+            .minor_compaction_ns_total
+            .saturating_add(u128::from(profile.minor_compaction_ns()));
+        self.total_ns_total = self
+            .total_ns_total
+            .saturating_add(u128::from(profile.total_ns()));
+    }
+
+    fn to_summary(&self) -> Option<WritePathSummary> {
+        if self.samples == 0 {
+            return None;
+        }
+        let samples = self.samples as f64;
+        Some(WritePathSummary {
+            mean_partition_ns: self.partition_ns_total as f64 / samples,
+            mean_wal_append_ns: self.wal_append_ns_total as f64 / samples,
+            mean_wal_commit_ns: self.wal_commit_ns_total as f64 / samples,
+            mean_mutable_insert_ns: self.mutable_insert_ns_total as f64 / samples,
+            mean_seal_ns: self.seal_ns_total as f64 / samples,
+            mean_minor_compaction_ns: self.minor_compaction_ns_total as f64 / samples,
+            mean_total_ns: self.total_ns_total as f64 / samples,
+        })
+    }
+}
+
+#[derive(Default)]
 struct SwmrAggregate {
     writer_rows_processed: u64,
     writer_latencies_ns: Vec<u64>,
+    writer_path: WritePathAggregate,
     readers: Vec<SwmrReaderAggregate>,
 }
 
@@ -1511,6 +1579,7 @@ impl SwmrAggregate {
             .writer_rows_processed
             .saturating_add(u64::try_from(result.writer_rows).unwrap_or(u64::MAX));
         self.writer_latencies_ns.push(result.writer_latency_ns);
+        self.writer_path.record(result.writer_profile);
         for reader in result.readers {
             if let Some(existing) = self
                 .readers
@@ -1539,6 +1608,7 @@ impl SwmrAggregate {
         Some(SwmrSummaryArtifact {
             writer_rows_processed: self.writer_rows_processed,
             writer_latency_ns: latency_summary(&self.writer_latencies_ns),
+            writer_path_ns: self.writer_path.to_summary()?,
             readers: self
                 .readers
                 .iter()
@@ -1648,6 +1718,7 @@ struct OperationResult {
 struct SwmrOperationResult {
     writer_rows: usize,
     writer_latency_ns: u64,
+    writer_profile: WritePathProfile,
     readers: Vec<SwmrReaderOperationResult>,
 }
 
@@ -1843,16 +1914,25 @@ async fn run_swmr_mixed_operation(
     let step_idx = state.next_step.fetch_add(1, Ordering::Relaxed);
     let writer_started = Instant::now();
     let mut writer_rows = 0usize;
+    let mut writer_profile = WritePathProfile::default();
     for batch_offset in 0..state.writer_batches_per_step {
         let batch_idx = step_idx
             .saturating_mul(u64::try_from(state.writer_batches_per_step).unwrap_or(u64::MAX))
             .saturating_add(u64::try_from(batch_offset).unwrap_or(u64::MAX));
         let batch = build_swmr_mixed_batch(state, batch_idx)?;
-        let ingest_result = match db {
-            BenchmarkDb::Local(inner) => inner.ingest_with_tombstones(batch.0, batch.1).await,
-            BenchmarkDb::ObjectStore(inner) => inner.ingest_with_tombstones(batch.0, batch.1).await,
-        };
-        ingest_result?;
+        let ingest_profile = match db {
+            BenchmarkDb::Local(inner) => {
+                inner
+                    .ingest_with_tombstones_with_profile(batch.0, batch.1)
+                    .await
+            }
+            BenchmarkDb::ObjectStore(inner) => {
+                inner
+                    .ingest_with_tombstones_with_profile(batch.0, batch.1)
+                    .await
+            }
+        }?;
+        writer_profile = accumulate_write_profile(writer_profile, ingest_profile);
         writer_rows = writer_rows.saturating_add(state.rows_per_batch);
     }
     let writer_latency_ns = duration_ns_u64(writer_started.elapsed());
@@ -1865,8 +1945,16 @@ async fn run_swmr_mixed_operation(
     Ok(SwmrOperationResult {
         writer_rows,
         writer_latency_ns,
+        writer_profile,
         readers,
     })
+}
+
+fn accumulate_write_profile(
+    aggregate: WritePathProfile,
+    sample: WritePathProfile,
+) -> WritePathProfile {
+    aggregate.saturating_add(sample)
 }
 
 async fn run_swmr_reader(

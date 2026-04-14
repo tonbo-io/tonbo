@@ -370,6 +370,31 @@ For schema `6+` artifacts, read workloads also include internal setup-stage mean
 These internal setup-stage timers should approximately sum to `mean_prepare_ns` (small residual
 measurement overhead is expected).
 
+The SWMR workload now also includes a writer-phase breakdown:
+
+- `summary.swmr.writer_latency_ns`:
+  - end-to-end writer latency observed by the SWMR mixed step
+- `summary.swmr.writer_path_ns.mean_partition_ns`:
+  - partitioning the mixed batch into upsert/delete payloads
+- `summary.swmr.writer_path_ns.mean_wal_append_ns`:
+  - WAL append durable-ack time for the batch payload frames
+- `summary.swmr.writer_path_ns.mean_wal_commit_ns`:
+  - WAL commit-marker durable-ack time
+- `summary.swmr.writer_path_ns.mean_mutable_insert_ns`:
+  - applying rows into the mutable memtable
+- `summary.swmr.writer_path_ns.mean_seal_ns`:
+  - post-insert sealing decision and seal execution
+- `summary.swmr.writer_path_ns.mean_minor_compaction_ns`:
+  - opportunistic minor compaction triggered by the ingest
+- `summary.swmr.writer_path_ns.mean_total_ns`:
+  - profiled end-to-end writer path inside Tonbo
+
+Interpretation guideline:
+
+- if `writer_path_ns.mean_total_ns` is close to `writer_latency_ns.mean`, the slowdown is largely inside Tonbo's measured write path rather than outside harness overhead
+- if `mean_wal_append_ns + mean_wal_commit_ns` dominates, focus on WAL durability and object-store request cost first
+- if `mean_minor_compaction_ns` dominates, focus on flush/manifest publish work before tuning the pure ingest path
+
 For schema `8+` artifacts, setup payloads include both logical and physical volume sections:
 
 - Primary logical live-set view:

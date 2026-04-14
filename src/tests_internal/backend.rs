@@ -28,6 +28,16 @@ pub struct S3Harness {
     pub wal_config: WalConfig,
 }
 
+type S3Env = (
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    Option<String>,
+);
+
 /// Common WAL tuning for e2e forcing small segments and fast flush.
 pub fn wal_tuning(policy: WalSyncPolicy) -> WalConfig {
     WalConfig::default()
@@ -80,15 +90,7 @@ pub fn local_harness(
     })
 }
 
-fn s3_env() -> Option<(
-    Option<String>,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    Option<String>,
-)> {
+fn s3_env() -> Option<S3Env> {
     let endpoint = env::var("TONBO_S3_ENDPOINT").ok();
     let bucket = env::var("TONBO_S3_BUCKET").ok()?;
     let region = env::var("TONBO_S3_REGION").ok()?;

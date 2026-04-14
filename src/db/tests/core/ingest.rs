@@ -110,6 +110,66 @@ async fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn ingest_with_tombstones_profile_reports_coherent_timings() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor = extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+    let executor = Arc::new(NoopExecutor);
+    let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+    let db = DB::new(config, Arc::clone(&executor)).await.expect("db");
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["k1", "k2"])) as _,
+            Arc::new(Int32Array::from(vec![1, 2])) as _,
+        ],
+    )
+    .expect("batch");
+
+    let profile = db
+        .ingest_with_tombstones_with_profile(batch, vec![false, true])
+        .await
+        .expect("ingest");
+
+    let component_sum = profile
+        .partition_ns()
+        .saturating_add(profile.wal_append_ns())
+        .saturating_add(profile.wal_commit_ns())
+        .saturating_add(profile.mutable_insert_ns())
+        .saturating_add(profile.seal_ns())
+        .saturating_add(profile.minor_compaction_ns());
+    assert!(
+        profile.total_ns() >= component_sum,
+        "profile total should cover measured phase timings"
+    );
+
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let batches = snapshot
+        .scan(&db)
+        .collect()
+        .await
+        .expect("collect visible rows");
+    let visible: Vec<String> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("utf8 col");
+            ids.iter()
+                .flatten()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(visible, vec!["k1".to_string()]);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn apply_dyn_wal_batch_inserts_live_rows() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
