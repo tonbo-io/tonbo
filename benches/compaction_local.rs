@@ -14,13 +14,14 @@ mod common;
 use common::{
     BenchBackend, BenchError, CompactionProfile, CompactionSweepPoint, CompactionTuning,
     ObjectStoreBenchConfig, ResolvedConfig, ScenarioDimensionsArtifact, ScenarioState,
-    ScenarioWorkload, StorageVolumeArtifact, SwmrReaderClass, SwmrReaderExpectationArtifact,
-    SwmrWorkloadParams, SwmrWorkloadState, VersionSummary, WriteWorkloadState, artifact_path,
-    benchmark_schema, build_artifact, build_run_id, build_runtime, cleanup_local_storage_volume,
-    cleanup_object_store_storage_volume, ingest_workload, latest_version_summary,
-    latest_version_summary_if_any, open_benchmark_db, open_object_store_benchmark_db,
-    preload_swmr_workload, print_directional_report, read_all_rows, run_criterion, scenario_root,
-    snapshot_local_storage_volume, snapshot_object_store_storage_volume, swmr_benchmark_schema,
+    ScenarioWorkload, StorageVolumeArtifact, SurfaceWorkloadState, SwmrReaderClass,
+    SwmrReaderExpectationArtifact, SwmrWorkloadParams, SwmrWorkloadState, VersionSummary,
+    WriteWorkloadState, artifact_path, benchmark_schema, build_artifact, build_run_id,
+    build_runtime, cleanup_local_storage_volume, cleanup_object_store_storage_volume,
+    ingest_workload, latest_version_summary, latest_version_summary_if_any, open_benchmark_db,
+    open_object_store_benchmark_db, preload_swmr_workload, print_directional_report, read_all_rows,
+    run_criterion, scenario_root, snapshot_local_storage_volume,
+    snapshot_object_store_storage_volume, surface_light_projection_schema, swmr_benchmark_schema,
     swmr_light_projection_schema, swmr_reader_observation_for_snapshot,
     wait_for_compaction_quiesced, wait_for_first_compaction_observed, write_artifact_json,
 };
@@ -204,6 +205,12 @@ async fn prepare_scenarios(
             prepare_read_compaction_quiesced(config, run_id, storage).await,
         )?;
     }
+    if should_prepare_scenario(&selected, "surface_open_and_fresh_read") {
+        push_prepared_scenario(
+            &mut scenarios,
+            prepare_surface_open_and_fresh_read(config, run_id, storage).await,
+        )?;
+    }
     if should_prepare_scenario(&selected, "swmr_gb_scale_mixed") {
         push_prepared_scenario(
             &mut scenarios,
@@ -242,10 +249,11 @@ async fn prepare_scenarios(
 }
 
 fn selected_scenario_filter() -> Option<HashSet<&'static str>> {
-    const KNOWN_SCENARIOS: [&str; 6] = [
+    const KNOWN_SCENARIOS: [&str; 7] = [
         "read_baseline",
         "read_after_first_compaction_observed",
         "read_compaction_quiesced",
+        "surface_open_and_fresh_read",
         "read_while_compaction",
         "write_throughput_vs_compaction_frequency",
         "swmr_gb_scale_mixed",
@@ -395,6 +403,7 @@ async fn prepare_read_baseline(
         volume_ready,
         write_state: None,
         swmr_state: None,
+        surface_state: None,
     })
 }
 
@@ -531,6 +540,85 @@ async fn prepare_read_compaction_state(
         volume_ready,
         write_state: None,
         swmr_state: None,
+        surface_state: None,
+    })
+}
+
+async fn prepare_surface_open_and_fresh_read(
+    config: &ResolvedConfig,
+    run_id: &str,
+    storage: &ScenarioStorage,
+) -> Result<ScenarioState, BenchError> {
+    let scenario_id = "surface_open_and_fresh_read";
+    let scenario_variant_id = "default".to_string();
+    let benchmark_id = scenario_id.to_string();
+    let schema = benchmark_schema();
+    let light_projection = surface_light_projection_schema();
+    let io_probe = common::IoProbe::default();
+    let mut timing = PrepTimingReport::default();
+
+    let phase_started = Instant::now();
+    let db = open_scenario_db(
+        storage,
+        &schema,
+        run_id,
+        &benchmark_id,
+        config,
+        &CompactionProfile::Default {
+            periodic_tick_ms: config.compaction_periodic_tick_ms,
+        },
+        &io_probe,
+    )
+    .await?;
+    timing.record("open_db", phase_started);
+
+    let phase_started = Instant::now();
+    ingest_workload(&db, &schema, config).await?;
+    timing.record("ingest_workload", phase_started);
+    let volume_before_compaction = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let Some(version_ready) = latest_version_summary_if_any(&db).await? else {
+        return scenario_skipped(
+            scenario_id,
+            "ingest produced no manifest versions; increase TONBO_COMPACTION_BENCH_INGEST_BATCHES",
+        );
+    };
+    ensure_ssts_present(scenario_id, version_ready)?;
+    let phase_started = Instant::now();
+    let (rows_per_scan, _) = read_all_rows(&db).await?;
+    timing.record("read_all_rows", phase_started);
+    let volume_ready = snapshot_scenario_volume(storage, run_id, &benchmark_id).await?;
+    let setup_io = io_probe.snapshot();
+    let write_state = WriteWorkloadState::new(
+        Arc::clone(&schema),
+        config.rows_per_batch,
+        config.key_space,
+        config.seed ^ 0x51FACE,
+        u64::try_from(config.ingest_batches).unwrap_or(u64::MAX),
+    );
+    let surface_state = SurfaceWorkloadState::new(light_projection);
+    timing.emit(scenario_id);
+
+    Ok(ScenarioState {
+        scenario_id,
+        scenario_name: "Surface Open And Fresh Read".to_string(),
+        scenario_variant_id: scenario_variant_id.clone(),
+        benchmark_id,
+        workload: ScenarioWorkload::Surface,
+        dimensions: ScenarioDimensionsArtifact::baseline(
+            scenario_variant_id,
+            ScenarioWorkload::Surface,
+        ),
+        db,
+        io_probe,
+        setup_io,
+        rows_per_op_hint: rows_per_scan,
+        version_before_compaction: version_ready,
+        version_ready,
+        volume_before_compaction,
+        volume_ready,
+        write_state: Some(write_state),
+        swmr_state: None,
+        surface_state: Some(surface_state),
     })
 }
 
@@ -676,6 +764,7 @@ async fn prepare_read_while_compaction(
         volume_ready,
         write_state: Some(write_state),
         swmr_state: None,
+        surface_state: None,
     })
 }
 
@@ -769,6 +858,7 @@ async fn prepare_write_throughput_vs_compaction_frequency(
         volume_ready,
         write_state: Some(write_state),
         swmr_state: None,
+        surface_state: None,
     })
 }
 
@@ -993,6 +1083,7 @@ async fn prepare_swmr_gb_scale_mixed(
         volume_ready,
         write_state: None,
         swmr_state: Some(swmr_state),
+        surface_state: None,
     })
 }
 

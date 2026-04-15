@@ -6,6 +6,8 @@ This benchmark suite lives in `benches/compaction_local.rs` and now supports:
 - Backend selection (`local` vs `object_store`).
 - Tail latency reporting (p50/p95/p99 in addition to mean).
 - A directional report block for `read_baseline` vs `read_compaction_quiesced`.
+- A first-pass `surface_open_and_fresh_read` scenario for snapshot/open,
+  selective HEAD reads, and write-to-visible follow-up reads.
 
 ## Program Context
 
@@ -86,6 +88,15 @@ LocalFS, larger dataset:
 
 ```bash
 TONBO_BENCH_DATASET_SCALE=10 cargo bench -p tonbo -- <...>
+```
+
+LocalFS, first-pass surface benchmark only:
+
+```bash
+TONBO_BENCH_BACKEND=local \
+TONBO_COMPACTION_BENCH_ARTIFACT_ITERATIONS=3 \
+TONBO_COMPACTION_BENCH_CRITERION_SAMPLE_SIZE=10 \
+cargo bench -p tonbo --bench compaction_local -- surface_open_and_fresh_read --nocapture
 ```
 
 Object store (if configured):

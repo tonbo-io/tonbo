@@ -37,7 +37,7 @@ use tonbo::db::{
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 12;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 13;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -56,6 +56,8 @@ const DEFAULT_WRITE_FREQUENCY_PERIODIC_TICKS_MS: &[u64] = &[50, 200];
 const DEFAULT_ENABLE_READ_WHILE_COMPACTION: bool = true;
 const DEFAULT_ENABLE_WRITE_THROUGHPUT_VS_COMPACTION_FREQUENCY: bool = true;
 const DEFAULT_BACKEND: BenchBackend = BenchBackend::Local;
+const DEFAULT_SURFACE_LIGHT_SCAN_LIMIT: usize = 64;
+const DEFAULT_SURFACE_HEAVY_SCAN_LIMIT: usize = 512;
 const INGEST_RETRY_MAX_ATTEMPTS: usize = 8;
 const INGEST_RETRY_BACKOFF_BASE_MS: u64 = 10;
 const COMPACTION_QUIESCED_STABLE_POLLS: usize = 3;
@@ -749,6 +751,7 @@ pub(crate) enum ScenarioWorkload {
     ReadWhileCompaction,
     WriteThroughput,
     SwmrMixed,
+    Surface,
 }
 
 #[derive(Clone)]
@@ -891,6 +894,13 @@ pub(crate) struct SwmrWorkloadState {
     manifest_reconstruction_observations: Vec<SwmrReaderObservationArtifact>,
 }
 
+#[derive(Clone)]
+pub(crate) struct SurfaceWorkloadState {
+    light_projection: SchemaRef,
+    light_scan_limit: usize,
+    heavy_scan_limit: usize,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SwmrPinnedSnapshotMode {
@@ -931,6 +941,16 @@ pub(crate) struct SwmrWorkloadParams {
     pub(crate) steady_batches: usize,
     pub(crate) writer_batches_per_step: usize,
     pub(crate) seed: u64,
+}
+
+impl SurfaceWorkloadState {
+    pub(crate) fn new(light_projection: SchemaRef) -> Self {
+        Self {
+            light_projection,
+            light_scan_limit: DEFAULT_SURFACE_LIGHT_SCAN_LIMIT,
+            heavy_scan_limit: DEFAULT_SURFACE_HEAVY_SCAN_LIMIT,
+        }
+    }
 }
 
 impl SwmrWorkloadState {
@@ -1135,6 +1155,7 @@ pub(crate) struct ScenarioState {
     pub(crate) volume_ready: StorageVolumeArtifact,
     pub(crate) write_state: Option<WriteWorkloadState>,
     pub(crate) swmr_state: Option<SwmrWorkloadState>,
+    pub(crate) surface_state: Option<SurfaceWorkloadState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1306,6 +1327,7 @@ struct ScenarioSetupArtifact {
     volume_ready: StorageVolumeArtifact,
     io: IoCountersArtifact,
     swmr: Option<SwmrSetupDescriptor>,
+    surface: Option<SurfaceSetupDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1319,6 +1341,7 @@ struct ScenarioSummaryArtifact {
     read_path_internal_ns: Option<ReadPathInternalSummary>,
     io: IoCountersArtifact,
     swmr: Option<SwmrSummaryArtifact>,
+    surface: Option<SurfaceSummaryArtifact>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1345,6 +1368,7 @@ struct ScenarioMeasurement {
     read_path: Option<ReadPathAggregate>,
     io: IoCountersArtifact,
     swmr: Option<SwmrAggregate>,
+    surface: Option<SurfaceAggregate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1375,6 +1399,34 @@ struct WritePathSummary {
     mean_seal_ns: f64,
     mean_minor_compaction_ns: f64,
     mean_total_ns: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct SurfaceSetupDescriptor {
+    light_scan_limit: usize,
+    heavy_scan_limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SurfaceSummaryArtifact {
+    snapshot_latency_ns: LatencySummary,
+    write_latency_ns: LatencySummary,
+    write_to_visible_latency_ns: LatencySummary,
+    write_path_ns: WritePathSummary,
+    latest_light: SurfaceReadSummaryArtifact,
+    latest_heavy: SurfaceReadSummaryArtifact,
+    fresh_light: SurfaceReadSummaryArtifact,
+}
+
+#[derive(Debug, Serialize)]
+struct SurfaceReadSummaryArtifact {
+    rows_processed: u64,
+    mean_rows_per_scan: f64,
+    min_rows_per_scan: usize,
+    max_rows_per_scan: usize,
+    latency_ns: LatencySummary,
+    read_path_latency_ns: ReadPathLatencySummary,
+    read_path_internal_ns: ReadPathInternalSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -1566,6 +1618,85 @@ impl WritePathAggregate {
 }
 
 #[derive(Default)]
+struct SurfaceAggregate {
+    snapshot_latencies_ns: Vec<u64>,
+    write_latencies_ns: Vec<u64>,
+    write_to_visible_latencies_ns: Vec<u64>,
+    write_path: WritePathAggregate,
+    latest_light: SurfaceReadAggregate,
+    latest_heavy: SurfaceReadAggregate,
+    fresh_light: SurfaceReadAggregate,
+}
+
+impl SurfaceAggregate {
+    fn record(&mut self, result: SurfaceOperationResult) {
+        self.snapshot_latencies_ns.push(result.snapshot_latency_ns);
+        self.write_latencies_ns.push(result.write_latency_ns);
+        self.write_to_visible_latencies_ns
+            .push(result.write_to_visible_latency_ns);
+        self.write_path.record(result.write_profile);
+        self.latest_light.record(result.latest_light);
+        self.latest_heavy.record(result.latest_heavy);
+        self.fresh_light.record(result.fresh_light);
+    }
+
+    fn to_summary(&self) -> Option<SurfaceSummaryArtifact> {
+        Some(SurfaceSummaryArtifact {
+            snapshot_latency_ns: latency_summary(&self.snapshot_latencies_ns),
+            write_latency_ns: latency_summary(&self.write_latencies_ns),
+            write_to_visible_latency_ns: latency_summary(&self.write_to_visible_latencies_ns),
+            write_path_ns: self.write_path.to_summary()?,
+            latest_light: self.latest_light.to_summary()?,
+            latest_heavy: self.latest_heavy.to_summary()?,
+            fresh_light: self.fresh_light.to_summary()?,
+        })
+    }
+}
+
+#[derive(Default)]
+struct SurfaceReadAggregate {
+    samples: usize,
+    rows_processed: u64,
+    min_rows_per_scan: usize,
+    max_rows_per_scan: usize,
+    latencies_ns: Vec<u64>,
+    read_path: ReadPathAggregate,
+}
+
+impl SurfaceReadAggregate {
+    fn record(&mut self, result: SurfaceReadOperationResult) {
+        self.samples = self.samples.saturating_add(1);
+        self.rows_processed = self
+            .rows_processed
+            .saturating_add(u64::try_from(result.rows).unwrap_or(u64::MAX));
+        self.min_rows_per_scan = if self.samples == 1 {
+            result.rows
+        } else {
+            self.min_rows_per_scan.min(result.rows)
+        };
+        self.max_rows_per_scan = self.max_rows_per_scan.max(result.rows);
+        self.latencies_ns.push(result.latency_ns);
+        self.read_path.record(result.read_path);
+    }
+
+    fn to_summary(&self) -> Option<SurfaceReadSummaryArtifact> {
+        if self.samples == 0 {
+            return None;
+        }
+        let scans = self.samples as f64;
+        Some(SurfaceReadSummaryArtifact {
+            rows_processed: self.rows_processed,
+            mean_rows_per_scan: self.rows_processed as f64 / scans,
+            min_rows_per_scan: self.min_rows_per_scan,
+            max_rows_per_scan: self.max_rows_per_scan,
+            latency_ns: latency_summary(&self.latencies_ns),
+            read_path_latency_ns: self.read_path.to_summary()?,
+            read_path_internal_ns: self.read_path.to_internal_summary()?,
+        })
+    }
+}
+
+#[derive(Default)]
 struct SwmrAggregate {
     writer_rows_processed: u64,
     writer_latencies_ns: Vec<u64>,
@@ -1713,6 +1844,7 @@ struct OperationResult {
     rows: usize,
     read_path: Option<ReadPathBreakdown>,
     swmr: Option<SwmrOperationResult>,
+    surface: Option<SurfaceOperationResult>,
 }
 
 struct SwmrOperationResult {
@@ -1726,6 +1858,22 @@ struct SwmrReaderOperationResult {
     class: SwmrReaderClass,
     rows: usize,
     observation: SwmrReaderObservationArtifact,
+    latency_ns: u64,
+    read_path: ReadPathBreakdown,
+}
+
+struct SurfaceOperationResult {
+    snapshot_latency_ns: u64,
+    latest_light: SurfaceReadOperationResult,
+    latest_heavy: SurfaceReadOperationResult,
+    write_latency_ns: u64,
+    write_to_visible_latency_ns: u64,
+    write_profile: WritePathProfile,
+    fresh_light: SurfaceReadOperationResult,
+}
+
+struct SurfaceReadOperationResult {
+    rows: usize,
     latency_ns: u64,
     read_path: ReadPathBreakdown,
 }
@@ -1815,6 +1963,7 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
                 rows,
                 read_path: Some(read_path),
                 swmr: None,
+                surface: None,
             })
         }
         ScenarioWorkload::ReadWhileCompaction => {
@@ -1833,6 +1982,7 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
                 rows,
                 read_path: Some(read_path),
                 swmr: None,
+                surface: None,
             })
         }
         ScenarioWorkload::WriteThroughput => {
@@ -1847,6 +1997,7 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
                 rows,
                 read_path: None,
                 swmr: None,
+                surface: None,
             })
         }
         ScenarioWorkload::SwmrMixed => {
@@ -1866,6 +2017,33 @@ async fn run_scenario_operation(scenario: &ScenarioState) -> Result<OperationRes
                 rows,
                 read_path: None,
                 swmr: Some(result),
+                surface: None,
+            })
+        }
+        ScenarioWorkload::Surface => {
+            let surface_state = scenario.surface_state.as_ref().ok_or_else(|| {
+                BenchError::Message(format!(
+                    "scenario `{}` missing surface workload state",
+                    scenario.benchmark_id
+                ))
+            })?;
+            let write_state = scenario.write_state.as_ref().ok_or_else(|| {
+                BenchError::Message(format!(
+                    "scenario `{}` missing write workload state",
+                    scenario.benchmark_id
+                ))
+            })?;
+            let result = run_surface_operation(&scenario.db, surface_state, write_state).await?;
+            let rows = result
+                .latest_light
+                .rows
+                .saturating_add(result.latest_heavy.rows)
+                .saturating_add(result.fresh_light.rows);
+            Ok(OperationResult {
+                rows,
+                read_path: None,
+                swmr: None,
+                surface: Some(result),
             })
         }
     }
@@ -1904,6 +2082,74 @@ async fn ingest_next_write_batch(
     }
     Err(BenchError::Message(
         "ingest retry loop exited unexpectedly".to_string(),
+    ))
+}
+
+async fn ingest_next_write_batch_profiled_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    write_state: &WriteWorkloadState,
+) -> Result<WritePathProfile, BenchError> {
+    let batch_idx_u64 = write_state.next_batch.fetch_add(1, Ordering::Relaxed);
+    let batch_idx = usize::try_from(batch_idx_u64).unwrap_or(usize::MAX);
+    for attempt in 1..=INGEST_RETRY_MAX_ATTEMPTS {
+        let batch = build_batch(
+            &write_state.schema,
+            write_state.rows_per_batch,
+            write_state.key_space,
+            write_state.seed,
+            batch_idx,
+        )?;
+        let tombstones = vec![false; batch.num_rows()];
+        let ingest_result = db
+            .ingest_with_tombstones_with_profile(batch, tombstones)
+            .await;
+        match ingest_result {
+            Ok(profile) => return Ok(profile),
+            Err(err) => {
+                if !is_retryable_ingest_error(&err) || attempt == INGEST_RETRY_MAX_ATTEMPTS {
+                    return Err(BenchError::Db(err));
+                }
+                let delay_ms = (attempt as u64).saturating_mul(INGEST_RETRY_BACKOFF_BASE_MS);
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    Err(BenchError::Message(
+        "profiled ingest retry loop exited unexpectedly".to_string(),
+    ))
+}
+
+async fn ingest_next_write_batch_profiled_object_store(
+    db: &DB<AmazonS3, TokioExecutor>,
+    write_state: &WriteWorkloadState,
+) -> Result<WritePathProfile, BenchError> {
+    let batch_idx_u64 = write_state.next_batch.fetch_add(1, Ordering::Relaxed);
+    let batch_idx = usize::try_from(batch_idx_u64).unwrap_or(usize::MAX);
+    for attempt in 1..=INGEST_RETRY_MAX_ATTEMPTS {
+        let batch = build_batch(
+            &write_state.schema,
+            write_state.rows_per_batch,
+            write_state.key_space,
+            write_state.seed,
+            batch_idx,
+        )?;
+        let tombstones = vec![false; batch.num_rows()];
+        let ingest_result = db
+            .ingest_with_tombstones_with_profile(batch, tombstones)
+            .await;
+        match ingest_result {
+            Ok(profile) => return Ok(profile),
+            Err(err) => {
+                if !is_retryable_ingest_error(&err) || attempt == INGEST_RETRY_MAX_ATTEMPTS {
+                    return Err(BenchError::Db(err));
+                }
+                let delay_ms = (attempt as u64).saturating_mul(INGEST_RETRY_BACKOFF_BASE_MS);
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    Err(BenchError::Message(
+        "profiled ingest retry loop exited unexpectedly".to_string(),
     ))
 }
 
@@ -1955,6 +2201,75 @@ fn accumulate_write_profile(
     sample: WritePathProfile,
 ) -> WritePathProfile {
     aggregate.saturating_add(sample)
+}
+
+async fn run_surface_operation(
+    db: &BenchmarkDb,
+    state: &SurfaceWorkloadState,
+    write_state: &WriteWorkloadState,
+) -> Result<SurfaceOperationResult, BenchError> {
+    match db {
+        BenchmarkDb::Local(inner) => run_surface_operation_local(inner, state, write_state).await,
+        BenchmarkDb::ObjectStore(inner) => {
+            run_surface_operation_object_store(inner, state, write_state).await
+        }
+    }
+}
+
+async fn run_surface_operation_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+    write_state: &WriteWorkloadState,
+) -> Result<SurfaceOperationResult, BenchError> {
+    let snapshot_started = Instant::now();
+    let _snapshot = db
+        .begin_snapshot()
+        .await
+        .map_err(|err| BenchError::Message(format!("begin_snapshot failed: {err}")))?;
+    let snapshot_latency_ns = duration_ns_u64(snapshot_started.elapsed());
+    let latest_light = execute_surface_light_scan_local(db, state).await?;
+    let latest_heavy = execute_surface_heavy_scan_local(db, state).await?;
+    let write_started = Instant::now();
+    let write_profile = ingest_next_write_batch_profiled_local(db, write_state).await?;
+    let write_latency_ns = duration_ns_u64(write_started.elapsed());
+    let fresh_light = execute_surface_light_scan_local(db, state).await?;
+    Ok(SurfaceOperationResult {
+        snapshot_latency_ns,
+        latest_light,
+        latest_heavy,
+        write_latency_ns,
+        write_to_visible_latency_ns: duration_ns_u64(write_started.elapsed()),
+        write_profile,
+        fresh_light,
+    })
+}
+
+async fn run_surface_operation_object_store(
+    db: &DB<AmazonS3, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+    write_state: &WriteWorkloadState,
+) -> Result<SurfaceOperationResult, BenchError> {
+    let snapshot_started = Instant::now();
+    let _snapshot = db
+        .begin_snapshot()
+        .await
+        .map_err(|err| BenchError::Message(format!("begin_snapshot failed: {err}")))?;
+    let snapshot_latency_ns = duration_ns_u64(snapshot_started.elapsed());
+    let latest_light = execute_surface_light_scan_object_store(db, state).await?;
+    let latest_heavy = execute_surface_heavy_scan_object_store(db, state).await?;
+    let write_started = Instant::now();
+    let write_profile = ingest_next_write_batch_profiled_object_store(db, write_state).await?;
+    let write_latency_ns = duration_ns_u64(write_started.elapsed());
+    let fresh_light = execute_surface_light_scan_object_store(db, state).await?;
+    Ok(SurfaceOperationResult {
+        snapshot_latency_ns,
+        latest_light,
+        latest_heavy,
+        write_latency_ns,
+        write_to_visible_latency_ns: duration_ns_u64(write_started.elapsed()),
+        write_profile,
+        fresh_light,
+    })
 }
 
 async fn run_swmr_reader(
@@ -2183,6 +2498,172 @@ fn swmr_predicate(class: SwmrReaderClass) -> Expr {
             Expr::lt("id", ScalarValue::from("zzzzzzzz")),
         ]),
     }
+}
+
+pub(crate) fn surface_light_projection_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]))
+}
+
+fn surface_light_predicate() -> Expr {
+    Expr::and(vec![
+        Expr::gt_eq("id", ScalarValue::from("k00000000")),
+        Expr::lt("id", ScalarValue::from("k00000512")),
+    ])
+}
+
+fn surface_heavy_predicate() -> Expr {
+    Expr::and(vec![
+        Expr::gt_eq("id", ScalarValue::from("k00000000")),
+        Expr::lt("id", ScalarValue::from("k99999999")),
+    ])
+}
+
+async fn execute_surface_light_scan_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+) -> Result<SurfaceReadOperationResult, BenchError> {
+    let started = Instant::now();
+    let (rows, read_path) = execute_row_count_scan_profiled_local(
+        db,
+        surface_light_predicate(),
+        Some(Arc::clone(&state.light_projection)),
+        state.light_scan_limit,
+    )
+    .await?;
+    Ok(SurfaceReadOperationResult {
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn execute_surface_light_scan_object_store(
+    db: &DB<AmazonS3, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+) -> Result<SurfaceReadOperationResult, BenchError> {
+    let started = Instant::now();
+    let (rows, read_path) = execute_row_count_scan_profiled_object_store(
+        db,
+        surface_light_predicate(),
+        Some(Arc::clone(&state.light_projection)),
+        state.light_scan_limit,
+    )
+    .await?;
+    Ok(SurfaceReadOperationResult {
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn execute_surface_heavy_scan_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+) -> Result<SurfaceReadOperationResult, BenchError> {
+    let started = Instant::now();
+    let (rows, read_path) = execute_row_count_scan_profiled_local(
+        db,
+        surface_heavy_predicate(),
+        None,
+        state.heavy_scan_limit,
+    )
+    .await?;
+    Ok(SurfaceReadOperationResult {
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn execute_surface_heavy_scan_object_store(
+    db: &DB<AmazonS3, TokioExecutor>,
+    state: &SurfaceWorkloadState,
+) -> Result<SurfaceReadOperationResult, BenchError> {
+    let started = Instant::now();
+    let (rows, read_path) = execute_row_count_scan_profiled_object_store(
+        db,
+        surface_heavy_predicate(),
+        None,
+        state.heavy_scan_limit,
+    )
+    .await?;
+    Ok(SurfaceReadOperationResult {
+        rows,
+        latency_ns: duration_ns_u64(started.elapsed()),
+        read_path,
+    })
+}
+
+async fn execute_row_count_scan_profiled_local(
+    db: &DB<ProbedFs<LocalFs>, TokioExecutor>,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let (mut stream, profile) = {
+        let mut builder = db.scan().filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream_with_profile().await
+    }
+    .map_err(|err| BenchError::Message(format!("surface scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("surface scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns: duration_ns_u64(consume_started.elapsed()),
+            batch_count,
+            internal: internal_breakdown(profile),
+        },
+    ))
+}
+
+async fn execute_row_count_scan_profiled_object_store(
+    db: &DB<AmazonS3, TokioExecutor>,
+    predicate: Expr,
+    projection: Option<SchemaRef>,
+    limit: usize,
+) -> Result<(usize, ReadPathBreakdown), BenchError> {
+    let plan_started = Instant::now();
+    let (mut stream, profile) = {
+        let mut builder = db.scan().filter(predicate).limit(limit);
+        if let Some(projection) = projection {
+            builder = builder.projection(projection);
+        }
+        builder.stream_with_profile().await
+    }
+    .map_err(|err| BenchError::Message(format!("surface scan stream failed: {err}")))?;
+    let prepare_ns = duration_ns_u64(plan_started.elapsed());
+    let consume_started = Instant::now();
+    let mut rows = 0usize;
+    let mut batch_count = 0usize;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result
+            .map_err(|err| BenchError::Message(format!("surface scan stream failed: {err}")))?;
+        rows = rows.saturating_add(batch.num_rows());
+        batch_count = batch_count.saturating_add(1);
+    }
+    Ok((
+        rows,
+        ReadPathBreakdown {
+            prepare_ns,
+            consume_ns: duration_ns_u64(consume_started.elapsed()),
+            batch_count,
+            internal: internal_breakdown(profile),
+        },
+    ))
 }
 
 pub(crate) async fn swmr_reader_observation_for_snapshot(
@@ -3169,6 +3650,7 @@ fn measure_scenario(
         let mut rows_processed = 0u64;
         let mut read_path = ReadPathAggregate::default();
         let mut swmr = SwmrAggregate::default();
+        let mut surface = SurfaceAggregate::default();
         let started = Instant::now();
         for _ in 0..iterations {
             let op_started = Instant::now();
@@ -3179,6 +3661,9 @@ fn measure_scenario(
             }
             if let Some(swmr_result) = result.swmr {
                 swmr.record(swmr_result);
+            }
+            if let Some(surface_result) = result.surface {
+                surface.record(surface_result);
             }
             black_box(result.rows);
             latencies_ns.push(duration_ns_u64(op_started.elapsed()));
@@ -3196,6 +3681,11 @@ fn measure_scenario(
             io: scenario.io_probe.snapshot(),
             swmr: if !swmr.writer_latencies_ns.is_empty() || !swmr.readers.is_empty() {
                 Some(swmr)
+            } else {
+                None
+            },
+            surface: if !surface.snapshot_latencies_ns.is_empty() {
+                Some(surface)
             } else {
                 None
             },
@@ -3256,6 +3746,13 @@ fn to_scenario_artifact(
                 .swmr_state
                 .as_ref()
                 .map(SwmrWorkloadState::setup_descriptor),
+            surface: scenario
+                .surface_state
+                .as_ref()
+                .map(|state| SurfaceSetupDescriptor {
+                    light_scan_limit: state.light_scan_limit,
+                    heavy_scan_limit: state.heavy_scan_limit,
+                }),
         },
         summary: ScenarioSummaryArtifact {
             iterations: measurement.iterations,
@@ -3272,6 +3769,10 @@ fn to_scenario_artifact(
                     .as_ref()
                     .and_then(|state| swmr.to_summary(state))
             }),
+            surface: measurement
+                .surface
+                .as_ref()
+                .and_then(SurfaceAggregate::to_summary),
         },
     }
 }

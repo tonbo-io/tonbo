@@ -796,9 +796,82 @@ What we cannot yet say:
 - whether the main blocker is network path, object-store request overhead, snapshot/setup cost,
   small-object amplification, or deployment topology.
 
+### First Surface Benchmark Follow-up
+
+This branch now also has a first narrow `surface` benchmark follow-up aligned
+with the benchmark-program split between `micro`, `engine`, and `surface`
+scenarios.
+
+Scenario:
+
+- `surface_open_and_fresh_read`
+
+Shape:
+
+- measure `begin_snapshot` as a first-pass open/snapshot cost,
+- measure one selective HEAD read with a small projection,
+- measure one heavier HEAD read,
+- measure one foreground write with write-path profiling,
+- measure one follow-up selective HEAD read after that write to capture a
+  write-to-visible surface cost.
+
+This is intentionally closer to a user-facing interactive path than
+`read_compaction_quiesced`, but it is still **not** a filesystem benchmark and
+should not be read as one.
+
+Reference artifacts:
+
+- local first-pass surface run:
+  `target/tonbo-bench/compaction_local-1776243351814-1413746.json`
+- object-store first-pass surface run:
+  `target/tonbo-bench/compaction_local-1776258928896-1523209.json`
+
+First local vs standard-S3 surface comparison:
+
+| Metric | Local | Standard S3 | Ratio |
+| --- | ---: | ---: | ---: |
+| whole surface op mean | `14.08 ms` | `11.321 s` | `804x` |
+| `begin_snapshot` | `0.87 ms` | `534.87 ms` | `613x` |
+| latest light read | `2.91 ms` | `2.921 s` | `1004x` |
+| latest heavy read | `5.68 ms` | `3.746 s` | `659x` |
+| foreground write | `1.86 ms` | `1.207 s` | `649x` |
+| write-to-visible follow-up | `4.60 ms` | `4.118 s` | `894x` |
+
+Read-path split in the object-store surface run:
+
+- latest light read:
+  - prepare: `2919.80 ms`
+  - consume: `0.78 ms`
+- latest heavy read:
+  - prepare: `3742.38 ms`
+  - consume: `3.48 ms`
+- fresh light read after write:
+  - prepare: `2910.10 ms`
+  - consume: `0.49 ms`
+
+Interpretation:
+
+- The severe object-store penalty is not limited to the earlier
+  compaction-focused engine cell.
+- A narrower user-facing open/fresh-read proxy also lands in a
+  hundreds-to-about-a-thousand-times slowdown regime relative to local.
+- As with the earlier engine-layer results, the observed penalty is still
+  overwhelmingly prepare/setup dominated rather than row-consume dominated.
+
+Limits of this surface follow-up:
+
+- It is one first-pass API-surface scenario only.
+- It does **not** reproduce recursive directory traversal, filesystem metadata
+  walks, or content search.
+- It does **not** yet isolate whether the dominant prepare cost is snapshot
+  resolution, manifest work, object-store requests, or deployment path.
+- It should therefore be read as a closer user-facing proxy than
+  `read_compaction_quiesced`, not as the final product-surface benchmark.
+
 ### Blocked: broad product scenario claims
 
-This branch validates `read after compaction` only. It does not yet validate the live-engine
+This branch now validates one narrow engine-layer compaction scenario plus one
+first-pass surface scenario. It still does not yet validate the broader live-engine
 scenarios that matter most for Tonbo positioning:
 
 - interleaved reads and writes,
@@ -814,8 +887,16 @@ The current scenario supports one specific claim:
 - Tonbo compaction already improves read behavior on local storage and should continue to matter for
   larger live analytical workloads.
 
-The current scenario does **not** yet support a broad external claim that Tonbo is already tuned for
-serverless object-store analytics under live mixed traffic.
+The current branch also supports one narrower additional claim:
+
+- user-facing open/fresh-read behavior on the current object-store path can
+  degrade by hundreds to about a thousand times relative to local, and the
+  observed penalty is still strongly setup-dominated in the first surface
+  benchmark.
+
+The current branch does **not** yet support a broad external claim that Tonbo
+is already tuned for serverless object-store analytics under live mixed traffic
+or that it has already closed the gap on richer product-surface workloads.
 
 The gap between those statements is exactly what the next scenarios must close.
 
