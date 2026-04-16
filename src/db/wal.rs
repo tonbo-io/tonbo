@@ -508,6 +508,7 @@ where
     let mut wal_range: Option<WalFrameRange> = None;
     if let Some(handle) = db.wal_handle().cloned() {
         let provisional_id = handle.next_provisional_id();
+        let append_submit_started = Instant::now();
         let mut append_tickets = Vec::new();
         if let Some(ref batch) = upsert_batch {
             let ticket = handle
@@ -523,23 +524,35 @@ where
                 .map_err(KeyExtractError::from)?;
             append_tickets.push(ticket);
         }
+        profile.wal_append_submit_ns = duration_ns_u64(append_submit_started.elapsed());
+
         let mut tracker = WalRangeAccumulator::default();
-        let wal_append_started = Instant::now();
+        let wal_append_wait_started = Instant::now();
         for ticket in append_tickets {
             let ack = ticket.durable().await.map_err(KeyExtractError::from)?;
             tracker.observe_range(ack.first_seq, ack.last_seq);
         }
-        profile.wal_append_ns = duration_ns_u64(wal_append_started.elapsed());
+        profile.wal_append_wait_ns = duration_ns_u64(wal_append_wait_started.elapsed());
+        profile.wal_append_ns = profile
+            .wal_append_submit_ns
+            .saturating_add(profile.wal_append_wait_ns);
+
+        let wal_commit_submit_started = Instant::now();
         let commit_ticket = handle
             .txn_commit(provisional_id, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
-        let wal_commit_started = Instant::now();
+        profile.wal_commit_submit_ns = duration_ns_u64(wal_commit_submit_started.elapsed());
+
+        let wal_commit_wait_started = Instant::now();
         let commit_ack = commit_ticket
             .durable()
             .await
             .map_err(KeyExtractError::from)?;
-        profile.wal_commit_ns = duration_ns_u64(wal_commit_started.elapsed());
+        profile.wal_commit_wait_ns = duration_ns_u64(wal_commit_wait_started.elapsed());
+        profile.wal_commit_ns = profile
+            .wal_commit_submit_ns
+            .saturating_add(profile.wal_commit_wait_ns);
         tracker.observe_range(commit_ack.first_seq, commit_ack.last_seq);
         wal_range = tracker.into_range();
     }

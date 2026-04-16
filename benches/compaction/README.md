@@ -390,10 +390,18 @@ The SWMR workload now also includes a writer-phase breakdown:
   - end-to-end writer latency observed by the SWMR mixed step
 - `summary.swmr.writer_path_ns.mean_partition_ns`:
   - partitioning the mixed batch into upsert/delete payloads
+- `summary.swmr.writer_path_ns.mean_wal_append_submit_ns`:
+  - time to submit WAL append payloads to the writer
+- `summary.swmr.writer_path_ns.mean_wal_append_wait_ns`:
+  - time waiting for WAL append payload durable acks
 - `summary.swmr.writer_path_ns.mean_wal_append_ns`:
-  - WAL append durable-ack time for the batch payload frames
+  - total WAL append cost, equal to submit plus durable-wait
+- `summary.swmr.writer_path_ns.mean_wal_commit_submit_ns`:
+  - time to submit the WAL commit marker to the writer
+- `summary.swmr.writer_path_ns.mean_wal_commit_wait_ns`:
+  - time waiting for the WAL commit-marker durable ack
 - `summary.swmr.writer_path_ns.mean_wal_commit_ns`:
-  - WAL commit-marker durable-ack time
+  - total WAL commit cost, equal to submit plus durable-wait
 - `summary.swmr.writer_path_ns.mean_mutable_insert_ns`:
   - applying rows into the mutable memtable
 - `summary.swmr.writer_path_ns.mean_seal_ns`:
@@ -406,7 +414,8 @@ The SWMR workload now also includes a writer-phase breakdown:
 Interpretation guideline:
 
 - if `writer_path_ns.mean_total_ns` is close to `writer_latency_ns.mean`, the slowdown is largely inside Tonbo's measured write path rather than outside harness overhead
-- if `mean_wal_append_ns + mean_wal_commit_ns` dominates, focus on WAL durability and object-store request cost first
+- if `mean_wal_append_wait_ns + mean_wal_commit_wait_ns` dominates, focus on WAL durability and writer flush behavior first
+- if `mean_wal_append_submit_ns + mean_wal_commit_submit_ns` dominates, focus on writer queueing/submission overhead first
 - if `mean_minor_compaction_ns` dominates, focus on flush/manifest publish work before tuning the pure ingest path
 
 For schema `8+` artifacts, setup payloads include both logical and physical volume sections:

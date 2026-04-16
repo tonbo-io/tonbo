@@ -114,7 +114,11 @@ pub struct Version {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WritePathProfile {
     partition_ns: u64,
+    wal_append_submit_ns: u64,
+    wal_append_wait_ns: u64,
     wal_append_ns: u64,
+    wal_commit_submit_ns: u64,
+    wal_commit_wait_ns: u64,
     wal_commit_ns: u64,
     mutable_insert_ns: u64,
     seal_ns: u64,
@@ -128,9 +132,29 @@ impl WritePathProfile {
         self.partition_ns
     }
 
+    /// Time spent submitting WAL append payloads to the writer.
+    pub fn wal_append_submit_ns(&self) -> u64 {
+        self.wal_append_submit_ns
+    }
+
+    /// Time spent waiting for WAL append payload durable acks.
+    pub fn wal_append_wait_ns(&self) -> u64 {
+        self.wal_append_wait_ns
+    }
+
     /// Time spent appending write payloads to the WAL and waiting for durable acks.
     pub fn wal_append_ns(&self) -> u64 {
         self.wal_append_ns
+    }
+
+    /// Time spent submitting the WAL commit marker to the writer.
+    pub fn wal_commit_submit_ns(&self) -> u64 {
+        self.wal_commit_submit_ns
+    }
+
+    /// Time spent waiting for the WAL commit marker durable ack.
+    pub fn wal_commit_wait_ns(&self) -> u64 {
+        self.wal_commit_wait_ns
     }
 
     /// Time spent writing the WAL commit marker and waiting for durability.
@@ -163,7 +187,19 @@ impl WritePathProfile {
     pub fn saturating_add(self, other: Self) -> Self {
         Self {
             partition_ns: self.partition_ns.saturating_add(other.partition_ns),
+            wal_append_submit_ns: self
+                .wal_append_submit_ns
+                .saturating_add(other.wal_append_submit_ns),
+            wal_append_wait_ns: self
+                .wal_append_wait_ns
+                .saturating_add(other.wal_append_wait_ns),
             wal_append_ns: self.wal_append_ns.saturating_add(other.wal_append_ns),
+            wal_commit_submit_ns: self
+                .wal_commit_submit_ns
+                .saturating_add(other.wal_commit_submit_ns),
+            wal_commit_wait_ns: self
+                .wal_commit_wait_ns
+                .saturating_add(other.wal_commit_wait_ns),
             wal_commit_ns: self.wal_commit_ns.saturating_add(other.wal_commit_ns),
             mutable_insert_ns: self
                 .mutable_insert_ns

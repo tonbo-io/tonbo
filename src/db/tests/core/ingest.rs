@@ -134,6 +134,21 @@ async fn ingest_with_tombstones_profile_reports_coherent_timings() {
         .await
         .expect("ingest");
 
+    assert_eq!(
+        profile.wal_append_ns(),
+        profile
+            .wal_append_submit_ns()
+            .saturating_add(profile.wal_append_wait_ns()),
+        "wal append total should equal submit plus durable wait"
+    );
+    assert_eq!(
+        profile.wal_commit_ns(),
+        profile
+            .wal_commit_submit_ns()
+            .saturating_add(profile.wal_commit_wait_ns()),
+        "wal commit total should equal submit plus durable wait"
+    );
+
     let component_sum = profile
         .partition_ns()
         .saturating_add(profile.wal_append_ns())

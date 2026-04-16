@@ -38,7 +38,7 @@ use tonbo::db::{
 };
 
 pub(crate) const BENCH_ID: &str = "compaction_local";
-pub(crate) const BENCH_SCHEMA_VERSION: u32 = 13;
+pub(crate) const BENCH_SCHEMA_VERSION: u32 = 14;
 
 const DEFAULT_INGEST_BATCHES: usize = 640;
 const DEFAULT_DATASET_SCALE: usize = 1;
@@ -1835,7 +1835,11 @@ struct ReadPathInternalSummary {
 #[derive(Debug, Serialize)]
 struct WritePathSummary {
     mean_partition_ns: f64,
+    mean_wal_append_submit_ns: f64,
+    mean_wal_append_wait_ns: f64,
     mean_wal_append_ns: f64,
+    mean_wal_commit_submit_ns: f64,
+    mean_wal_commit_wait_ns: f64,
     mean_wal_commit_ns: f64,
     mean_mutable_insert_ns: f64,
     mean_seal_ns: f64,
@@ -2008,7 +2012,11 @@ impl ReadPathAggregate {
 struct WritePathAggregate {
     samples: usize,
     partition_ns_total: u128,
+    wal_append_submit_ns_total: u128,
+    wal_append_wait_ns_total: u128,
     wal_append_ns_total: u128,
+    wal_commit_submit_ns_total: u128,
+    wal_commit_wait_ns_total: u128,
     wal_commit_ns_total: u128,
     mutable_insert_ns_total: u128,
     seal_ns_total: u128,
@@ -2022,9 +2030,21 @@ impl WritePathAggregate {
         self.partition_ns_total = self
             .partition_ns_total
             .saturating_add(u128::from(profile.partition_ns()));
+        self.wal_append_submit_ns_total = self
+            .wal_append_submit_ns_total
+            .saturating_add(u128::from(profile.wal_append_submit_ns()));
+        self.wal_append_wait_ns_total = self
+            .wal_append_wait_ns_total
+            .saturating_add(u128::from(profile.wal_append_wait_ns()));
         self.wal_append_ns_total = self
             .wal_append_ns_total
             .saturating_add(u128::from(profile.wal_append_ns()));
+        self.wal_commit_submit_ns_total = self
+            .wal_commit_submit_ns_total
+            .saturating_add(u128::from(profile.wal_commit_submit_ns()));
+        self.wal_commit_wait_ns_total = self
+            .wal_commit_wait_ns_total
+            .saturating_add(u128::from(profile.wal_commit_wait_ns()));
         self.wal_commit_ns_total = self
             .wal_commit_ns_total
             .saturating_add(u128::from(profile.wal_commit_ns()));
@@ -2049,7 +2069,11 @@ impl WritePathAggregate {
         let samples = self.samples as f64;
         Some(WritePathSummary {
             mean_partition_ns: self.partition_ns_total as f64 / samples,
+            mean_wal_append_submit_ns: self.wal_append_submit_ns_total as f64 / samples,
+            mean_wal_append_wait_ns: self.wal_append_wait_ns_total as f64 / samples,
             mean_wal_append_ns: self.wal_append_ns_total as f64 / samples,
+            mean_wal_commit_submit_ns: self.wal_commit_submit_ns_total as f64 / samples,
+            mean_wal_commit_wait_ns: self.wal_commit_wait_ns_total as f64 / samples,
             mean_wal_commit_ns: self.wal_commit_ns_total as f64 / samples,
             mean_mutable_insert_ns: self.mutable_insert_ns_total as f64 / samples,
             mean_seal_ns: self.seal_ns_total as f64 / samples,
