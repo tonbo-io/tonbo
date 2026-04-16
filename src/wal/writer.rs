@@ -644,7 +644,6 @@ where
 
         let durable_seq = self.current_frame_seq();
         self.record_frame_progress(durable_seq, commit_hint);
-        self.persist_state_if_dirty().await?;
 
         let ack = WalAck {
             first_seq: first_frame_seq,
@@ -689,6 +688,8 @@ where
                 }
             }
         }
+
+        self.persist_state_if_dirty().await?;
 
         Ok(HandleBatchOutcome {
             sync_performed,
