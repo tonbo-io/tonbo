@@ -1,6 +1,6 @@
 //! Unified handle for background compaction workers.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Mutex};
 
 use fusio::executor::Executor;
 #[cfg(test)]
@@ -23,7 +23,7 @@ pub(crate) enum CompactionTrigger {
 
 pub(crate) struct CompactionHandle<E: Executor> {
     abort: Option<AbortHandle>,
-    join: Option<E::JoinHandle<()>>,
+    join: Mutex<Option<E::JoinHandle<()>>>,
     trigger: Option<mpsc::Sender<CompactionTrigger>>,
     _marker: PhantomData<E>,
 }
@@ -37,7 +37,7 @@ impl<E: Executor> CompactionHandle<E> {
     ) -> Self {
         Self {
             abort: Some(abort),
-            join,
+            join: Mutex::new(join),
             trigger,
             _marker: PhantomData,
         }
@@ -58,7 +58,12 @@ impl<E: Executor> CompactionHandle<E> {
         if let Some(mut sender) = self.trigger.take() {
             let _ = sender.send(CompactionTrigger::Shutdown).await;
         }
-        if let Some(join) = self.join.take() {
+        let join = self
+            .join
+            .lock()
+            .expect("compaction join mutex poisoned")
+            .take();
+        if let Some(join) = join {
             let _ = join.join().await;
         }
         self.abort.take();
@@ -74,7 +79,11 @@ impl<E: Executor> Drop for CompactionHandle<E> {
         if let Some(abort) = self.abort.take() {
             abort.abort();
         }
-        let _ = self.join.take();
+        let _ = self
+            .join
+            .lock()
+            .expect("compaction join mutex poisoned")
+            .take();
         log_debug!(component = "compaction", event = "compaction_shutdown",);
     }
 }

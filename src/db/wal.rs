@@ -208,6 +208,7 @@ where
     }
 
     /// Ingest a batch along with its tombstone bitmap, routing through the WAL when enabled.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn ingest_with_tombstones(
         &self,
         batch: RecordBatch,
@@ -218,13 +219,34 @@ where
             .map(|_| ())
     }
 
+    #[cfg(not(test))]
+    pub async fn ingest_with_tombstones_without_minor_compaction(
+        &self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+    ) -> Result<(), KeyExtractError> {
+        self.ingest_with_tombstones_with_profile_without_minor_compaction(batch, tombstones)
+            .await
+            .map(|_| ())
+    }
+
     /// Ingest a batch and return a write-path timing breakdown.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn ingest_with_tombstones_with_profile(
         &self,
         batch: RecordBatch,
         tombstones: Vec<bool>,
     ) -> Result<WritePathProfile, KeyExtractError> {
-        insert_dyn_wal_batch(self, batch, tombstones).await
+        insert_dyn_wal_batch(self, batch, tombstones, true).await
+    }
+
+    #[cfg(not(test))]
+    pub async fn ingest_with_tombstones_with_profile_without_minor_compaction(
+        &self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+    ) -> Result<WritePathProfile, KeyExtractError> {
+        insert_dyn_wal_batch(self, batch, tombstones, false).await
     }
 
     pub(crate) fn replay_wal_events(
@@ -446,6 +468,7 @@ async fn insert_dyn_wal_batch<FS, E>(
     db: &DbInner<FS, E>,
     batch: RecordBatch,
     tombstones: Vec<bool>,
+    run_minor_compaction: bool,
 ) -> Result<WritePathProfile, KeyExtractError>
 where
     FS: ManifestFs<E>,
@@ -546,11 +569,13 @@ where
         let seal_started = Instant::now();
         db.maybe_seal_after_insert()?;
         profile.seal_ns = duration_ns_u64(seal_started.elapsed());
-        let minor_compaction_started = Instant::now();
-        db.maybe_run_minor_compaction()
-            .await
-            .map_err(compaction_as_key_extract_error)?;
-        profile.minor_compaction_ns = duration_ns_u64(minor_compaction_started.elapsed());
+        if run_minor_compaction {
+            let minor_compaction_started = Instant::now();
+            db.maybe_run_minor_compaction()
+                .await
+                .map_err(compaction_as_key_extract_error)?;
+            profile.minor_compaction_ns = duration_ns_u64(minor_compaction_started.elapsed());
+        }
     }
     profile.total_ns = duration_ns_u64(total_started.elapsed());
     Ok(profile)
