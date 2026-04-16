@@ -248,21 +248,15 @@ where
                                 }
                             }
 
-                            match ctx.handle_enqueue_batch(&batch).await {
-                                Ok(HandleBatchOutcome { acks, sync_performed, timer_directive }) => {
+                            match ctx.handle_enqueue_batch(batch).await {
+                                Ok(HandleBatchOutcome { sync_performed, timer_directive }) => {
                                     if sync_performed {
                                         ctx.record_sync().await;
                                     }
                                     ctx.apply_timer_directive(timer_directive, &mut timer);
-                                    for ((_, _, tx), ack) in batch.into_iter().zip(acks.into_iter()) {
-                                        let _ = tx.send(Ok(ack));
-                                    }
                                 }
                                 Err(err) => {
                                     ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
-                                    for (_, _, tx) in batch.into_iter() {
-                                        let _ = tx.send(Err(err.clone()));
-                                    }
                                     return Err(err);
                                 }
                             }
@@ -362,9 +356,8 @@ where
                         }
                     }
 
-                    match ctx.handle_enqueue_batch(&batch).await {
+                    match ctx.handle_enqueue_batch(batch).await {
                         Ok(HandleBatchOutcome {
-                            acks,
                             sync_performed,
                             timer_directive,
                         }) => {
@@ -372,14 +365,8 @@ where
                                 ctx.record_sync().await;
                             }
                             ctx.apply_timer_directive(timer_directive, &mut timer);
-                            for ((_, _, tx), ack) in batch.into_iter().zip(acks) {
-                                let _ = tx.send(Ok(ack));
-                            }
                         }
                         Err(err) => {
-                            for (_, _, tx) in batch.into_iter() {
-                                let _ = tx.send(Err(err.clone()));
-                            }
                             return Err(err);
                         }
                     }
@@ -489,7 +476,6 @@ where
 }
 
 struct HandleBatchOutcome {
-    acks: Vec<WalAck>,
     sync_performed: bool,
     timer_directive: TimerDirective,
 }
@@ -681,21 +667,30 @@ where
 
     async fn handle_enqueue_batch(
         &mut self,
-        batch: &[(WalCommand, Instant, oneshot::Sender<WalResult<WalAck>>)],
+        batch: Vec<(WalCommand, Instant, oneshot::Sender<WalResult<WalAck>>)>,
     ) -> WalResult<HandleBatchOutcome> {
-        let mut acks = Vec::with_capacity(batch.len());
         let mut sync_performed = false;
         let mut timer_directive = TimerDirective::None;
+        let mut pending = batch.into_iter();
 
-        for (command, enqueued_at, _) in batch.iter() {
-            let outcome = self.handle_enqueue(command.clone(), *enqueued_at).await?;
-            sync_performed |= outcome.sync_performed;
-            timer_directive = outcome.timer_directive;
-            acks.push(outcome.ack);
+        while let Some((command, enqueued_at, ack_tx)) = pending.next() {
+            match self.handle_enqueue(command, enqueued_at).await {
+                Ok(outcome) => {
+                    sync_performed |= outcome.sync_performed;
+                    timer_directive = outcome.timer_directive;
+                    let _ = ack_tx.send(Ok(outcome.ack));
+                }
+                Err(err) => {
+                    let _ = ack_tx.send(Err(err.clone()));
+                    for (_, _, pending_tx) in pending {
+                        let _ = pending_tx.send(Err(err.clone()));
+                    }
+                    return Err(err);
+                }
+            }
         }
 
         Ok(HandleBatchOutcome {
-            acks,
             sync_performed,
             timer_directive,
         })
