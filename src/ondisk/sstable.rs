@@ -2586,7 +2586,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_parquet_empty_without_page_indexes_is_allowed() {
         use arrow_array::StringArray;
@@ -2642,27 +2641,5 @@ mod tests {
 
         assert_eq!(stream_schema.fields().len(), 1);
         assert!(stream.next().await.is_none());
-=======
-    #[test]
-    fn validate_page_indexes_accepts_zero_row_groups() {
-        use parquet::{
-            file::metadata::{FileMetaData, ParquetMetaData},
-            schema::types::{SchemaDescriptor, Type as SchemaType},
-        };
-
-        let parquet_schema = SchemaType::group_type_builder("schema")
-            .build()
-            .expect("parquet schema");
-        let schema_descr = Arc::new(SchemaDescriptor::new(Arc::new(parquet_schema)));
-        let file_meta = FileMetaData::new(2, 0, None, None, schema_descr, None);
-        let metadata = ParquetMetaData::new(file_meta, vec![]);
-
-        let path = Path::from("test/empty.parquet");
-        let result = validate_page_indexes(&path, &metadata);
-        assert!(
-            result.is_ok(),
-            "validate_page_indexes should accept files with 0 row groups"
-        );
->>>>>>> f6c80a9 (feat: implement seal policy tests for transaction durability)
     }
 }

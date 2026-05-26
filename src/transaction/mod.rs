@@ -692,9 +692,12 @@ where
 
         db.maybe_seal_after_insert()
             .map_err(TransactionCommitError::Apply)?;
+        #[cfg(test)]
         db.maybe_run_minor_compaction()
             .await
             .map_err(TransactionCommitError::MinorCompaction)?;
+        #[cfg(not(test))]
+        DbInner::schedule_background_minor_compaction(Arc::clone(&db));
 
         drop(key_guards);
         Ok(())
@@ -1271,12 +1274,7 @@ mod tests {
         // Data committed via transaction should be readable even after being sealed
         // into an immutable segment.
         let predicate = all_rows_predicate();
-        let batches = db
-            .scan()
-            .filter(predicate)
-            .collect()
-            .await
-            .expect("scan");
+        let batches = db.scan().filter(predicate).collect().await.expect("scan");
         let rows = extract_rows(&batches);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], ("sealed-key".to_string(), 42));

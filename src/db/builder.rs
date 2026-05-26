@@ -889,6 +889,7 @@ impl DbBuilder<Unconfigured> {
             state: StorageConfig::new(fs, root, DurabilityClass::Durable),
             compaction_options: self.compaction_options,
             minor_compaction: self.minor_compaction,
+            seal_policy: self.seal_policy,
         })
     }
 

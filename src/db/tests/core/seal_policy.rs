@@ -8,7 +8,6 @@ use typed_arrow_dyn::{DynCell, DynRow};
 use crate::{
     db::{DB, DbBuilder, Expr, ScalarValue},
     inmem::policy::BatchesThreshold,
-    mode::DynModeConfig,
     test::build_batch,
 };
 
@@ -41,56 +40,6 @@ fn extract_rows(batches: &[RecordBatch]) -> Vec<(String, i32)> {
         }
     }
     rows
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn set_seal_policy_succeeds_on_exclusive_handle() {
-    let schema = test_schema();
-    let config = DynModeConfig::from_key_name(schema, "id").expect("config");
-    let executor = Arc::new(NoopExecutor);
-    let mut db: TestDb = DB::new(config, executor).await.expect("db");
-
-    let updated = db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
-    assert!(updated, "set_seal_policy should succeed on an exclusive Arc");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn set_seal_policy_fails_on_shared_handle() {
-    let schema = test_schema();
-    let config = DynModeConfig::from_key_name(schema, "id").expect("config");
-    let executor = Arc::new(NoopExecutor);
-    let mut db: TestDb = DB::new(config, executor).await.expect("db");
-
-    // Clone the inner Arc to simulate a shared handle.
-    let _shared = db.inner().clone();
-
-    let updated = db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
-    assert!(
-        !updated,
-        "set_seal_policy should fail when Arc has multiple references"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn set_seal_policy_activates_sealing() {
-    let schema = test_schema();
-    let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-    let executor = Arc::new(NoopExecutor);
-    let mut db: TestDb = DB::new(config, executor).await.expect("db");
-
-    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
-
-    let rows = vec![DynRow(vec![
-        Some(DynCell::Str("k1".into())),
-        Some(DynCell::I32(1)),
-    ])];
-    let batch = build_batch(schema, rows).expect("batch");
-    db.ingest(batch).await.expect("ingest");
-
-    assert!(
-        db.inner().num_immutable_segments() >= 1,
-        "sealing should trigger after ingest with BatchesThreshold {{ batches: 1 }}"
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -131,14 +80,8 @@ async fn builder_with_seal_policy_data_remains_readable() {
         .expect("db");
 
     let rows = vec![
-        DynRow(vec![
-            Some(DynCell::Str("a".into())),
-            Some(DynCell::I32(1)),
-        ]),
-        DynRow(vec![
-            Some(DynCell::Str("b".into())),
-            Some(DynCell::I32(2)),
-        ]),
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
     ];
     let batch = build_batch(schema, rows).expect("batch");
     db.ingest(batch).await.expect("ingest");

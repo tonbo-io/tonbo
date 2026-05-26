@@ -534,19 +534,6 @@ where
         DbBuilder::new(config)
     }
 
-    /// Set the sealing policy.
-    ///
-    /// Returns `true` if the policy was updated, or `false` if the DB handle
-    /// is shared and cannot be mutated.
-    pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) -> bool {
-        if let Some(inner) = Arc::get_mut(&mut self.inner) {
-            inner.set_seal_policy(policy);
-            true
-        } else {
-            false
-        }
-    }
-
     /// Begin a read-only snapshot for queries.
     pub async fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
         self.inner.begin_snapshot().await
