@@ -1148,6 +1148,51 @@ fn build_table_paths(
     Ok((dir_path, data_path, delete_path))
 }
 
+pub(crate) fn manifest_storage_path(root: &Path, storage_path: &Path) -> Path {
+    let storage_raw = storage_path.as_ref();
+    let root_raw = root.as_ref().trim_end_matches('/');
+    if root_raw.is_empty() {
+        return storage_path.clone();
+    }
+
+    if let Some(stripped) = storage_raw.strip_prefix(root_raw) {
+        let stripped = stripped.trim_start_matches('/');
+        if !stripped.is_empty() {
+            return Path::from(stripped.to_string());
+        }
+    }
+
+    if let Some(stripped_root) = root_raw.strip_prefix('/')
+        && let Some(stripped) = storage_raw.strip_prefix(stripped_root)
+    {
+        let stripped = stripped.trim_start_matches('/');
+        if !stripped.is_empty() {
+            return Path::from(stripped.to_string());
+        }
+    }
+
+    storage_path.clone()
+}
+
+pub(crate) fn storage_path_from_manifest(root: &Path, manifest_path: &Path) -> Path {
+    if root == &Path::default() {
+        return manifest_path.clone();
+    }
+
+    let manifest_raw = manifest_path.as_ref();
+    let root_raw = root.as_ref().trim_end_matches('/');
+    if manifest_raw.starts_with(root_raw) {
+        return manifest_path.clone();
+    }
+    if let Some(root_without_leading_slash) = root_raw.strip_prefix('/')
+        && manifest_raw.starts_with(root_without_leading_slash)
+    {
+        return Path::from(format!("/{manifest_raw}"));
+    }
+
+    Path::from(format!("{root_raw}/{manifest_raw}"))
+}
+
 /// Planner responsible for turning immutable runs into SSTable files.
 pub struct SsTableBuilder {
     writer: ParquetTableWriter,
@@ -2457,6 +2502,22 @@ mod tests {
         let descriptor = table.descriptor();
         let delete_path = descriptor.delete_path().expect("delete sidecar present");
         assert!(delete_path.as_ref().ends_with(".delete.parquet"));
+    }
+
+    #[test]
+    fn manifest_storage_path_strips_sst_root_prefix() {
+        let root = Path::from("/tmp/tonbo/sst");
+        let storage = Path::from("/tmp/tonbo/sst/L1/00000000000000000007.parquet");
+        assert_eq!(
+            manifest_storage_path(&root, &storage).as_ref(),
+            "L1/00000000000000000007.parquet"
+        );
+
+        let legacy_storage = Path::from("tmp/tonbo/sst/L1/00000000000000000007.parquet");
+        assert_eq!(
+            manifest_storage_path(&root, &legacy_storage).as_ref(),
+            "L1/00000000000000000007.parquet"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,13 +13,15 @@ use std::{
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fusio::{
-    DynFs,
+    DynFs, Error as FusioError, Write,
     disk::LocalFs,
     dynamic::{MaybeSend, MaybeSendFuture, MaybeSync},
     executor::{Executor, Instant, NoopExecutor, Timer, tokio::TokioExecutor},
+    fs::{CasCondition, FileMeta, FileSystemTag, Fs, FsCas, OpenOptions},
     mem::fs::InMemoryFs,
     path::Path,
 };
+use fusio_manifest::ObjectHead;
 use futures::{StreamExt, future::AbortHandle};
 use tokio::{sync::Mutex, time::sleep};
 use typed_arrow_dyn::{DynCell, DynRow};
@@ -58,10 +60,115 @@ use crate::{
     mvcc::Timestamp,
     ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId, SsTableReader},
     schema::SchemaBuilder,
-    test::build_batch,
+    test::{build_batch, config_with_pk},
 };
 
 type SleepHook = Arc<dyn Fn(Duration) -> Pin<Box<dyn MaybeSendFuture<Output = ()>>> + Send + Sync>;
+
+#[derive(Clone)]
+struct FailOnceRemoveFs {
+    inner: LocalFs,
+    fail_path: Arc<String>,
+    failed_once: Arc<AtomicBool>,
+}
+
+impl FailOnceRemoveFs {
+    fn new(fail_path: impl Into<String>) -> Self {
+        Self {
+            inner: LocalFs {},
+            fail_path: Arc::new(fail_path.into()),
+            failed_once: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn has_failed_once(&self) -> bool {
+        self.failed_once.load(Ordering::SeqCst)
+    }
+}
+
+impl Fs for FailOnceRemoveFs {
+    type File = <LocalFs as Fs>::File;
+
+    fn file_system(&self) -> FileSystemTag {
+        Fs::file_system(&self.inner)
+    }
+
+    async fn open_options(
+        &self,
+        path: &Path,
+        options: OpenOptions,
+    ) -> Result<Self::File, FusioError> {
+        Fs::open_options(&self.inner, path, options).await
+    }
+
+    async fn create_dir_all(path: &Path) -> Result<(), FusioError> {
+        <LocalFs as Fs>::create_dir_all(path).await
+    }
+
+    async fn list(
+        &self,
+        path: &Path,
+    ) -> Result<
+        impl futures::Stream<Item = Result<FileMeta, FusioError>> + fusio::dynamic::MaybeSend,
+        FusioError,
+    > {
+        Fs::list(&self.inner, path).await
+    }
+
+    async fn remove(&self, path: &Path) -> Result<(), FusioError> {
+        if path.as_ref() == self.fail_path.as_str()
+            && !self.failed_once.swap(true, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("injected sweep delete failure").into());
+        }
+        Fs::remove(&self.inner, path).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<(), FusioError> {
+        Fs::copy(&self.inner, from, to).await
+    }
+
+    async fn link(&self, from: &Path, to: &Path) -> Result<(), FusioError> {
+        Fs::link(&self.inner, from, to).await
+    }
+}
+
+impl FsCas for FailOnceRemoveFs {
+    fn load_with_tag(
+        &self,
+        path: &Path,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<Option<(Vec<u8>, String)>, FusioError>> + '_>>
+    {
+        self.inner.load_with_tag(path)
+    }
+
+    fn put_conditional(
+        &self,
+        path: &Path,
+        payload: &[u8],
+        content_type: Option<&str>,
+        metadata: Option<Vec<(String, String)>>,
+        condition: CasCondition,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<String, FusioError>> + '_>> {
+        self.inner
+            .put_conditional(path, payload, content_type, metadata, condition)
+    }
+}
+
+impl ObjectHead for FailOnceRemoveFs {
+    fn head_metadata<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Pin<
+        Box<
+            dyn MaybeSendFuture<
+                    Output = Result<Option<std::collections::HashMap<String, String>>, FusioError>,
+                > + 'a,
+        >,
+    > {
+        self.inner.head_metadata(path)
+    }
+}
 
 #[derive(Clone)]
 struct RecordingExecutor {
@@ -126,6 +233,63 @@ impl Executor for RecordingExecutor {
     {
         <TokioExecutor as Executor>::rw_lock(value)
     }
+}
+
+fn local_sst_path<FS, E>(db: &DbInner<FS, E>, relative: &str) -> Path
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    Path::from(format!("{}/{}", db.sst_root.as_ref(), relative))
+}
+
+async fn write_local_sst_object(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = std::path::Path::new(path.as_ref())
+        .parent()
+        .ok_or("sst object missing parent directory")?;
+    fs::create_dir_all(parent)?;
+    let fs = LocalFs {};
+    let mut file = Fs::open_options(
+        &fs,
+        path,
+        OpenOptions::default().create(true).truncate(true),
+    )
+    .await?;
+    let (write_res, _) = file.write_all(bytes.to_vec()).await;
+    write_res?;
+    file.close().await?;
+    Ok(())
+}
+
+async fn local_sst_exists(path: &Path) -> bool {
+    Fs::open(&LocalFs {}, path).await.is_ok()
+}
+
+fn count_local_sst_objects(root: &std::path::Path) -> Result<u64, Box<dyn std::error::Error>> {
+    fn visit(path: &std::path::Path, count: &mut u64) -> Result<(), std::io::Error> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit(&entry.path(), count)?;
+            } else if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
+                *count = count.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    let mut count = 0u64;
+    visit(root, &mut count)?;
+    Ok(count)
 }
 
 impl Timer for RecordingExecutor {
@@ -885,16 +1049,24 @@ async fn compaction_updates_manifest_wal_and_records_gc_plan()
         vec![wal_a.clone()],
         "should surface obsolete wal segments"
     );
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
 
     let plan = db
         .inner()
         .manifest
-        .take_gc_plan(db.inner().manifest_table)
+        .take_gc_plan_for_authorized_sweep_with_pins(
+            db.inner().manifest_table,
+            &db.inner().active_snapshot_pins(),
+        )
         .await?
         .expect("gc plan recorded");
     assert_eq!(plan.obsolete_wal_segments.len(), 1);
     assert_eq!(plan.obsolete_wal_segments[0].file_id(), wal_a.file_id());
-    assert_eq!(plan.obsolete_ssts.len(), 2);
+    assert_eq!(
+        plan.obsolete_ssts.len(),
+        0,
+        "active historical snapshots should keep replaced SSTs protected",
+    );
     Ok(())
 }
 
@@ -991,16 +1163,19 @@ async fn compaction_preserves_manifest_wal_when_metadata_missing()
         outcome.obsolete_wal_segments.is_empty(),
         "should not surface obsolete wal segments when manifest set is preserved"
     );
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
 
-    let plan = db
-        .inner()
-        .manifest
-        .take_gc_plan(db.inner().manifest_table)
-        .await?
-        .expect("gc plan recorded");
     assert!(
-        plan.obsolete_wal_segments.is_empty(),
-        "gc plan should not mark wal segments obsolete"
+        db.inner()
+            .manifest
+            .take_gc_plan_for_authorized_sweep_with_pins(
+                db.inner().manifest_table,
+                &db.inner().active_snapshot_pins(),
+            )
+            .await?
+            .is_none(),
+        "historically pinned SSTs should consume the staged GC plan when no WAL segments are \
+         obsolete",
     );
     Ok(())
 }
@@ -1178,20 +1353,1635 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
         Some(wal_a.file_id()),
         "wal floor should align to first retained segment"
     );
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
+
+    assert!(
+        db.inner()
+            .manifest
+            .take_gc_plan_for_authorized_sweep_with_pins(
+                db.inner().manifest_table,
+                &db.inner().active_snapshot_pins(),
+            )
+            .await?
+            .is_none(),
+        "active historical snapshots should keep replaced SSTs out of the authorized sweep set",
+    );
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_gc_candidates_survive_later_compactions_that_stage_more_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![
+                    SstEntry::new(
+                        SsTableId::new(1),
+                        None,
+                        None,
+                        Path::from("L0/1.parquet"),
+                        None,
+                    ),
+                    SstEntry::new(
+                        SsTableId::new(2),
+                        None,
+                        None,
+                        Path::from("L0/2.parquet"),
+                        None,
+                    ),
+                ],
+            }],
+        )
+        .await?;
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
+
+    let first = db
+        .inner()
+        .run_compaction_task(
+            &OneShotPlanner::new(CompactionTask {
+                source_level: 0,
+                target_level: 1,
+                input: vec![CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(1),
+                }],
+                key_range: None,
+            }),
+            &StaticExecutor {
+                outputs: vec![
+                    SsTableDescriptor::new(SsTableId::new(3), 1)
+                        .with_storage_paths(Path::from("L1/3.parquet"), None),
+                ],
+                wal_segments: Vec::new(),
+                target_level: 1,
+            },
+        )
+        .await?
+        .expect("first compaction outcome");
+    assert_eq!(first.remove_ssts.len(), 1);
+
+    let second = db
+        .inner()
+        .run_compaction_task(
+            &OneShotPlanner::new(CompactionTask {
+                source_level: 0,
+                target_level: 1,
+                input: vec![CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(2),
+                }],
+                key_range: None,
+            }),
+            &StaticExecutor {
+                outputs: vec![
+                    SsTableDescriptor::new(SsTableId::new(4), 1)
+                        .with_storage_paths(Path::from("L1/4.parquet"), None),
+                ],
+                wal_segments: Vec::new(),
+                target_level: 1,
+            },
+        )
+        .await?
+        .expect("second compaction outcome");
+    assert_eq!(second.remove_ssts.len(), 1);
+
+    let inspection = db
+        .inspect_sst_gc_plan()
+        .await?
+        .expect("blocked gc plan should remain staged");
+    assert_eq!(inspection.staged_sst_candidates, 2);
+    assert_eq!(inspection.authorized_sst_candidates, 0);
+    assert_eq!(inspection.blocked_sst_candidates, 2);
+    assert_eq!(
+        inspection
+            .candidates
+            .iter()
+            .map(|candidate| candidate.sst_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorized_gc_plan_for_sweep_filters_reachable_ssts_from_current_root_set()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(1),
+                    None,
+                    None,
+                    Path::from("L1/1.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(1),
+                        level: 1,
+                        data_path: Path::from("L1/1.parquet"),
+                        delete_path: None,
+                    },
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(99),
+                        level: 0,
+                        data_path: Path::from("L0/99.parquet"),
+                        delete_path: None,
+                    },
+                ],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
 
     let plan = db
         .inner()
         .manifest
-        .take_gc_plan(db.inner().manifest_table)
+        .take_gc_plan_for_authorized_sweep(db.inner().manifest_table)
         .await?
-        .expect("gc plan recorded");
-    assert_eq!(plan.obsolete_wal_segments.len(), 0);
+        .expect("filtered gc plan");
+    assert_eq!(plan.obsolete_ssts.len(), 1);
+    assert_eq!(plan.obsolete_ssts[0].id, SsTableId::new(99));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorized_gc_plan_for_sweep_drops_sst_only_plan_when_candidate_is_live()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 2,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(7),
+                    None,
+                    None,
+                    Path::from("L2/7.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(7),
+                    level: 2,
+                    data_path: Path::from("L2/7.parquet"),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
     assert!(
-        !plan.obsolete_ssts.is_empty(),
-        "gc plan should record obsolete ssts"
+        db.inner()
+            .manifest
+            .take_gc_plan_for_authorized_sweep(db.inner().manifest_table)
+            .await?
+            .is_none(),
+        "root-set filtering should not authorize deleting a live SST",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorized_gc_plan_for_sweep_rechecks_root_set_after_candidate_becomes_live()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(42),
+                    level: 1,
+                    data_path: Path::from("L1/42.parquet"),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(42),
+                    None,
+                    None,
+                    Path::from("L1/42.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    assert!(
+        db.inner()
+            .manifest
+            .take_gc_plan_for_authorized_sweep(db.inner().manifest_table)
+            .await?
+            .is_none(),
+        "sweep authorization must reject a staged SST candidate that is live in the current root \
+         set",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorized_gc_plan_for_sweep_preserves_historically_pinned_sst_objects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    let historical_data = Path::from("L0/5.parquet");
+    let historical_delete = Path::from("L0/5.delete.parquet");
+    let head_data = Path::from("L1/6.parquet");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(5),
+                    None,
+                    None,
+                    historical_data.clone(),
+                    Some(historical_delete.clone()),
+                )],
+            }],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::RemoveSsts {
+                    level: 0,
+                    sst_ids: vec![SsTableId::new(5)],
+                },
+                VersionEdit::AddSsts {
+                    level: 1,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(6),
+                        None,
+                        None,
+                        head_data.clone(),
+                        None,
+                    )],
+                },
+            ],
+        )
+        .await?;
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
+
+    let root_set = db
+        .inner()
+        .manifest
+        .current_root_set_with_pins(
+            db.inner().manifest_table,
+            &db.inner().active_snapshot_pins(),
+        )
+        .await?;
+    assert_eq!(root_set.protected_version_count(), 2);
+    assert_eq!(root_set.protected_object_count(), 3);
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(5),
+                    level: 0,
+                    data_path: historical_data,
+                    delete_path: Some(historical_delete),
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    assert!(
+        db.inner()
+            .manifest
+            .take_gc_plan_for_authorized_sweep_with_pins(
+                db.inner().manifest_table,
+                &db.inner().active_snapshot_pins(),
+            )
+            .await?
+            .is_none(),
+        "active historical snapshots must keep their SST objects protected",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_at_reports_oldest_available_version_when_request_predates_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    for (sst_id, level) in [(1u64, 0u32), (2, 1), (3, 2)] {
+        db.inner()
+            .manifest
+            .apply_version_edits(
+                db.inner().manifest_table,
+                &[VersionEdit::AddSsts {
+                    level,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(sst_id),
+                        None,
+                        None,
+                        Path::from(format!("L{level}/{sst_id}.parquet")),
+                        None,
+                    )],
+                }],
+            )
+            .await?;
+    }
+
+    let err = db
+        .snapshot_at(Timestamp::new(0))
+        .await
+        .expect_err("timestamp before the first committed version should be unavailable");
+    assert!(matches!(
+        err,
+        crate::transaction::SnapshotError::Manifest(ManifestError::VersionUnavailable {
+            requested,
+            oldest_available,
+        }) if requested == Timestamp::new(0) && oldest_available == Timestamp::new(1)
+    ));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_snapshot_remains_stable_after_newer_manifest_commits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(1),
+                    None,
+                    None,
+                    Path::from("L0/1.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    let historical = db.snapshot_at(Timestamp::new(1)).await?;
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::RemoveSsts {
+                    level: 0,
+                    sst_ids: vec![SsTableId::new(1)],
+                },
+                VersionEdit::AddSsts {
+                    level: 1,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(2),
+                        None,
+                        None,
+                        Path::from("L1/2.parquet"),
+                        None,
+                    )],
+                },
+            ],
+        )
+        .await?;
+
+    assert_eq!(
+        historical
+            .latest_version()
+            .map(VersionState::commit_timestamp),
+        Some(Timestamp::new(1))
+    );
+    assert_eq!(db.inner().active_snapshot_pins(), vec![Timestamp::new(1)]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_concurrent_snapshots_pin_multiple_manifest_versions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    for (sst_id, level) in [(1u64, 0u32), (2, 1)] {
+        db.inner()
+            .manifest
+            .apply_version_edits(
+                db.inner().manifest_table,
+                &[VersionEdit::AddSsts {
+                    level,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(sst_id),
+                        None,
+                        None,
+                        Path::from(format!("L{level}/{sst_id}.parquet")),
+                        None,
+                    )],
+                }],
+            )
+            .await?;
+    }
+
+    let _v1 = db.snapshot_at(Timestamp::new(1)).await?;
+    let _v2 = db.begin_snapshot().await?;
+
+    let root_set = db
+        .inner()
+        .manifest
+        .current_root_set_with_pins(
+            db.inner().manifest_table,
+            &db.inner().active_snapshot_pins(),
+        )
+        .await?;
+    assert_eq!(root_set.protected_version_count(), 2);
+    assert_eq!(root_set.active_snapshot_version_count(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn latest_snapshot_pinning_tracks_head_without_regressing_reads()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(1),
+                    None,
+                    None,
+                    Path::from("L0/1.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    let latest = db.begin_snapshot().await?;
+    assert_eq!(
+        latest.latest_version().map(VersionState::commit_timestamp),
+        Some(Timestamp::new(1))
+    );
+    assert_eq!(db.inner().active_snapshot_pins(), vec![Timestamp::new(1)]);
+
+    drop(latest);
+    assert!(db.inner().active_snapshot_pins().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_reclaims_obsolete_candidate_after_snapshot_pin_drops()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = workspace_temp_dir("snapshot-pin-sst-reclaim");
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let executor = Arc::new(TokioExecutor::default());
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str.clone())?
+    .open_with_executor(Arc::clone(&executor))
+    .await?
+    .into_inner();
+
+    let obsolete_path = local_sst_path(&db, "L0/obsolete.parquet");
+    let head_path = local_sst_path(&db, "L1/head.parquet");
+    write_local_sst_object(&obsolete_path, b"obsolete").await?;
+    write_local_sst_object(&head_path, b"head").await?;
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(5),
+                    None,
+                    None,
+                    Path::from("L0/obsolete.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[
+                VersionEdit::RemoveSsts {
+                    level: 0,
+                    sst_ids: vec![SsTableId::new(5)],
+                },
+                VersionEdit::AddSsts {
+                    level: 1,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(6),
+                        None,
+                        None,
+                        Path::from("L1/head.parquet"),
+                        None,
+                    )],
+                },
+            ],
+        )
+        .await?;
+
+    let historical = db.snapshot_at(Timestamp::new(1)).await?;
+    let root_set = db
+        .manifest
+        .current_root_set_with_pins(db.manifest_table, &db.active_snapshot_pins())
+        .await?;
+    assert_eq!(root_set.protected_version_count(), 2);
+    assert_eq!(root_set.active_snapshot_version_count(), 1);
+    assert!(root_set.contains_path(&Path::from("L0/obsolete.parquet")));
+    assert!(root_set.contains_path(&Path::from("L1/head.parquet")));
+
+    db.manifest
+        .record_gc_plan(
+            db.manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(5),
+                    level: 0,
+                    data_path: Path::from("L0/obsolete.parquet"),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let blocked = db.sweep_manifest_ssts().await?;
+    assert_eq!(blocked.deleted_objects, 0);
+    assert_eq!(blocked.deleted_bytes, 0);
+    assert!(local_sst_exists(&obsolete_path).await);
+
+    drop(historical);
+
+    let root_set = db
+        .manifest
+        .current_root_set_with_pins(db.manifest_table, &db.active_snapshot_pins())
+        .await?;
+    assert_eq!(root_set.protected_version_count(), 1);
+    assert!(!root_set.contains_path(&Path::from("L0/obsolete.parquet")));
+
+    let summary = db.sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 1);
+    assert_eq!(summary.deleted_bytes, 8);
+    assert_eq!(summary.delete_failures, 0);
+    assert!(!local_sst_exists(&obsolete_path).await);
+    assert!(local_sst_exists(&head_path).await);
+    assert!(
+        db.manifest
+            .take_gc_plan_for_authorized_sweep(db.manifest_table)
+            .await?
+            .is_none(),
+        "reclaimed candidate should fully drain the staged plan",
     );
 
-    fs::remove_dir_all(&temp_root)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean temp dir {:?}: {err}", &root_dir);
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_requeues_historically_blocked_candidates_and_reports_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(5),
+                    None,
+                    None,
+                    Path::from("L0/5.parquet"),
+                    Some(Path::from("L0/5.delete.parquet")),
+                )],
+            }],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::RemoveSsts {
+                    level: 0,
+                    sst_ids: vec![SsTableId::new(5)],
+                },
+                VersionEdit::AddSsts {
+                    level: 1,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(6),
+                        None,
+                        None,
+                        Path::from("L1/6.parquet"),
+                        None,
+                    )],
+                },
+            ],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(5),
+                    level: 0,
+                    data_path: Path::from("L0/5.parquet"),
+                    delete_path: Some(Path::from("L0/5.delete.parquet")),
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+    let _historical = db.snapshot_at(Timestamp::new(1)).await?;
+
+    let summary = db.inner().sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 0);
+    assert_eq!(summary.deleted_bytes, 0);
+    assert_eq!(summary.delete_failures, 0);
+
+    let status = db
+        .sst_gc_status()
+        .await?
+        .expect("blocked gc candidates should stay staged");
+    assert_eq!(status.staged_sst_candidates, 1);
+    assert_eq!(status.authorized_sst_candidates, 0);
+    assert_eq!(status.blocked_sst_candidates, 1);
+    assert_eq!(status.protected_versions, 2);
+    assert_eq!(status.active_snapshot_versions, 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_deletes_only_unreachable_objects_and_records_metrics()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-live-vs-unreachable");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let mut db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(1),
+                    None,
+                    None,
+                    Path::from("L1/live.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    let live_path = local_sst_path(&db, "L1/live.parquet");
+    let obsolete_data = local_sst_path(&db, "L0/obsolete.parquet");
+    let obsolete_delete = local_sst_path(&db, "L0/obsolete.delete.parquet");
+    write_local_sst_object(&live_path, b"live").await?;
+    write_local_sst_object(&obsolete_data, b"obsolete-data").await?;
+    write_local_sst_object(&obsolete_delete, b"obsolete-delete").await?;
+
+    db.manifest
+        .record_gc_plan(
+            db.manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(1),
+                        level: 1,
+                        data_path: Path::from("L1/live.parquet"),
+                        delete_path: None,
+                    },
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(9),
+                        level: 0,
+                        data_path: Path::from("L0/obsolete.parquet"),
+                        delete_path: Some(Path::from("L0/obsolete.delete.parquet")),
+                    },
+                ],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let summary = db.sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 2);
+    assert_eq!(summary.deleted_bytes, 28);
+    assert_eq!(summary.delete_failures, 0);
+    assert!(local_sst_exists(&live_path).await);
+    assert!(!local_sst_exists(&obsolete_data).await);
+    assert!(!local_sst_exists(&obsolete_delete).await);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.sst_sweep_runs, 1);
+    assert_eq!(snapshot.sst_deleted_objects, 2);
+    assert_eq!(snapshot.sst_deleted_bytes, 28);
+    assert_eq!(snapshot.sst_delete_failures, 0);
+    assert!(snapshot.sst_sweep_duration_ms_total >= summary.duration_ms);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_is_idempotent_when_candidates_are_replayed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-idempotent");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+
+    let obsolete_data = local_sst_path(&db, "L0/replay.parquet");
+    let obsolete_delete = local_sst_path(&db, "L0/replay.delete.parquet");
+    write_local_sst_object(&obsolete_data, b"payload").await?;
+    write_local_sst_object(&obsolete_delete, b"delete").await?;
+
+    let gc_plan = crate::manifest::GcPlanState {
+        obsolete_ssts: vec![crate::manifest::GcSstRef {
+            id: SsTableId::new(11),
+            level: 0,
+            data_path: Path::from("L0/replay.parquet"),
+            delete_path: Some(Path::from("L0/replay.delete.parquet")),
+        }],
+        obsolete_wal_segments: Vec::new(),
+    };
+    db.manifest
+        .record_gc_plan(db.manifest_table, gc_plan.clone())
+        .await?;
+
+    let first = db.sweep_manifest_ssts().await?;
+    assert_eq!(first.deleted_objects, 2);
+    assert_eq!(first.deleted_bytes, 13);
+    assert_eq!(first.delete_failures, 0);
+
+    db.manifest
+        .record_gc_plan(db.manifest_table, gc_plan)
+        .await?;
+    let second = db.sweep_manifest_ssts().await?;
+    assert_eq!(second.deleted_objects, 0);
+    assert_eq!(second.deleted_bytes, 0);
+    assert_eq!(second.delete_failures, 0);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_preserves_live_objects_across_repeated_replays()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-live-replayed");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(1),
+                    None,
+                    None,
+                    Path::from("L1/live.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    let live_path = local_sst_path(&db, "L1/live.parquet");
+    let obsolete_path = local_sst_path(&db, "L0/obsolete.parquet");
+    write_local_sst_object(&live_path, b"live").await?;
+    write_local_sst_object(&obsolete_path, b"obsolete").await?;
+
+    let replayed_gc_plan = crate::manifest::GcPlanState {
+        obsolete_ssts: vec![
+            crate::manifest::GcSstRef {
+                id: SsTableId::new(1),
+                level: 1,
+                data_path: Path::from("L1/live.parquet"),
+                delete_path: None,
+            },
+            crate::manifest::GcSstRef {
+                id: SsTableId::new(9),
+                level: 0,
+                data_path: Path::from("L0/obsolete.parquet"),
+                delete_path: None,
+            },
+        ],
+        obsolete_wal_segments: Vec::new(),
+    };
+
+    db.manifest
+        .record_gc_plan(db.manifest_table, replayed_gc_plan.clone())
+        .await?;
+    let first = db.sweep_manifest_ssts().await?;
+    assert_eq!(first.deleted_objects, 1);
+    assert_eq!(first.deleted_bytes, 8);
+    assert_eq!(first.delete_failures, 0);
+    assert!(local_sst_exists(&live_path).await);
+    assert!(!local_sst_exists(&obsolete_path).await);
+
+    db.manifest
+        .record_gc_plan(db.manifest_table, replayed_gc_plan)
+        .await?;
+    let second = db.sweep_manifest_ssts().await?;
+    assert_eq!(second.deleted_objects, 0);
+    assert_eq!(second.deleted_bytes, 0);
+    assert_eq!(second.delete_failures, 0);
+    assert!(local_sst_exists(&live_path).await);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_gc_plan_preserves_prior_candidates_and_deduplicates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .merge_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(1),
+                        level: 0,
+                        data_path: Path::from("L0/1.parquet"),
+                        delete_path: None,
+                    },
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(2),
+                        level: 1,
+                        data_path: Path::from("L1/2.parquet"),
+                        delete_path: Some(Path::from("L1/2.delete.parquet")),
+                    },
+                ],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+    let first = db
+        .inspect_sst_gc_plan()
+        .await?
+        .expect("first persisted plan");
+    assert_eq!(first.staged_sst_candidates, 2);
+    assert_eq!(
+        first
+            .candidates
+            .iter()
+            .map(|candidate| candidate.sst_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    db.inner()
+        .manifest
+        .merge_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(2),
+                        level: 1,
+                        data_path: Path::from("L1/2.parquet"),
+                        delete_path: Some(Path::from("L1/2.delete.parquet")),
+                    },
+                    crate::manifest::GcSstRef {
+                        id: SsTableId::new(9),
+                        level: 2,
+                        data_path: Path::from("L2/9.parquet"),
+                        delete_path: None,
+                    },
+                ],
+                obsolete_wal_segments: vec![WalSegmentRef::new(
+                    7,
+                    FileIdGenerator::default().generate(),
+                    0,
+                    0,
+                )],
+            },
+        )
+        .await?;
+    let second = db
+        .inspect_sst_gc_plan()
+        .await?
+        .expect("second persisted plan");
+    assert_eq!(second.staged_sst_candidates, 3);
+    assert_eq!(
+        second
+            .candidates
+            .iter()
+            .map(|candidate| candidate.sst_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 9]
+    );
+    assert_eq!(second.obsolete_wal_segments, 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn physical_stale_sst_debt_can_exist_while_persisted_gc_plan_is_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = workspace_temp_dir("physical-stale-debt-plan-empty");
+    let root_str = root_dir.to_string_lossy().into_owned();
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+
+    db.manifest
+        .apply_version_edits(
+            db.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(7),
+                    None,
+                    None,
+                    Path::from("L1/live.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    let live_path = local_sst_path(&db, "L1/live.parquet");
+    let stale_path = local_sst_path(&db, "L0/stale.parquet");
+    write_local_sst_object(&live_path, b"live").await?;
+    write_local_sst_object(&stale_path, b"stale").await?;
+
+    let physical_sst_objects = count_local_sst_objects(&root_dir)?;
+    let live_sst_objects = db
+        .manifest
+        .snapshot_latest(db.manifest_table)
+        .await?
+        .latest_version
+        .expect("latest version")
+        .ssts()
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+
+    assert_eq!(physical_sst_objects, 2);
+    assert_eq!(live_sst_objects, 1);
+    assert!(
+        db.inspect_sst_gc_plan().await?.is_none(),
+        "no persisted GC plan should still be visible in this scenario",
+    );
+
+    fs::remove_dir_all(root_dir)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_can_drain_gc_plan_before_later_observation_point()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = workspace_temp_dir("compaction-drains-gc-plan-early");
+    let root_str = root_dir.to_string_lossy().into_owned();
+
+    let mut inner = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    inner
+        .manifest
+        .apply_version_edits(
+            inner.manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![
+                    SstEntry::new(
+                        SsTableId::new(1),
+                        None,
+                        None,
+                        Path::from("L0/1.parquet"),
+                        None,
+                    ),
+                    SstEntry::new(
+                        SsTableId::new(2),
+                        None,
+                        None,
+                        Path::from("L0/2.parquet"),
+                        None,
+                    ),
+                ],
+            }],
+        )
+        .await?;
+
+    let obsolete_one = local_sst_path(&inner, "L0/1.parquet");
+    let obsolete_two = local_sst_path(&inner, "L0/2.parquet");
+    write_local_sst_object(&obsolete_one, b"one").await?;
+    write_local_sst_object(&obsolete_two, b"two").await?;
+
+    let planner = OneShotPlanner::new(CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            },
+        ],
+        key_range: None,
+    });
+    let executor = StaticExecutor {
+        outputs: vec![
+            SsTableDescriptor::new(SsTableId::new(3), 1)
+                .with_storage_paths(Path::from("L1/3.parquet"), None),
+        ],
+        wal_segments: Vec::new(),
+        target_level: 1,
+    };
+
+    inner
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+
+    assert!(
+        inner.inspect_sst_gc_plan().await?.is_none(),
+        "the compaction path should have already staged and drained the plan",
+    );
+    assert!(!local_sst_exists(&obsolete_one).await);
+    assert!(!local_sst_exists(&obsolete_two).await);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.gc_plan_write_runs, 1);
+    assert_eq!(snapshot.gc_plan_written_sst_candidates, 2);
+    assert_eq!(snapshot.gc_plan_take_runs, 1);
+    assert_eq!(snapshot.gc_plan_taken_sst_candidates, 2);
+    assert_eq!(snapshot.gc_plan_authorized_sst_candidates, 2);
+    assert_eq!(snapshot.gc_plan_blocked_sst_candidates, 0);
+    assert_eq!(snapshot.sst_sweep_runs, 1);
+
+    fs::remove_dir_all(root_dir)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_requeues_partial_delete_failures_and_recovers_on_retry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-partial-retry");
+    let root_str = temp_root.to_string_lossy().into_owned();
+    let failing_delete_path = temp_root
+        .join("sst")
+        .join("L0")
+        .join("partial.delete.parquet");
+    let failing_delete_path = Path::from_filesystem_path(&failing_delete_path)?;
+    let failing_fs = Arc::new(FailOnceRemoveFs::new(
+        failing_delete_path.as_ref().to_string(),
+    ));
+
+    let mut db = DB::<FailOnceRemoveFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_durable_fs(Arc::clone(&failing_fs), root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    db.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let obsolete_data = local_sst_path(&db, "L0/partial.parquet");
+    let obsolete_delete = local_sst_path(&db, "L0/partial.delete.parquet");
+    write_local_sst_object(&obsolete_data, b"partial-data").await?;
+    write_local_sst_object(&obsolete_delete, b"partial-delete").await?;
+
+    let gc_plan = crate::manifest::GcPlanState {
+        obsolete_ssts: vec![crate::manifest::GcSstRef {
+            id: SsTableId::new(17),
+            level: 0,
+            data_path: Path::from("L0/partial.parquet"),
+            delete_path: Some(Path::from("L0/partial.delete.parquet")),
+        }],
+        obsolete_wal_segments: Vec::new(),
+    };
+
+    db.manifest
+        .record_gc_plan(db.manifest_table, gc_plan.clone())
+        .await?;
+    let first = db.sweep_manifest_ssts().await?;
+    assert_eq!(first.deleted_objects, 1);
+    assert_eq!(first.deleted_bytes, 12);
+    assert_eq!(first.delete_failures, 1);
+    assert!(failing_fs.has_failed_once());
+    assert!(!local_sst_exists(&obsolete_data).await);
+    assert!(local_sst_exists(&obsolete_delete).await);
+
+    let residual = db.inspect_sst_gc_plan().await?.expect("re-queued gc plan");
+    assert_eq!(residual.staged_sst_candidates, 1);
+    assert_eq!(residual.authorized_sst_candidates, 1);
+    assert_eq!(residual.blocked_sst_candidates, 0);
+    assert_eq!(residual.obsolete_wal_segments, 0);
+    assert_eq!(residual.candidates[0].sst_id, 17);
+    assert!(residual.candidates[0].authorized);
+
+    let second = db.sweep_manifest_ssts().await?;
+    assert_eq!(second.deleted_objects, 1);
+    assert_eq!(second.deleted_bytes, 14);
+    assert_eq!(second.delete_failures, 0);
+    assert!(!local_sst_exists(&obsolete_data).await);
+    assert!(!local_sst_exists(&obsolete_delete).await);
+    assert!(
+        db.inspect_sst_gc_plan().await?.is_none(),
+        "retry should fully drain the staged SST candidate once the delete succeeds",
+    );
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.sst_sweep_runs, 2);
+    assert_eq!(snapshot.sst_deleted_objects, 2);
+    assert_eq!(snapshot.sst_deleted_bytes, 26);
+    assert_eq!(snapshot.sst_delete_failures, 1);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_keeps_blocked_candidates_durable_when_nothing_is_authorized()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    SsTableId::new(44),
+                    None,
+                    None,
+                    Path::from("L1/44.parquet"),
+                    None,
+                )],
+            }],
+        )
+        .await?;
+
+    db.inner()
+        .manifest
+        .record_gc_plan(
+            db.inner().manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(44),
+                    level: 1,
+                    data_path: Path::from("L1/44.parquet"),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let summary = db.inner().sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 0);
+    assert_eq!(summary.deleted_bytes, 0);
+    assert_eq!(summary.delete_failures, 0);
+
+    let persisted = db
+        .inspect_sst_gc_plan()
+        .await?
+        .expect("blocked candidate should remain durable");
+    assert_eq!(persisted.staged_sst_candidates, 1);
+    assert_eq!(persisted.authorized_sst_candidates, 0);
+    assert_eq!(persisted.blocked_sst_candidates, 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_treats_missing_files_as_already_reclaimed_and_requeues_wal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-missing");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+
+    let file_ids = FileIdGenerator::default();
+    let wal_ref = WalSegmentRef::new(7, file_ids.generate(), 0, 0);
+    db.manifest
+        .record_gc_plan(
+            db.manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(77),
+                    level: 0,
+                    data_path: Path::from("L0/missing.parquet"),
+                    delete_path: Some(Path::from("L0/missing.delete.parquet")),
+                }],
+                obsolete_wal_segments: vec![wal_ref.clone()],
+            },
+        )
+        .await?;
+
+    let summary = db.sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 0);
+    assert_eq!(summary.deleted_bytes, 0);
+    assert_eq!(summary.delete_failures, 0);
+
+    let residual = db
+        .manifest
+        .take_gc_plan_for_authorized_sweep(db.manifest_table)
+        .await?
+        .expect("wal candidates should be re-queued");
+    assert!(residual.obsolete_ssts.is_empty());
+    assert_eq!(residual.obsolete_wal_segments, vec![wal_ref]);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_manifest_ssts_reclaims_legacy_absolute_candidate_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-legacy-absolute-paths");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let db = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+
+    let obsolete_path = local_sst_path(&db, "L0/legacy-absolute.parquet");
+    write_local_sst_object(&obsolete_path, b"legacy").await?;
+
+    db.manifest
+        .record_gc_plan(
+            db.manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(99),
+                    level: 0,
+                    data_path: obsolete_path.clone(),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let summary = db.sweep_manifest_ssts().await?;
+    assert_eq!(summary.deleted_objects, 1);
+    assert_eq!(summary.deleted_bytes, 6);
+    assert_eq!(summary.delete_failures, 0);
+    assert!(!local_sst_exists(&obsolete_path).await);
+
+    fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_db_gc_hooks_expose_sweep_summary_and_metrics()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("sst-sweep-hidden-db-hooks");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let mut inner = DB::<LocalFs, TokioExecutor>::builder(config_with_pk(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ],
+        &["id"],
+    ))
+    .on_disk(root_str)?
+    .open_with_executor(Arc::new(TokioExecutor::default()))
+    .await?
+    .into_inner();
+    let metrics = Arc::new(CompactionMetrics::new());
+    inner.compaction_metrics = Some(Arc::clone(&metrics));
+
+    let obsolete_path = local_sst_path(&inner, "L0/hook.parquet");
+    write_local_sst_object(&obsolete_path, b"hook").await?;
+    inner
+        .manifest
+        .record_gc_plan(
+            inner.manifest_table,
+            crate::manifest::GcPlanState {
+                obsolete_ssts: vec![crate::manifest::GcSstRef {
+                    id: SsTableId::new(88),
+                    level: 0,
+                    data_path: Path::from("L0/hook.parquet"),
+                    delete_path: None,
+                }],
+                obsolete_wal_segments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let db = DB::from_inner(Arc::new(inner));
+    let summary = db.sweep_sst_objects().await?;
+    assert_eq!(summary.deleted_objects, 1);
+    assert_eq!(summary.deleted_bytes, 4);
+    assert_eq!(summary.delete_failures, 0);
+
+    let snapshot = db
+        .compaction_metrics_snapshot()
+        .expect("compaction metrics snapshot");
+    assert_eq!(snapshot.sst_sweep_runs, 1);
+    assert_eq!(snapshot.sst_deleted_objects, 1);
+    assert_eq!(snapshot.sst_deleted_bytes, 4);
+    assert_eq!(snapshot.sst_delete_failures, 0);
+
+    fs::remove_dir_all(temp_root)?;
     Ok(())
 }
 
@@ -2754,7 +4544,8 @@ fn resolve_compaction_inputs_keeps_levels() {
         key_range: None,
     };
 
-    let resolved = orchestrator::resolve_inputs(&version, &task).expect("resolve");
+    let resolved =
+        orchestrator::resolve_inputs(&Path::default(), &version, &task).expect("resolve");
     assert_eq!(resolved.len(), 2);
     assert_eq!(resolved[0].level(), 0);
     assert_eq!(resolved[1].level(), 1);

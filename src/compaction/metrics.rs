@@ -148,8 +148,108 @@ pub struct CompactionMetricsSnapshot {
     pub tombstones_out: u64,
     /// Total duration for completed jobs (milliseconds).
     pub duration_ms_total: u64,
+    /// Number of SST sweep runs executed.
+    pub sst_sweep_runs: u64,
+    /// Total SST objects physically deleted by the sweeper.
+    pub sst_deleted_objects: u64,
+    /// Total bytes physically deleted by the sweeper.
+    pub sst_deleted_bytes: u64,
+    /// Total time spent in SST sweep runs (milliseconds).
+    pub sst_sweep_duration_ms_total: u64,
+    /// Total SST object delete failures observed by the sweeper.
+    pub sst_delete_failures: u64,
+    /// Number of manifest GC-plan writes performed.
+    pub gc_plan_write_runs: u64,
+    /// Number of writes that replaced a non-empty previously persisted GC plan.
+    pub gc_plan_overwrite_non_empty: u64,
+    /// Total staged SST candidates present before GC-plan writes.
+    pub gc_plan_previous_sst_candidates: u64,
+    /// Total staged WAL candidates present before GC-plan writes.
+    pub gc_plan_previous_wal_candidates: u64,
+    /// Total staged SST candidates written into persisted GC plans.
+    pub gc_plan_written_sst_candidates: u64,
+    /// Total staged WAL candidates written into persisted GC plans.
+    pub gc_plan_written_wal_candidates: u64,
+    /// Number of sweep passes that successfully took a persisted GC plan.
+    pub gc_plan_take_runs: u64,
+    /// Total SST candidates observed when sweep passes took a persisted GC plan.
+    pub gc_plan_taken_sst_candidates: u64,
+    /// Total SST candidates authorized across sweep passes.
+    pub gc_plan_authorized_sst_candidates: u64,
+    /// Total SST candidates blocked across sweep passes.
+    pub gc_plan_blocked_sst_candidates: u64,
+    /// Total SST candidates re-queued after sweep passes.
+    pub gc_plan_requeued_sst_candidates: u64,
     /// Last observed job summary, if any.
     pub last_job: Option<CompactionJobSnapshot>,
+}
+
+/// Summary of a single SST sweep pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SstSweepSummary {
+    /// SST objects physically removed during this pass.
+    pub deleted_objects: u64,
+    /// Bytes physically reclaimed during this pass.
+    pub deleted_bytes: u64,
+    /// Non-missing delete failures encountered during this pass.
+    pub delete_failures: u64,
+    /// Wall-clock duration for this pass in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Snapshot of staged SST GC state relative to the current manifest root set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SstGcStatus {
+    /// Total staged SST candidates currently recorded in the manifest GC plan.
+    pub staged_sst_candidates: u64,
+    /// SST candidates currently authorized for physical deletion.
+    pub authorized_sst_candidates: u64,
+    /// SST candidates still blocked by the manifest root set.
+    pub blocked_sst_candidates: u64,
+    /// WAL candidates still staged alongside the SST plan.
+    pub obsolete_wal_segments: u64,
+    /// Total manifest versions currently protecting SST objects.
+    pub protected_versions: u64,
+    /// Unique manifest versions currently pinned by live in-process snapshots.
+    pub active_snapshot_versions: u64,
+    /// Physical SST objects currently protected by the manifest root set.
+    pub protected_sst_objects: u64,
+}
+
+/// Deterministic view of a single staged SST GC candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SstGcCandidateInspection {
+    /// Identifier of the staged SST candidate.
+    pub sst_id: u64,
+    /// Compaction level recorded in the plan.
+    pub level: u32,
+    /// Relative data-object path persisted in the GC plan.
+    pub data_path: String,
+    /// Relative delete-sidecar path persisted in the GC plan, when present.
+    pub delete_path: Option<String>,
+    /// Whether the candidate is currently authorized for deletion.
+    pub authorized: bool,
+}
+
+/// Deterministic inspection of the persisted SST GC plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SstGcInspection {
+    /// Total staged SST candidates currently recorded in the manifest GC plan.
+    pub staged_sst_candidates: u64,
+    /// SST candidates currently authorized for physical deletion.
+    pub authorized_sst_candidates: u64,
+    /// SST candidates still blocked by the manifest root set.
+    pub blocked_sst_candidates: u64,
+    /// WAL candidates still staged alongside the SST plan.
+    pub obsolete_wal_segments: u64,
+    /// Total manifest versions currently protecting SST objects.
+    pub protected_versions: u64,
+    /// Unique manifest versions currently pinned by live in-process snapshots.
+    pub active_snapshot_versions: u64,
+    /// Physical SST objects currently protected by the manifest root set.
+    pub protected_sst_objects: u64,
+    /// Deterministic ordered candidate list.
+    pub candidates: Vec<SstGcCandidateInspection>,
 }
 
 /// Source of a compaction tick.
@@ -271,6 +371,22 @@ pub struct CompactionMetrics {
     tombstones_in: AtomicU64,
     tombstones_out: AtomicU64,
     duration_ms_total: AtomicU64,
+    sst_sweep_runs: AtomicU64,
+    sst_deleted_objects: AtomicU64,
+    sst_deleted_bytes: AtomicU64,
+    sst_sweep_duration_ms_total: AtomicU64,
+    sst_delete_failures: AtomicU64,
+    gc_plan_write_runs: AtomicU64,
+    gc_plan_overwrite_non_empty: AtomicU64,
+    gc_plan_previous_sst_candidates: AtomicU64,
+    gc_plan_previous_wal_candidates: AtomicU64,
+    gc_plan_written_sst_candidates: AtomicU64,
+    gc_plan_written_wal_candidates: AtomicU64,
+    gc_plan_take_runs: AtomicU64,
+    gc_plan_taken_sst_candidates: AtomicU64,
+    gc_plan_authorized_sst_candidates: AtomicU64,
+    gc_plan_blocked_sst_candidates: AtomicU64,
+    gc_plan_requeued_sst_candidates: AtomicU64,
     last_job_present: AtomicU64,
     last_job_source_level: AtomicU64,
     last_job_target_level: AtomicU64,
@@ -332,6 +448,22 @@ impl CompactionMetrics {
             tombstones_in: AtomicU64::new(0),
             tombstones_out: AtomicU64::new(0),
             duration_ms_total: AtomicU64::new(0),
+            sst_sweep_runs: AtomicU64::new(0),
+            sst_deleted_objects: AtomicU64::new(0),
+            sst_deleted_bytes: AtomicU64::new(0),
+            sst_sweep_duration_ms_total: AtomicU64::new(0),
+            sst_delete_failures: AtomicU64::new(0),
+            gc_plan_write_runs: AtomicU64::new(0),
+            gc_plan_overwrite_non_empty: AtomicU64::new(0),
+            gc_plan_previous_sst_candidates: AtomicU64::new(0),
+            gc_plan_previous_wal_candidates: AtomicU64::new(0),
+            gc_plan_written_sst_candidates: AtomicU64::new(0),
+            gc_plan_written_wal_candidates: AtomicU64::new(0),
+            gc_plan_take_runs: AtomicU64::new(0),
+            gc_plan_taken_sst_candidates: AtomicU64::new(0),
+            gc_plan_authorized_sst_candidates: AtomicU64::new(0),
+            gc_plan_blocked_sst_candidates: AtomicU64::new(0),
+            gc_plan_requeued_sst_candidates: AtomicU64::new(0),
             last_job_present: AtomicU64::new(0),
             last_job_source_level: AtomicU64::new(0),
             last_job_target_level: AtomicU64::new(0),
@@ -403,6 +535,36 @@ impl CompactionMetrics {
             tombstones_in: self.tombstones_in.load(Ordering::Relaxed),
             tombstones_out: self.tombstones_out.load(Ordering::Relaxed),
             duration_ms_total: self.duration_ms_total.load(Ordering::Relaxed),
+            sst_sweep_runs: self.sst_sweep_runs.load(Ordering::Relaxed),
+            sst_deleted_objects: self.sst_deleted_objects.load(Ordering::Relaxed),
+            sst_deleted_bytes: self.sst_deleted_bytes.load(Ordering::Relaxed),
+            sst_sweep_duration_ms_total: self.sst_sweep_duration_ms_total.load(Ordering::Relaxed),
+            sst_delete_failures: self.sst_delete_failures.load(Ordering::Relaxed),
+            gc_plan_write_runs: self.gc_plan_write_runs.load(Ordering::Relaxed),
+            gc_plan_overwrite_non_empty: self.gc_plan_overwrite_non_empty.load(Ordering::Relaxed),
+            gc_plan_previous_sst_candidates: self
+                .gc_plan_previous_sst_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_previous_wal_candidates: self
+                .gc_plan_previous_wal_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_written_sst_candidates: self
+                .gc_plan_written_sst_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_written_wal_candidates: self
+                .gc_plan_written_wal_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_take_runs: self.gc_plan_take_runs.load(Ordering::Relaxed),
+            gc_plan_taken_sst_candidates: self.gc_plan_taken_sst_candidates.load(Ordering::Relaxed),
+            gc_plan_authorized_sst_candidates: self
+                .gc_plan_authorized_sst_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_blocked_sst_candidates: self
+                .gc_plan_blocked_sst_candidates
+                .load(Ordering::Relaxed),
+            gc_plan_requeued_sst_candidates: self
+                .gc_plan_requeued_sst_candidates
+                .load(Ordering::Relaxed),
             last_job,
         }
     }
@@ -547,6 +709,70 @@ impl CompactionMetrics {
         if self.emit_logs {
             self.log_job("aborted", job);
         }
+    }
+
+    /// Record an SST sweeper pass.
+    pub(crate) fn record_sst_sweep(&self, sweep: SstSweepSummary) {
+        add_saturating(&self.sst_sweep_runs, 1);
+        add_saturating(&self.sst_deleted_objects, sweep.deleted_objects);
+        add_saturating(&self.sst_deleted_bytes, sweep.deleted_bytes);
+        add_saturating(&self.sst_sweep_duration_ms_total, sweep.duration_ms);
+        add_saturating(&self.sst_delete_failures, sweep.delete_failures);
+        if self.emit_logs {
+            log_info!(
+                component = "compaction",
+                event = "sst_sweep_summary",
+                deleted_objects = sweep.deleted_objects,
+                deleted_bytes = sweep.deleted_bytes,
+                delete_failures = sweep.delete_failures,
+                duration_ms = sweep.duration_ms,
+            );
+        }
+    }
+
+    /// Record a persisted GC-plan write.
+    pub(crate) fn record_gc_plan_write(
+        &self,
+        previous_sst_candidates: u64,
+        previous_wal_candidates: u64,
+        written_sst_candidates: u64,
+        written_wal_candidates: u64,
+    ) {
+        add_saturating(&self.gc_plan_write_runs, 1);
+        if previous_sst_candidates > 0 || previous_wal_candidates > 0 {
+            add_saturating(&self.gc_plan_overwrite_non_empty, 1);
+        }
+        add_saturating(
+            &self.gc_plan_previous_sst_candidates,
+            previous_sst_candidates,
+        );
+        add_saturating(
+            &self.gc_plan_previous_wal_candidates,
+            previous_wal_candidates,
+        );
+        add_saturating(&self.gc_plan_written_sst_candidates, written_sst_candidates);
+        add_saturating(&self.gc_plan_written_wal_candidates, written_wal_candidates);
+    }
+
+    /// Record how a sweep pass consumed a persisted GC plan.
+    pub(crate) fn record_gc_plan_take(
+        &self,
+        staged_sst_candidates: u64,
+        authorized_sst_candidates: u64,
+        blocked_sst_candidates: u64,
+        requeued_sst_candidates: u64,
+    ) {
+        add_saturating(&self.gc_plan_take_runs, 1);
+        add_saturating(&self.gc_plan_taken_sst_candidates, staged_sst_candidates);
+        add_saturating(
+            &self.gc_plan_authorized_sst_candidates,
+            authorized_sst_candidates,
+        );
+        add_saturating(&self.gc_plan_blocked_sst_candidates, blocked_sst_candidates);
+        add_saturating(
+            &self.gc_plan_requeued_sst_candidates,
+            requeued_sst_candidates,
+        );
     }
 
     fn set_last_job(&self, job: CompactionJobSnapshot) {

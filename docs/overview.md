@@ -235,8 +235,8 @@ Major compaction merges L0..Ln SSTs when level thresholds are exceeded. The proc
 
 Tonbo's GC is **manifest-driven and snapshot-safe**, designed for object storage:
 
-- **Reachability by manifest:** only delete WAL/SST objects **not referenced** by the HEAD manifest or any **retained versions** (time-travel).
-- **Snapshot grace:** respect active snapshot timestamps so **no in-use object** is collected.
+- **Reachability by manifest:** only delete WAL/SST objects **not referenced** by the HEAD manifest or any **active in-process snapshot pins**.
+- **Snapshot grace:** respect active snapshot pins so **no in-use object** is collected.
 - **Write-new only:** incomplete/unpublished objects are never visible and can be safely removed; GC targets **superseded SSTs**, **old WAL fragments**, and **orphaned uploads**.
 - **Asynchronous & idempotent:** runs in the background (via compactor or a small GC worker) as a simple **plan -> sweep** routine; safe to retry, no local state.
 - **Serverless-friendly:** correctness lives in **object storage + manifest**; GC reduces read amplification and object/list costs without centralized coordination.
@@ -414,7 +414,7 @@ async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {
 ### Recovery & GC
 
 - **Recovery**: load the latest good manifest; replay ordered WAL fragments into the mutable memtable so WAL-backed rows participate in the read path immediately; ignore objects not referenced by any committed manifest.
-- **GC**: manifest drives retirement of obsolete WAL/SST generations with retention windows and safety checks.
+- **GC**: manifest drives retirement of obsolete WAL/SST generations using HEAD reachability, WAL floors, and active snapshot pins.
 
 ### Invariants
 
@@ -431,7 +431,7 @@ Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publi
 
 * **Snapshot (read)**: a stable `(manifest_version, read_ts, schema_set)` view; sessions pin it for reproducible scans. *Implemented via `snapshot_at()` and `list_versions()` APIs.*
 * **Checkpoint (write)**: `flush -> L0 -> CAS publish` atomically switches **SST visibility + catalog edits**. *Basic checkpoint flow works.* Named tags (e.g., `episode:123`) are planned (#554).
-* **Time travel**: address by **version / timestamp** within retention. *Implemented.* Addressing by tag and **pins** to prevent GC are planned (#554).
+* **Time travel**: address by **version / timestamp**. *Implemented.* Live snapshots hold in-process pins that keep referenced SSTs safe from GC; named tags are planned (#554).
 * **Export / restore**: materialize a tagged version; optionally move `HEAD` back to a prior version. *Planned feature.*
 
 ### Catalog-aware DDL
@@ -439,7 +439,7 @@ Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publi
 * **Additive (safe)**: add NULLable columns, widen types, add indexes -> publish at checkpoint; old files read missing cols as NULL/default.
 * **Destructive** (drop/rename/narrow/vector-dim change):
   * **Soft drop (default)**: hide in catalog at checkpoint; background compaction rewrites; old snapshots remain readable until GC.
-  * **Hard drop (compliance)**: checkpoint carries a rewrite plan; compactor rewrites immediately; tighten retention to retire prior versions early.
+  * **Hard drop (compliance)**: checkpoint carries a rewrite plan; compactor rewrites immediately; prior files become reclaimable once no live snapshot still pins them.
 
 ### Sidecar indexes (planned)
 
@@ -450,7 +450,7 @@ Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publi
 
 ### Ops defaults
 
-* Retention window (e.g., 7–30 days); **pin** episodes/releases.
+* Use explicit checkpoints/tags for durable rollback points; live reads rely on in-process snapshot pins.
 * Checkpoint before destructive DDL and at episode/task boundaries.
 * Compaction publishes new versions; old versions readable until GC.
 
@@ -614,7 +614,7 @@ Tonbo’s **manifest** is the authoritative source of truth that coordinates **s
 - **Atomic, monotonic versions:** readers never see partial updates; HEAD only moves forward.
 - **Idempotent commits:** duplicate publishes do not corrupt state.
 - **Append-only correctness:** all durable state is new objects + manifest switches.
-- **Time travel & retention:** keep recent versions for rollback/analysis; GC removes unreachable generations when safe.
+- **Time travel & snapshot pins:** historical versions stay queryable while their manifest entries exist; GC removes generations not reachable from HEAD or any live snapshot pin.
 
 ### Why it fits distributed serverless
 

@@ -20,7 +20,10 @@ use typed_arrow_dyn::{
 #[cfg(all(test, feature = "tokio"))]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
-    db::{DBError, DbInner, DynDbHandle, ScanBuilder, TxnWalPublishContext, WalFrameRange},
+    db::{
+        DBError, DbInner, DynDbHandle, ScanBuilder, SnapshotPinGuard, TxnWalPublishContext,
+        WalFrameRange,
+    },
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableSnapshot, VersionEdit},
@@ -64,13 +67,19 @@ pub enum SnapshotError {
 pub struct Snapshot {
     read_view: ReadView,
     manifest: TableSnapshot,
+    _manifest_pin: Option<SnapshotPinGuard>,
 }
 
 impl Snapshot {
-    pub(crate) fn from_table_snapshot(read_view: ReadView, manifest: TableSnapshot) -> Self {
+    pub(crate) fn from_table_snapshot(
+        read_view: ReadView,
+        manifest: TableSnapshot,
+        manifest_pin: Option<SnapshotPinGuard>,
+    ) -> Self {
         Self {
             read_view,
             manifest,
+            _manifest_pin: manifest_pin,
         }
     }
 

@@ -4,6 +4,7 @@
 //! execution, and reconciliation without requiring the full DB type.
 
 use std::{
+    io::ErrorKind,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,8 +13,11 @@ use std::{
 };
 
 use fusio::{
+    DynFs, Read,
     dynamic::{MaybeSend, MaybeSync},
+    error::Error as FsError,
     executor::{Executor, Instant, RwLock, Timer},
+    path::Path,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc, future::AbortHandle, lock::Mutex};
 use tracing::instrument;
@@ -25,14 +29,16 @@ use crate::{
         metrics::{
             CompactionCascadeDecision, CompactionIoStats, CompactionJobSnapshot, CompactionMetrics,
             CompactionQueueDropContext, CompactionQueueDropReason, CompactionTriggerReason,
+            SstGcCandidateInspection, SstGcInspection, SstGcStatus, SstSweepSummary,
         },
         orchestrator,
         planner::{CompactionPlanner, CompactionTask},
         scheduler::{CompactionScheduleError, CompactionScheduler, ScheduledCompaction},
     },
-    db::{CasBackoffConfig, CascadeConfig},
+    db::{CasBackoffConfig, CascadeConfig, SnapshotPinRegistry},
     manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
     observability::{log_debug, log_info, log_warn},
+    ondisk::sstable::manifest_storage_path,
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
 
@@ -132,6 +138,9 @@ where
     pub(crate) wal_handle: Option<WalHandle<E>>,
     pub(crate) runtime: Arc<E>,
     pub(crate) cas_backoff: CasBackoffConfig,
+    sst_fs: Arc<dyn DynFs>,
+    sst_root: Path,
+    snapshot_pins: Arc<SnapshotPinRegistry>,
     compaction_metrics: Option<Arc<CompactionMetrics>>,
 }
 
@@ -174,6 +183,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a new compaction driver with the given manifest and configuration.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         manifest: TonboManifest<FS, E>,
         table_id: TableId,
@@ -181,6 +191,9 @@ where
         wal_handle: Option<WalHandle<E>>,
         runtime: Arc<E>,
         cas_backoff: CasBackoffConfig,
+        sst_fs: Arc<dyn DynFs>,
+        sst_root: Path,
+        snapshot_pins: Arc<SnapshotPinRegistry>,
         compaction_metrics: Option<Arc<CompactionMetrics>>,
     ) -> Self {
         Self {
@@ -190,6 +203,9 @@ where
             wal_handle,
             runtime,
             cas_backoff,
+            sst_fs,
+            sst_root,
+            snapshot_pins,
             compaction_metrics,
         }
     }
@@ -247,6 +263,169 @@ where
         }
     }
 
+    /// Sweep staged SST GC candidates that are currently unreachable from the manifest root set.
+    ///
+    /// The single-process safety contract is:
+    /// 1. never delete an SST object still reachable from the current root set,
+    /// 2. treat missing objects as already reclaimed, and
+    /// 3. re-queue any candidate that hits a non-missing delete failure so a later sweep can retry
+    ///    idempotently.
+    pub(crate) async fn sweep_authorized_ssts(&self) -> ManifestResult<SstSweepSummary> {
+        let started_at = self.runtime.now();
+        let Some(plan) = self.manifest.peek_gc_plan(self.table_id).await? else {
+            return Ok(SstSweepSummary::default());
+        };
+        let active_pins = self.snapshot_pins.active_versions();
+        let root_set = self
+            .manifest
+            .current_root_set_with_pins(self.table_id, &active_pins)
+            .await?;
+        let auth = plan.authorization_summary(&root_set);
+        let (authorized_ssts, blocked_ssts) = plan.clone().split_sst_candidates(&root_set);
+        log_debug!(
+            component = "manifest",
+            event = "gc_plan_authorized_for_sweep",
+            table_id = ?self.table_id,
+            protected_versions = auth.protected_versions,
+            protected_sst_objects = auth.protected_sst_objects,
+            staged_sst_candidates = auth.staged_sst_candidates,
+            authorized_sst_candidates = auth.authorized_sst_candidates,
+            filtered_sst_candidates = auth.blocked_sst_candidates,
+            obsolete_wal_segments = auth.obsolete_wal_segments,
+        );
+
+        let mut summary = SstSweepSummary::default();
+        let mut reclaimed_ssts = Vec::new();
+        let blocked_sst_count = blocked_ssts.len() as u64;
+
+        let attempted_candidates = authorized_ssts.len();
+        for candidate in authorized_ssts {
+            match self.sweep_candidate(&candidate, &mut summary).await {
+                Ok(()) => reclaimed_ssts.push(candidate),
+                Err(_requeue_candidate) => {}
+            }
+        }
+
+        let requeued_sst_candidates = blocked_sst_count.saturating_add(
+            attempted_candidates
+                .saturating_sub(reclaimed_ssts.len())
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        if let Some(metrics) = self.compaction_metrics.as_ref() {
+            metrics.record_gc_plan_take(
+                auth.staged_sst_candidates,
+                auth.authorized_sst_candidates,
+                auth.blocked_sst_candidates,
+                requeued_sst_candidates,
+            );
+        }
+
+        if attempted_candidates == 0 {
+            return Ok(summary);
+        }
+
+        summary.duration_ms = self
+            .runtime
+            .now()
+            .duration_since(started_at)
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+
+        if !reclaimed_ssts.is_empty() {
+            self.manifest
+                .remove_gc_sst_candidates(self.table_id, &reclaimed_ssts)
+                .await?;
+        }
+
+        if let Some(metrics) = self.compaction_metrics.as_ref() {
+            metrics.record_sst_sweep(summary);
+        }
+        log_info!(
+            component = "compaction",
+            event = "sst_sweep_completed",
+            table_id = ?self.table_id,
+            deleted_objects = summary.deleted_objects,
+            deleted_bytes = summary.deleted_bytes,
+            delete_failures = summary.delete_failures,
+            duration_ms = summary.duration_ms,
+        );
+        Ok(summary)
+    }
+
+    /// Inspect the staged SST GC plan relative to the current manifest root set.
+    pub(crate) async fn sst_gc_status(&self) -> ManifestResult<Option<SstGcStatus>> {
+        let active_pins = self.snapshot_pins.active_versions();
+        let Some(summary) = self
+            .manifest
+            .inspect_gc_plan_authorization_with_pins(self.table_id, &active_pins)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SstGcStatus {
+            staged_sst_candidates: summary.staged_sst_candidates,
+            authorized_sst_candidates: summary.authorized_sst_candidates,
+            blocked_sst_candidates: summary.blocked_sst_candidates,
+            obsolete_wal_segments: summary.obsolete_wal_segments,
+            protected_versions: summary.protected_versions,
+            active_snapshot_versions: summary.active_snapshot_versions,
+            protected_sst_objects: summary.protected_sst_objects,
+        }))
+    }
+
+    /// Inspect the exact persisted SST GC plan and its current authorization state.
+    pub(crate) async fn inspect_sst_gc_plan(&self) -> ManifestResult<Option<SstGcInspection>> {
+        let Some(plan) = self.manifest.peek_gc_plan(self.table_id).await? else {
+            return Ok(None);
+        };
+        let active_pins = self.snapshot_pins.active_versions();
+        let root_set = self
+            .manifest
+            .current_root_set_with_pins(self.table_id, &active_pins)
+            .await?;
+        let summary = plan.authorization_summary(&root_set);
+        let mut candidates = plan
+            .obsolete_ssts
+            .iter()
+            .map(|candidate| {
+                let authorized = !root_set.contains_path(&candidate.data_path)
+                    && candidate
+                        .delete_path
+                        .as_ref()
+                        .is_none_or(|path| !root_set.contains_path(path));
+                SstGcCandidateInspection {
+                    sst_id: candidate.id.raw(),
+                    level: candidate.level,
+                    data_path: candidate.data_path.as_ref().to_string(),
+                    delete_path: candidate
+                        .delete_path
+                        .as_ref()
+                        .map(|path| path.as_ref().to_string()),
+                    authorized,
+                }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|lhs, rhs| {
+            lhs.data_path
+                .cmp(&rhs.data_path)
+                .then_with(|| lhs.delete_path.cmp(&rhs.delete_path))
+                .then_with(|| lhs.level.cmp(&rhs.level))
+                .then_with(|| lhs.sst_id.cmp(&rhs.sst_id))
+        });
+        Ok(Some(SstGcInspection {
+            staged_sst_candidates: summary.staged_sst_candidates,
+            authorized_sst_candidates: summary.authorized_sst_candidates,
+            blocked_sst_candidates: summary.blocked_sst_candidates,
+            obsolete_wal_segments: summary.obsolete_wal_segments,
+            protected_versions: summary.protected_versions,
+            active_snapshot_versions: summary.active_snapshot_versions,
+            protected_sst_objects: summary.protected_sst_objects,
+            candidates,
+        }))
+    }
+
     /// Get the WAL floor currently recorded in the manifest.
     async fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
         self.manifest.wal_floor(self.table_id).await.ok().flatten()
@@ -256,6 +435,105 @@ where
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.manifest_wal_floor().await.map(|ref_| ref_.seq())
+    }
+
+    async fn sweep_candidate(
+        &self,
+        candidate: &crate::manifest::GcSstRef,
+        summary: &mut SstSweepSummary,
+    ) -> Result<(), crate::manifest::GcSstRef> {
+        let mut success = true;
+        let data_path = self.resolve_sst_path(&candidate.data_path);
+        if self
+            .delete_object_if_present(&data_path, summary)
+            .await
+            .is_err()
+        {
+            success = false;
+        }
+        if let Some(delete_path) = candidate.delete_path.as_ref() {
+            let delete_path = self.resolve_sst_path(delete_path);
+            if self
+                .delete_object_if_present(&delete_path, summary)
+                .await
+                .is_err()
+            {
+                success = false;
+            }
+        }
+
+        if success {
+            Ok(())
+        } else {
+            Err(candidate.clone())
+        }
+    }
+
+    fn resolve_sst_path(&self, relative: &Path) -> Path {
+        if self.sst_root == Path::default() {
+            return relative.clone();
+        }
+
+        let candidate = relative.as_ref();
+        let root = self.sst_root.as_ref().trim_end_matches('/');
+        if candidate.starts_with(root) {
+            return relative.clone();
+        }
+        if let Some(root_without_leading_slash) = root.strip_prefix('/')
+            && candidate.starts_with(root_without_leading_slash)
+        {
+            return Path::from(format!("/{candidate}"));
+        }
+
+        Path::from(format!("{root}/{candidate}"))
+    }
+
+    async fn delete_object_if_present(
+        &self,
+        path: &Path,
+        summary: &mut SstSweepSummary,
+    ) -> Result<(), ()> {
+        let bytes = match self.object_size_if_present(path).await {
+            Ok(size) => size,
+            Err(err) => {
+                log_warn!(
+                    component = "compaction",
+                    event = "sst_sweep_size_probe_failed",
+                    table_id = ?self.table_id,
+                    path = path.as_ref(),
+                    error = ?err,
+                );
+                None
+            }
+        };
+
+        match self.sst_fs.remove(path).await {
+            Ok(()) => {
+                summary.deleted_objects = summary.deleted_objects.saturating_add(1);
+                summary.deleted_bytes = summary.deleted_bytes.saturating_add(bytes.unwrap_or(0));
+                Ok(())
+            }
+            Err(err) if is_missing_fs_error(&err) => Ok(()),
+            Err(err) => {
+                summary.delete_failures = summary.delete_failures.saturating_add(1);
+                log_warn!(
+                    component = "compaction",
+                    event = "sst_sweep_delete_failed",
+                    table_id = ?self.table_id,
+                    path = path.as_ref(),
+                    error = ?err,
+                );
+                Err(())
+            }
+        }
+    }
+
+    async fn object_size_if_present(&self, path: &Path) -> Result<Option<u64>, FsError> {
+        match self.sst_fs.open(path).await {
+            Ok(file) => file.size().await.map(Some),
+            Err(err) if is_missing_fs_error(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Build a compaction plan based on the latest manifest snapshot.
@@ -429,6 +707,46 @@ where
         }
     }
 
+    fn normalize_manifest_paths(&self, outcome: &mut CompactionOutcome) {
+        outcome.add_ssts = outcome
+            .add_ssts
+            .iter()
+            .map(|entry| {
+                let data_path = manifest_storage_path(&self.sst_root, entry.data_path());
+                let delete_path = entry
+                    .delete_path()
+                    .map(|path| manifest_storage_path(&self.sst_root, path));
+                crate::manifest::SstEntry::new(
+                    entry.sst_id().clone(),
+                    entry.stats().cloned(),
+                    entry.wal_segments().map(|ids| ids.to_vec()),
+                    data_path,
+                    delete_path,
+                )
+            })
+            .collect();
+        outcome.remove_ssts = outcome
+            .remove_ssts
+            .iter()
+            .map(|desc| {
+                let mut normalized =
+                    crate::ondisk::sstable::SsTableDescriptor::new(desc.id().clone(), desc.level());
+                if let Some(stats) = desc.stats().cloned() {
+                    normalized = normalized.with_stats(stats);
+                }
+                normalized = normalized.with_wal_ids(desc.wal_ids().map(|ids| ids.to_vec()));
+                if let Some(data_path) = desc.data_path() {
+                    normalized = normalized.with_storage_paths(
+                        manifest_storage_path(&self.sst_root, data_path),
+                        desc.delete_path()
+                            .map(|path| manifest_storage_path(&self.sst_root, path)),
+                    );
+                }
+                normalized
+            })
+            .collect();
+    }
+
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[cfg(all(test, feature = "tokio"))]
     #[instrument(
@@ -466,7 +784,7 @@ where
                 return Ok(None);
             };
 
-            let inputs = orchestrator::resolve_inputs(version, &task)?;
+            let inputs = orchestrator::resolve_inputs(&self.sst_root, version, &task)?;
             let input_stats = CompactionIoStats::from_descriptors(&inputs);
             let input_count = inputs.len();
             let source_level = task.source_level;
@@ -530,6 +848,7 @@ where
                 &existing_wal_segments,
                 wal_floor,
             );
+            self.normalize_manifest_paths(&mut outcome);
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
@@ -563,10 +882,19 @@ where
                 Ok(_) => {
                     self.prune_wal_below_floor().await;
                     if let Some(plan) = gc_plan {
-                        self.manifest
-                            .record_gc_plan(self.table_id, plan)
+                        // Compaction only stages GC candidates here. Any future SST sweeper must
+                        // re-authorize against the latest manifest root set before deleting.
+                        self.persist_gc_plan(plan)
                             .await
                             .map_err(CompactionError::Manifest)?;
+                    }
+                    if let Err(err) = self.sweep_authorized_ssts().await {
+                        log_warn!(
+                            component = "compaction",
+                            event = "sst_sweep_failed",
+                            table_id = ?self.table_id,
+                            error = ?err,
+                        );
                     }
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
@@ -690,7 +1018,7 @@ where
             }
 
             let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
-            let inputs = orchestrator::resolve_inputs(version, &scheduled.task)?;
+            let inputs = orchestrator::resolve_inputs(&self.sst_root, version, &scheduled.task)?;
             let input_stats = CompactionIoStats::from_descriptors(&inputs);
             let input_count = inputs.len();
             let source_level = scheduled.task.source_level;
@@ -754,6 +1082,7 @@ where
                 &existing_wal_segments,
                 wal_floor,
             );
+            self.normalize_manifest_paths(&mut outcome);
             let gc_plan = orchestrator::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
@@ -788,10 +1117,19 @@ where
                 Ok(_) => {
                     self.prune_wal_below_floor().await;
                     if let Some(plan) = gc_plan {
-                        self.manifest
-                            .record_gc_plan(self.table_id, plan)
+                        // Compaction only stages GC candidates here. Any future SST sweeper must
+                        // re-authorize against the latest manifest root set before deleting.
+                        self.persist_gc_plan(plan)
                             .await
                             .map_err(CompactionError::Manifest)?;
+                    }
+                    if let Err(err) = self.sweep_authorized_ssts().await {
+                        log_warn!(
+                            component = "compaction",
+                            event = "sst_sweep_failed",
+                            table_id = ?self.table_id,
+                            error = ?err,
+                        );
                     }
                     let started_at = job_started_at.unwrap_or_else(|| self.runtime.now());
                     let duration = self.runtime.now().duration_since(started_at);
@@ -980,6 +1318,27 @@ where
                     break;
                 }
             }
+        }
+        Ok(())
+    }
+
+    async fn persist_gc_plan(&self, plan: crate::manifest::GcPlanState) -> ManifestResult<()> {
+        let (previous, written) = self.manifest.merge_gc_plan(self.table_id, plan).await?;
+        if let Some(metrics) = self.compaction_metrics.as_ref() {
+            metrics.record_gc_plan_write(
+                previous
+                    .as_ref()
+                    .map_or(0, |plan| plan.obsolete_ssts.len() as u64),
+                previous
+                    .as_ref()
+                    .map_or(0, |plan| plan.obsolete_wal_segments.len() as u64),
+                written
+                    .as_ref()
+                    .map_or(0, |plan| plan.obsolete_ssts.len() as u64),
+                written
+                    .as_ref()
+                    .map_or(0, |plan| plan.obsolete_wal_segments.len() as u64),
+            );
         }
         Ok(())
     }
@@ -1261,4 +1620,28 @@ where
         });
         CompactionHandle::new(abort, Some(handle), Some(tick_tx))
     }
+}
+
+fn is_missing_fs_error(err: &FsError) -> bool {
+    match err {
+        FsError::Io(io) => io.kind() == ErrorKind::NotFound,
+        FsError::Path(inner) | FsError::Remote(inner) | FsError::Other(inner) => {
+            inner
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == ErrorKind::NotFound)
+                || matches_missing_message(inner.to_string().as_str())
+        }
+        FsError::Unsupported { .. }
+        | FsError::PreconditionFailed
+        | FsError::CastError
+        | FsError::Wasm { .. } => false,
+        _ => false,
+    }
+}
+
+fn matches_missing_message(message: &str) -> bool {
+    message.contains("NotFound")
+        || message.contains("not found")
+        || message.contains("NoSuchKey")
+        || message.contains("does not exist")
 }

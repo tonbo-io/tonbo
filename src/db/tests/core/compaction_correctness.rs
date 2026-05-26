@@ -863,26 +863,11 @@ impl ModelRunner {
                 self.trace.push(Op::Reopen);
                 let _ = self.harness.try_flush_immutables_to_l0().await?;
                 self.harness.reopen().await?;
-                if let Some(snapshot_ts) = self.active_snapshot_ts {
-                    let snapshot = self
-                        .harness
-                        .db
-                        .snapshot_at(Timestamp::new(snapshot_ts))
-                        .await?;
-                    let ctx = self.failure_context(Some(snapshot_ts));
-                    assert_oracle_matches(
-                        "model_based_reopen",
-                        snapshot_ts,
-                        &snapshot,
-                        &self.oracle,
-                        &self.harness.db,
-                        Some(&ctx),
-                    )
-                    .await?;
-                    self.active_snapshot = Some(snapshot);
-                } else {
-                    self.active_snapshot = None;
-                }
+                // Reopen models a process restart. Historical snapshot protection on this branch
+                // is intentionally in-process only, so any live pinned snapshot must be treated as
+                // dropped across reopen.
+                self.active_snapshot_ts = None;
+                self.active_snapshot = None;
             }
         }
         Ok(())
@@ -1032,6 +1017,21 @@ async fn model_runner_reads_use_pinned_snapshot_until_mutation()
     assert!(runner.active_snapshot.is_some());
 
     runner.apply_op(OpKind::Put).await?;
+    assert!(runner.active_snapshot_ts.is_none());
+    assert!(runner.active_snapshot.is_none());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_runner_reopen_clears_active_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    let mut runner = ModelRunner::new(17, "compaction-correctness-model-reopen-clear").await?;
+
+    runner.apply_op(OpKind::Snapshot).await?;
+    assert!(runner.active_snapshot_ts.is_some());
+    assert!(runner.active_snapshot.is_some());
+
+    runner.apply_op(OpKind::Reopen).await?;
     assert!(runner.active_snapshot_ts.is_none());
     assert!(runner.active_snapshot.is_none());
 

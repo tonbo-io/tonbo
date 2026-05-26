@@ -89,7 +89,7 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 
 - **Previous:** In-memory `read_ts` only; no durable checkpoints; u32 wrap risk.
 - **Current:** u64 `Timestamp`; `snapshot_at()` and `list_versions()` APIs; manifest-backed snapshots survive restart; uniform MVCC columns (`_commit_ts`); WAL floor tracking.
-- **Remaining:** Named checkpoints with tags (#554); reader registry for GC watermarks (#547); version retention policies.
+- **Remaining:** Named checkpoints with tags (#554); extend snapshot pinning beyond the current in-process scope for cross-process GC safety (#547).
 
 ## Risks
 

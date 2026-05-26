@@ -12,7 +12,7 @@ use crate::{
     },
     id::FileId,
     manifest::{GcPlanState, GcSstRef, ManifestError, VersionState, WalSegmentRef},
-    ondisk::sstable::{SsTableDescriptor, SsTableId},
+    ondisk::sstable::{SsTableDescriptor, SsTableId, storage_path_from_manifest},
 };
 
 /// Plan compaction from a version snapshot.
@@ -52,6 +52,7 @@ where
 /// Looks up each input SST in the version state and builds full descriptors
 /// with stats, WAL IDs, and storage paths.
 pub(crate) fn resolve_inputs(
+    sst_root: &fusio::path::Path,
     version: &VersionState,
     task: &CompactionTask,
 ) -> Result<Vec<SsTableDescriptor>, CompactionError> {
@@ -73,8 +74,12 @@ pub(crate) fn resolve_inputs(
             descriptor = descriptor.with_stats(stats);
         }
         descriptor = descriptor.with_wal_ids(entry.wal_segments().map(|ids| ids.to_vec()));
-        descriptor =
-            descriptor.with_storage_paths(entry.data_path().clone(), entry.delete_path().cloned());
+        descriptor = descriptor.with_storage_paths(
+            storage_path_from_manifest(sst_root, entry.data_path()),
+            entry
+                .delete_path()
+                .map(|path| storage_path_from_manifest(sst_root, path)),
+        );
         descriptors.push(descriptor);
     }
     Ok(descriptors)
@@ -196,9 +201,11 @@ pub(crate) fn reconcile_wal_segments(
     outcome.obsolete_wal_segments = obsolete_wal_segments;
 }
 
-/// Build a GC plan from a compaction outcome.
+/// Build staged GC candidates from a compaction outcome.
 ///
-/// Returns `None` if there are no obsolete SSTs or WAL segments to clean up.
+/// Returns `None` if there are no obsolete SSTs or WAL segments to stage. The resulting
+/// [`GcPlanState`] is only a hint queue; a future sweeper must re-check the current manifest
+/// root set before deleting any SST object.
 pub(crate) fn gc_plan_from_outcome(
     outcome: &CompactionOutcome,
 ) -> Result<Option<GcPlanState>, CompactionError> {

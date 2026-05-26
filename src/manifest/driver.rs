@@ -19,8 +19,8 @@ use super::{
     VersionEdit,
     codec::{CatalogCodec, GcPlanCodec, ManifestCodec, VersionCodec},
     domain::{
-        CatalogKey, CatalogState, CatalogValue, GcPlanKey, GcPlanState, GcPlanValue,
-        TableCatalogEntry, TableDefinition, TableHead, TableId, TableMeta, VersionKey,
+        CatalogKey, CatalogState, CatalogValue, CurrentRootSet, GcPlanKey, GcPlanState,
+        GcPlanValue, TableCatalogEntry, TableDefinition, TableHead, TableId, TableMeta, VersionKey,
         VersionState, VersionValue, WalSegmentRef,
     },
 };
@@ -45,6 +45,17 @@ pub enum ManifestError {
     /// Catalog metadata did not match expectations.
     #[error("catalog conflict: {0}")]
     CatalogConflict(String),
+    /// Requested snapshot/version is unavailable in manifest history.
+    #[error(
+        "requested manifest version at or before timestamp {requested:?} is unavailable; oldest \
+         available version is {oldest_available:?}"
+    )]
+    VersionUnavailable {
+        /// Requested snapshot timestamp.
+        requested: Timestamp,
+        /// Oldest manifest version timestamp still available.
+        oldest_available: Timestamp,
+    },
 }
 
 /// Convenience result alias for manifest operations.
@@ -143,6 +154,7 @@ where
 {
     /// Apply a sequence of edits, atomically publishing a new table version together with head
     /// metadata.
+    #[allow(dead_code)]
     pub(crate) async fn apply_version_edits(
         &self,
         table: TableId,
@@ -153,6 +165,7 @@ where
 
     /// Apply edits with a CAS guard on the current head transaction. If the manifest head has
     /// advanced since `expected_head`, this returns `ManifestError::CasConflict`.
+    #[allow(dead_code)]
     pub(crate) async fn apply_version_edits_cas(
         &self,
         table: TableId,
@@ -370,7 +383,19 @@ where
                 <VersionCodec as ManifestCodec>::validate_key_value(&version_key, &value)?;
                 Some(VersionState::try_from(value)?)
             }
-            None => None,
+            None => {
+                session.end().await?;
+                let versions = self.list_versions(table, 0).await?;
+                let oldest_available = versions.last().map(VersionState::commit_timestamp).ok_or(
+                    ManifestError::Invariant(
+                        "requested version is unavailable and no committed versions exist",
+                    ),
+                )?;
+                return Err(ManifestError::VersionUnavailable {
+                    requested: manifest_ts,
+                    oldest_available,
+                });
+            }
         };
 
         session.end().await?;
@@ -456,6 +481,71 @@ where
         Ok(versions)
     }
 
+    /// Build the deterministic set of protected SST objects from current manifest state.
+    #[allow(dead_code)]
+    pub(crate) async fn current_root_set(&self, table: TableId) -> ManifestResult<CurrentRootSet> {
+        self.current_root_set_with_pins(table, &[]).await
+    }
+
+    /// Build the protected root set from the current HEAD and any active snapshot pins.
+    pub(crate) async fn current_root_set_with_pins(
+        &self,
+        table: TableId,
+        active_pins: &[Timestamp],
+    ) -> ManifestResult<CurrentRootSet> {
+        let session = self.inner.session_read().await?;
+
+        let head_key = VersionKey::TableHead { table_id: table };
+        let head = match session.get(&head_key).await? {
+            Some(value) => {
+                <VersionCodec as ManifestCodec>::validate_key_value(&head_key, &value)?;
+                TableHead::try_from(value)?
+            }
+            None => {
+                session.end().await?;
+                return Err(ManifestError::Invariant(
+                    "Head cannot be empty for current_root_set",
+                ));
+            }
+        };
+
+        let entries = match session
+            .scan_range(ScanRange {
+                start: Some(VersionKey::TableVersion {
+                    table_id: table,
+                    manifest_ts: Timestamp::MIN,
+                }),
+                end: Some(VersionKey::TableVersion {
+                    table_id: table,
+                    manifest_ts: Timestamp::MAX,
+                }),
+            })
+            .await
+        {
+            Ok(entries) => entries,
+            Err(err) => {
+                session.end().await?;
+                return Err(err.into());
+            }
+        };
+
+        let mut versions = Vec::new();
+        for (key, value) in entries {
+            <VersionCodec as ManifestCodec>::validate_key_value(&key, &value)?;
+            if let VersionValue::TableVersion(state) = value {
+                versions.push(state);
+            }
+        }
+        session.end().await?;
+
+        versions.sort_by_key(|version| std::cmp::Reverse(version.commit_timestamp()));
+        Ok(CurrentRootSet::from_versions(
+            head.last_manifest_txn,
+            active_pins,
+            &versions,
+        ))
+    }
+
     /// Fetch the persisted WAL floor for a table.
     #[instrument(
         name = "manifest::wal_floor",
@@ -485,6 +575,33 @@ where
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
     E: Executor + Timer + Clone + 'static,
 {
+    pub(crate) async fn update_gc_plan<F>(
+        &self,
+        table_id: TableId,
+        updater: F,
+    ) -> ManifestResult<(Option<GcPlanState>, Option<GcPlanState>)>
+    where
+        F: FnOnce(Option<GcPlanState>) -> Option<GcPlanState>,
+    {
+        let mut session = self.inner.session_write().await?;
+        let key = GcPlanKey::Table { table_id };
+        let previous = match session.get(&key).await? {
+            Some(value) => {
+                <GcPlanCodec as ManifestCodec>::validate_key_value(&key, &value)?;
+                Some(GcPlanState::try_from(value)?)
+            }
+            None => None,
+        };
+        let next = updater(previous.clone());
+        match next.clone() {
+            Some(plan) => session.put(key, GcPlanValue::Plan(plan)),
+            None => session.delete(key),
+        }
+        session.commit().await?;
+        Ok((previous, next))
+    }
+
+    #[cfg(test)]
     #[instrument(
         name = "manifest::put_gc_plan",
         skip(self),
@@ -502,28 +619,25 @@ where
         Ok(())
     }
 
-    #[cfg(all(test, feature = "tokio"))]
     #[instrument(
-        name = "manifest::take_gc_plan",
+        name = "manifest::peek_gc_plan",
         skip(self),
         fields(component = "manifest", table_id = ?table_id)
     )]
-    pub(crate) async fn take_gc_plan(
+    pub(crate) async fn peek_gc_plan(
         &self,
         table_id: TableId,
     ) -> ManifestResult<Option<GcPlanState>> {
-        let mut session = self.inner.session_write().await?;
+        let session = self.inner.session_read().await?;
         let key = GcPlanKey::Table { table_id };
-        let value = session.get(&key).await?;
-        let plan = match value {
+        let plan = match session.get(&key).await? {
             Some(value) => {
                 <GcPlanCodec as ManifestCodec>::validate_key_value(&key, &value)?;
                 Some(GcPlanState::try_from(value)?)
             }
             None => None,
         };
-        session.delete(key);
-        session.commit().await?;
+        session.end().await?;
         Ok(plan)
     }
 }
@@ -595,7 +709,6 @@ where
             name: definition.name.clone(),
             schema_fingerprint: definition.schema_fingerprint.clone(),
             primary_key_columns: definition.primary_key_columns.clone(),
-            retention: definition.retention.clone(),
             schema_version: definition.schema_version,
         };
 
@@ -682,12 +795,6 @@ fn ensure_table_compat(meta: &TableMeta, definition: &TableDefinition) -> Manife
             definition.name, meta.schema_version, definition.schema_version
         )));
     }
-    if meta.retention != definition.retention {
-        return Err(ManifestError::CatalogConflict(format!(
-            "table `{}` retention policy mismatch",
-            definition.name
-        )));
-    }
     Ok(())
 }
 
@@ -702,7 +809,7 @@ mod tests {
     };
 
     use super::{
-        super::domain::{SstEntry, TableDefinition},
+        super::domain::{ProtectedObjectKind, ProtectedVersionKind, SstEntry, TableDefinition},
         *,
     };
     use crate::{
@@ -1057,6 +1164,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_root_set_includes_head_historical_versions_and_delete_sidecars() {
+        let file_ids = FileIdGenerator::default();
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1, &file_ids, DefaultExecutor::default())
+                .await
+                .expect("manifest should initialize");
+
+        let historical_data = Path::parse("sst/L0/00000000000000000001.parquet").expect("path");
+        let historical_delete =
+            Path::parse("sst/L0/00000000000000000001.delete.parquet").expect("path");
+        let head_data = Path::parse("sst/L1/00000000000000000002.parquet").expect("path");
+
+        manifest
+            .apply_version_edits(
+                table_id,
+                &[VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![SstEntry::new(
+                        SsTableId::new(1),
+                        Some(SsTableStats::default()),
+                        None,
+                        historical_data.clone(),
+                        Some(historical_delete.clone()),
+                    )],
+                }],
+            )
+            .await
+            .expect("first version");
+
+        manifest
+            .apply_version_edits(
+                table_id,
+                &[
+                    VersionEdit::RemoveSsts {
+                        level: 0,
+                        sst_ids: vec![SsTableId::new(1)],
+                    },
+                    VersionEdit::AddSsts {
+                        level: 1,
+                        entries: vec![SstEntry::new(
+                            SsTableId::new(2),
+                            Some(SsTableStats::default()),
+                            None,
+                            head_data.clone(),
+                            None,
+                        )],
+                    },
+                ],
+            )
+            .await
+            .expect("second version");
+
+        let root_set = manifest
+            .current_root_set_with_pins(table_id, &[Timestamp::new(1)])
+            .await
+            .expect("current root set");
+        assert_eq!(root_set.protected_version_count(), 2);
+        assert_eq!(root_set.protected_object_count(), 3);
+        assert_eq!(
+            root_set
+                .protected_versions()
+                .iter()
+                .map(|version| (version.manifest_ts(), version.kind()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Timestamp::new(2), ProtectedVersionKind::Head),
+                (Timestamp::new(1), ProtectedVersionKind::ActiveSnapshotPin),
+            ]
+        );
+        assert_eq!(
+            root_set
+                .protected_objects()
+                .iter()
+                .map(|object| (object.path().clone(), object.kind()))
+                .collect::<Vec<_>>(),
+            vec![
+                (historical_delete, ProtectedObjectKind::DeleteSidecar),
+                (historical_data, ProtectedObjectKind::Data),
+                (head_data, ProtectedObjectKind::Data),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn catalog_registers_and_validates_tables() {
         let file_ids = FileIdGenerator::default();
         let catalog = bare_catalog_manifest();
@@ -1065,7 +1256,6 @@ mod tests {
             name: "test-table".into(),
             schema_fingerprint: "fingerprint-a".into(),
             primary_key_columns: vec!["pk".into()],
-            retention: None,
             schema_version: 1,
         };
 

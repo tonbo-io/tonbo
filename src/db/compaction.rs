@@ -6,14 +6,18 @@ use std::sync::Arc;
 
 use fusio::executor::{Executor, Timer};
 
-use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
 #[cfg(all(test, feature = "tokio"))]
+use crate::compaction::{
+    executor::{CompactionError, CompactionExecutor, CompactionOutcome},
+    planner::CompactionPlanner,
+};
 use crate::{
     compaction::{
-        executor::{CompactionError, CompactionExecutor, CompactionOutcome},
-        planner::CompactionPlanner,
+        CompactionDriver,
+        metrics::{CompactionMetricsSnapshot, SstGcInspection, SstGcStatus, SstSweepSummary},
     },
-    manifest::ManifestResult,
+    db::DbInner,
+    manifest::{ManifestFs, ManifestResult},
 };
 
 impl<FS, E> DbInner<FS, E>
@@ -46,6 +50,9 @@ where
             self.wal_handle().cloned(),
             Arc::clone(&self.executor),
             self.cas_backoff.clone(),
+            Arc::clone(&self.fs),
+            self.sst_root.clone(),
+            Arc::clone(&self.snapshot_pins),
             self.compaction_metrics.clone(),
         )
     }
@@ -87,5 +94,27 @@ where
         self.compaction_driver()
             .run_compaction(planner, executor)
             .await
+    }
+
+    /// Sweep unreachable manifest-published SST objects for the current table.
+    pub(crate) async fn sweep_manifest_ssts(&self) -> ManifestResult<SstSweepSummary> {
+        self.compaction_driver().sweep_authorized_ssts().await
+    }
+
+    /// Snapshot staged SST GC authorization state for the current table.
+    pub(crate) async fn sst_gc_status(&self) -> ManifestResult<Option<SstGcStatus>> {
+        self.compaction_driver().sst_gc_status().await
+    }
+
+    /// Inspect the exact persisted SST GC plan for the current table.
+    pub(crate) async fn inspect_sst_gc_plan(&self) -> ManifestResult<Option<SstGcInspection>> {
+        self.compaction_driver().inspect_sst_gc_plan().await
+    }
+
+    /// Snapshot current compaction metrics if this DB was configured to collect them.
+    pub(crate) fn compaction_metrics_snapshot(&self) -> Option<CompactionMetricsSnapshot> {
+        self.compaction_metrics
+            .as_ref()
+            .map(|metrics| metrics.snapshot())
     }
 }

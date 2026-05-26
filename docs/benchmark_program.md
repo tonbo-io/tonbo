@@ -187,7 +187,7 @@ Use:
 - calculate write amp and cleanup lag
 - identify whether planner or executor is the bottleneck
 
-#### GC and retention
+#### GC and snapshot pinning
 
 Why:
 
@@ -200,12 +200,12 @@ Add:
 - obsolete object count pending delete
 - time from obsolete to reclaimed
 - delete request counts and latency
-- retained bytes due to snapshots or retention
+- protected bytes due to active snapshot pins
 
 Use:
 
 - explain physical amplification windows
-- set GC cadence and retention defaults
+- set GC cadence and snapshot-lifetime guidance
 - distinguish delayed reclaim from ineffective compaction
 
 #### Manifest and metadata path
@@ -297,7 +297,8 @@ Add:
 - compaction settings
 - page size
 - batch size
-- retention settings
+- WAL retention settings
+- snapshot / historical-read workload shape
 - git revision
 
 Use:
@@ -311,7 +312,7 @@ Use:
 2. WAL and commit-path timers
 3. Topology capture and harness/system metrics
 4. Minor and major compaction accounting
-5. GC and retention metrics
+5. GC and snapshot-pinning metrics
 6. Richer manifest and CAS instrumentation
 
 ### Minimum Instrumentation Required Before Each Scenario
@@ -572,7 +573,7 @@ Timing:
 
 ### 6. `gc_lag_storage_amplification_window`
 
-Why sixth: users eventually ask what cleanup and retention do to storage cost,
+Why sixth: users eventually ask what cleanup and active snapshot pins do to storage cost,
 object count, and read stability after compaction publishes new data.
 
 Tonbo why: it turns the current physical-byte caveat into an operational
@@ -586,9 +587,9 @@ Reference pattern:
 
 Workload:
 
-- Sustain overwrite and delete traffic through repeated compaction cycles with
-  retention windows like 0, 5, and 30 minutes while a light analytical read
-  load stays active.
+- Sustain overwrite and delete traffic through repeated compaction cycles while
+  varying the lifetime of concurrent read snapshots that pin historical
+  manifest versions.
 
 Metrics:
 
@@ -602,8 +603,9 @@ Metrics:
 Decision:
 
 - GC cadence
-- retention defaults
-- whether reader registry or stronger watermarking is required before broader
+- snapshot-lifetime guidance
+- whether in-process snapshot pinning is sufficient or stronger/durable
+  reader coordination is required before broader
   claims
 
 Timing:

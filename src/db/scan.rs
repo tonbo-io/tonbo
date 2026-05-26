@@ -41,7 +41,7 @@ use crate::{
         scan::{DeleteStreamWithExtractor, SstableScan, UnpinExec},
         sstable::{
             ParquetStreamOptions, SsTableError, open_parquet_stream_with_metadata,
-            split_predicate_for_row_filter, validate_page_indexes,
+            split_predicate_for_row_filter, storage_path_from_manifest, validate_page_indexes,
         },
     },
     query::{
@@ -299,7 +299,7 @@ impl TxSnapshot {
             }
             let (mut selection, requires_residual) = prune_sst_selection(
                 &prune_ctx,
-                entry.data_path(),
+                &storage_path_from_manifest(&db.sst_root, entry.data_path()),
                 predicate,
                 read_ts,
                 &predicate_scan_schema,
@@ -316,7 +316,7 @@ impl TxSnapshot {
             if let Some(delete_path) = entry.delete_path() {
                 let delete_selection = plan_delete_sidecar_selection(
                     Arc::clone(&prune_ctx.fs),
-                    delete_path,
+                    &storage_path_from_manifest(&db.sst_root, delete_path),
                     &key_schema,
                     Arc::clone(&prune_ctx.metadata_cache),
                     prune_ctx.executor.clone(),
@@ -730,7 +730,7 @@ where
                     ));
                 }
             };
-            let data_path = sst.entry.data_path().clone();
+            let data_path = storage_path_from_manifest(&self.sst_root, sst.entry.data_path());
             let executor: E = (**self.executor()).clone();
 
             let projected_schema = Arc::clone(&selection.projected_schema);
@@ -762,7 +762,7 @@ where
                         selection: "missing delete sidecar selection",
                     })
                 })?;
-                let delete_path = delete_path.clone();
+                let delete_path = storage_path_from_manifest(&self.sst_root, delete_path);
                 let options = ParquetStreamOptions {
                     projection: Some(delete_selection.projection.clone()),
                     row_groups: None,

@@ -1,7 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
-    time::Duration,
+    collections::{BTreeMap, BTreeSet, HashSet},
 };
 
 use fusio::path::Path;
@@ -117,6 +116,212 @@ pub(crate) enum GcPlanValue {
     Plan(GcPlanState),
 }
 
+/// Why a committed manifest version is still protected from SST reclamation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtectedVersionKind {
+    /// The version currently referenced by the table head.
+    Head,
+    /// A live in-process snapshot depends on this historical manifest version.
+    ActiveSnapshotPin,
+}
+
+/// Manifest version that currently protects one or more SST objects from GC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProtectedVersionRef {
+    manifest_ts: Timestamp,
+    kind: ProtectedVersionKind,
+}
+
+impl ProtectedVersionRef {
+    pub(crate) fn new(manifest_ts: Timestamp, kind: ProtectedVersionKind) -> Self {
+        Self { manifest_ts, kind }
+    }
+
+    pub(crate) fn manifest_ts(&self) -> Timestamp {
+        self.manifest_ts
+    }
+
+    pub(crate) fn kind(&self) -> ProtectedVersionKind {
+        self.kind
+    }
+}
+
+/// Kind of physical SST object protected by the current manifest root set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtectedObjectKind {
+    /// Primary SST Parquet file.
+    Data,
+    /// Optional delete-sidecar Parquet file.
+    DeleteSidecar,
+}
+
+/// Physical SST object path protected from GC by one or more manifest versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProtectedSstObject {
+    path: Path,
+    sst_id: SsTableId,
+    level: u32,
+    kind: ProtectedObjectKind,
+}
+
+impl ProtectedSstObject {
+    pub(crate) fn new(
+        path: Path,
+        sst_id: SsTableId,
+        level: u32,
+        kind: ProtectedObjectKind,
+    ) -> Self {
+        Self {
+            path,
+            sst_id,
+            level,
+            kind,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn sst_id(&self) -> &SsTableId {
+        &self.sst_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn level(&self) -> u32 {
+        self.level
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn kind(&self) -> ProtectedObjectKind {
+        self.kind
+    }
+}
+
+/// Deterministic current root set for SST GC decisions.
+///
+/// In the current single-process model the protected set is the union of the table HEAD and any
+/// manifest versions pinned by live in-process snapshots. Physical SST deletion must treat any
+/// object referenced by this set as live.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CurrentRootSet {
+    protected_versions: Vec<ProtectedVersionRef>,
+    protected_objects: Vec<ProtectedSstObject>,
+    active_snapshot_version_count: usize,
+}
+
+impl CurrentRootSet {
+    pub(crate) fn new(
+        protected_versions: Vec<ProtectedVersionRef>,
+        protected_objects: Vec<ProtectedSstObject>,
+        active_snapshot_version_count: usize,
+    ) -> Self {
+        Self {
+            protected_versions,
+            protected_objects,
+            active_snapshot_version_count,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn protected_versions(&self) -> &[ProtectedVersionRef] {
+        &self.protected_versions
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn protected_objects(&self) -> &[ProtectedSstObject] {
+        &self.protected_objects
+    }
+
+    pub(crate) fn protected_version_count(&self) -> usize {
+        self.protected_versions.len()
+    }
+
+    pub(crate) fn protected_object_count(&self) -> usize {
+        self.protected_objects.len()
+    }
+
+    pub(crate) fn active_snapshot_version_count(&self) -> usize {
+        self.active_snapshot_version_count
+    }
+
+    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+        self.protected_objects
+            .binary_search_by(|protected| protected.path().as_ref().cmp(path.as_ref()))
+            .is_ok()
+    }
+
+    pub(crate) fn from_versions(
+        head_manifest_ts: Option<Timestamp>,
+        active_pins: &[Timestamp],
+        versions: &[VersionState],
+    ) -> Self {
+        let active_pin_set = active_pins.iter().copied().collect::<BTreeSet<_>>();
+        let mut protected_versions = Vec::with_capacity(
+            active_pin_set
+                .len()
+                .saturating_add(usize::from(head_manifest_ts.is_some())),
+        );
+        let mut seen_paths = BTreeSet::new();
+        let mut protected_objects = Vec::new();
+
+        for version in versions {
+            let manifest_ts = version.commit_timestamp();
+            let is_head = Some(manifest_ts) == head_manifest_ts;
+            let is_active_pin = active_pin_set.contains(&manifest_ts);
+            if !is_head && !is_active_pin {
+                continue;
+            }
+            let kind = if is_head {
+                ProtectedVersionKind::Head
+            } else {
+                ProtectedVersionKind::ActiveSnapshotPin
+            };
+            protected_versions.push(ProtectedVersionRef::new(manifest_ts, kind));
+
+            for (level, bucket) in version.ssts().iter().enumerate() {
+                let level = u32::try_from(level).unwrap_or(u32::MAX);
+                for entry in bucket {
+                    let data_path_key = entry.data_path().as_ref().to_owned();
+                    if seen_paths.insert(data_path_key) {
+                        protected_objects.push(ProtectedSstObject::new(
+                            entry.data_path().clone(),
+                            entry.sst_id().clone(),
+                            level,
+                            ProtectedObjectKind::Data,
+                        ));
+                    }
+                    if let Some(delete_path) = entry.delete_path() {
+                        let delete_path_key = delete_path.as_ref().to_owned();
+                        if seen_paths.insert(delete_path_key) {
+                            protected_objects.push(ProtectedSstObject::new(
+                                delete_path.clone(),
+                                entry.sst_id().clone(),
+                                level,
+                                ProtectedObjectKind::DeleteSidecar,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        protected_versions.sort_by_key(|version| {
+            (
+                match version.kind() {
+                    ProtectedVersionKind::Head => 0u8,
+                    ProtectedVersionKind::ActiveSnapshotPin => 1u8,
+                },
+                std::cmp::Reverse(version.manifest_ts()),
+            )
+        });
+        protected_objects.sort_by(|lhs, rhs| lhs.path().as_ref().cmp(rhs.path().as_ref()));
+
+        Self::new(protected_versions, protected_objects, active_pin_set.len())
+    }
+}
+
 impl TryFrom<CatalogValue> for CatalogState {
     type Error = ManifestError;
 
@@ -212,8 +417,6 @@ pub(crate) struct TableMeta {
     pub schema_fingerprint: String,
     /// Columns participating in the primary key.
     pub primary_key_columns: Vec<String>,
-    /// Optional retention policy overrides.
-    pub retention: Option<TableRetionConfig>,
     /// Monotonic schema version number.
     pub schema_version: u32,
 }
@@ -227,29 +430,8 @@ pub struct TableDefinition {
     pub schema_fingerprint: String,
     /// Columns participating in the primary key.
     pub primary_key_columns: Vec<String>,
-    /// Optional retention policy overrides.
-    pub retention: Option<TableRetionConfig>,
     /// Monotonic schema version number.
     pub schema_version: u32,
-}
-
-/// Retention policy knobs for a table.
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableRetionConfig {
-    /// Maximum number of committed versions to retain.
-    pub max_versions: u64,
-    /// Maximum age to retain versions and their WAL segments.
-    pub max_ttl: Duration,
-}
-
-impl Default for TableRetionConfig {
-    fn default() -> Self {
-        Self {
-            max_versions: 5,
-            max_ttl: Duration::from_secs(12 * 60 * 60),
-        }
-    }
 }
 
 /// Mutable head view for a table.
@@ -372,6 +554,13 @@ impl VersionState {
 
     pub(crate) fn wal_segments(&self) -> &[WalSegmentRef] {
         &self.wal_segments
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn contains_sst(&self, sst_id: &SsTableId) -> bool {
+        self.ssts
+            .iter()
+            .any(|bucket| bucket.iter().any(|entry| entry.sst_id() == sst_id))
     }
 
     #[cfg(all(test, feature = "tokio"))]
@@ -512,17 +701,148 @@ impl WalSegmentRef {
     }
 }
 
-/// Garbage-collection plan for a table.
+/// Garbage-collection candidates for a table.
+///
+/// This state is a staging queue for a future sweeper, not the correctness authority
+/// for SST deletion. Physical SST reclamation must re-check the current manifest root
+/// set and may only delete candidates that are unreachable from that root set.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct GcPlanState {
-    /// SST identifiers and paths that can be removed.
+    /// SST identifiers and paths proposed for removal.
     pub obsolete_ssts: Vec<GcSstRef>,
     /// WAL sequence numbers that can be truncated.
     pub obsolete_wal_segments: Vec<WalSegmentRef>,
 }
 
-/// Reference to an obsolete SST scheduled for deletion.
+/// Summary of how a staged GC plan relates to the current manifest root set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GcAuthorizationSummary {
+    /// Total staged SST candidates currently recorded in the GC plan.
+    pub staged_sst_candidates: u64,
+    /// SST candidates that are currently unreachable and therefore safe to sweep.
+    pub authorized_sst_candidates: u64,
+    /// SST candidates still protected by the current root set.
+    pub blocked_sst_candidates: u64,
+    /// WAL candidates staged alongside the SST plan.
+    pub obsolete_wal_segments: u64,
+    /// Manifest versions currently contributing to the protection root set.
+    pub protected_versions: u64,
+    /// Unique manifest versions currently pinned by live in-process snapshots.
+    pub active_snapshot_versions: u64,
+    /// Physical SST objects currently protected by the manifest root set.
+    pub protected_sst_objects: u64,
+}
+
+impl GcPlanState {
+    /// Merge additional staged GC candidates into this plan without duplicating entries.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.obsolete_ssts.extend(other.obsolete_ssts);
+        self.obsolete_wal_segments
+            .extend(other.obsolete_wal_segments);
+        self.normalize_in_place();
+    }
+
+    /// Remove SST candidates that were already reclaimed from the staged plan.
+    pub(crate) fn remove_sst_candidates(&mut self, reclaimed: &[GcSstRef]) {
+        if reclaimed.is_empty() {
+            return;
+        }
+
+        let reclaimed_keys = reclaimed
+            .iter()
+            .map(GcSstRef::dedupe_key)
+            .collect::<BTreeSet<_>>();
+        self.obsolete_ssts
+            .retain(|candidate| !reclaimed_keys.contains(&candidate.dedupe_key()));
+        self.normalize_in_place();
+    }
+
+    /// Authorize the staged SST candidate set against the current manifest root set.
+    ///
+    /// The returned plan keeps only candidates that are currently unreachable and therefore still
+    /// eligible for a future sweeper.
+    #[allow(dead_code)]
+    pub(crate) fn authorize_with_root_set(mut self, root_set: &CurrentRootSet) -> Self {
+        self.obsolete_ssts.retain(|candidate| {
+            !root_set.contains_path(&candidate.data_path)
+                && candidate
+                    .delete_path
+                    .as_ref()
+                    .is_none_or(|path| !root_set.contains_path(path))
+        });
+        self
+    }
+
+    /// Compute authorization counts for the staged plan against the current root set.
+    pub(crate) fn authorization_summary(
+        &self,
+        root_set: &CurrentRootSet,
+    ) -> GcAuthorizationSummary {
+        let authorized_sst_candidates = self
+            .obsolete_ssts
+            .iter()
+            .filter(|candidate| {
+                !root_set.contains_path(&candidate.data_path)
+                    && candidate
+                        .delete_path
+                        .as_ref()
+                        .is_none_or(|path| !root_set.contains_path(path))
+            })
+            .count() as u64;
+        let staged_sst_candidates = self.obsolete_ssts.len() as u64;
+
+        GcAuthorizationSummary {
+            staged_sst_candidates,
+            authorized_sst_candidates,
+            blocked_sst_candidates: staged_sst_candidates.saturating_sub(authorized_sst_candidates),
+            obsolete_wal_segments: self.obsolete_wal_segments.len() as u64,
+            protected_versions: root_set.protected_version_count() as u64,
+            active_snapshot_versions: root_set.active_snapshot_version_count() as u64,
+            protected_sst_objects: root_set.protected_object_count() as u64,
+        }
+    }
+
+    /// Split staged SST candidates into authorized and still-blocked subsets.
+    pub(crate) fn split_sst_candidates(
+        self,
+        root_set: &CurrentRootSet,
+    ) -> (Vec<GcSstRef>, Vec<GcSstRef>) {
+        let mut authorized = Vec::new();
+        let mut blocked = Vec::new();
+        for candidate in self.obsolete_ssts {
+            if !root_set.contains_path(&candidate.data_path)
+                && candidate
+                    .delete_path
+                    .as_ref()
+                    .is_none_or(|path| !root_set.contains_path(path))
+            {
+                authorized.push(candidate);
+            } else {
+                blocked.push(candidate);
+            }
+        }
+        (authorized, blocked)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.obsolete_ssts.is_empty() && self.obsolete_wal_segments.is_empty()
+    }
+
+    fn normalize_in_place(&mut self) {
+        self.obsolete_ssts
+            .sort_by(|lhs, rhs| lhs.cmp_for_dedupe(rhs));
+        self.obsolete_ssts
+            .dedup_by(|lhs, rhs| lhs.dedupe_key() == rhs.dedupe_key());
+
+        self.obsolete_wal_segments.sort_by(WalSegmentRef::cmp);
+        self.obsolete_wal_segments
+            .dedup_by(|lhs, rhs| WalSegmentRef::cmp(lhs, rhs).is_eq());
+    }
+}
+
+/// Reference to an SST candidate staged for future deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GcSstRef {
     /// Identifier of the SST.
@@ -535,6 +855,33 @@ pub(crate) struct GcSstRef {
     /// Optional delete sidecar path for the SST.
     #[serde(with = "path_serde_option")]
     pub delete_path: Option<Path>,
+}
+
+impl GcSstRef {
+    fn cmp_for_dedupe(&self, other: &Self) -> Ordering {
+        self.data_path
+            .as_ref()
+            .cmp(other.data_path.as_ref())
+            .then_with(|| {
+                self.delete_path
+                    .as_ref()
+                    .map(Path::as_ref)
+                    .cmp(&other.delete_path.as_ref().map(Path::as_ref))
+            })
+            .then_with(|| self.level.cmp(&other.level))
+            .then_with(|| self.id.raw().cmp(&other.id.raw()))
+    }
+
+    fn dedupe_key(&self) -> (String, Option<String>, u32, u64) {
+        (
+            self.data_path.as_ref().to_owned(),
+            self.delete_path
+                .as_ref()
+                .map(|path| path.as_ref().to_owned()),
+            self.level,
+            self.id.raw(),
+        )
+    }
 }
 
 mod path_serde {
