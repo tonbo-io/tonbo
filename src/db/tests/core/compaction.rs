@@ -115,6 +115,10 @@ impl Fs for FailOnceRemoveFs {
         Fs::list(&self.inner, path).await
     }
 
+    async fn exists(&self, path: &Path) -> Result<bool, FusioError> {
+        Fs::exists(&self.inner, path).await
+    }
+
     async fn remove(&self, path: &Path) -> Result<(), FusioError> {
         if path.as_ref() == self.fail_path.as_str()
             && !self.failed_once.swap(true, Ordering::SeqCst)
