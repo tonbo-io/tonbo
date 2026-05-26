@@ -1215,17 +1215,24 @@ where
         // Find the version at or before the requested timestamp (versions are newest-first)
         let target_version = versions.iter().find(|v| v.commit_timestamp <= timestamp);
 
-        let manifest_snapshot = if let Some(version) = target_version {
-            // Load the historical version from manifest
-            self.manifest
+        let (manifest_snapshot, manifest_pin) = if let Some(version) = target_version {
+            // Register the historical version before loading it so SST GC sees the version as
+            // protected while the manifest snapshot is in flight.
+            let manifest_pin = Some(self.pin_snapshot_version(version.commit_timestamp));
+            let manifest_snapshot = self
+                .manifest
                 .snapshot_at_version(self.manifest_table, version.commit_timestamp)
-                .await?
+                .await?;
+            (manifest_snapshot, manifest_pin)
         } else if versions.is_empty() {
             // No committed manifest versions exist yet, so only the current in-memory/head view can
             // answer the request.
-            self.manifest
+            let manifest_snapshot = self
+                .manifest
                 .snapshot_latest_with_fallback(self.manifest_table, &self.table_meta)
-                .await?
+                .await?;
+            let manifest_pin = self.snapshot_pin_for_manifest(&manifest_snapshot);
+            (manifest_snapshot, manifest_pin)
         } else {
             return Err(ManifestError::VersionUnavailable {
                 requested: timestamp,
@@ -1240,7 +1247,6 @@ where
         };
 
         let read_view = ReadView::new(timestamp);
-        let manifest_pin = self.snapshot_pin_for_manifest(&manifest_snapshot);
         Ok(TxSnapshot::from_table_snapshot(
             read_view,
             manifest_snapshot,
