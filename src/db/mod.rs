@@ -1627,7 +1627,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
+    pub(crate) fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
 

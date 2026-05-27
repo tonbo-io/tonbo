@@ -630,6 +630,7 @@ where
             )?)
         };
 
+        let mut maintenance_deferred = false;
         if let Some(wal) = db.wal_handle().cloned() {
             let provisional_id = wal.next_provisional_id();
             let prev_live_floor = db.wal_live_frame_floor();
@@ -655,10 +656,6 @@ where
                     publish_ctx.finalize_manifest(wal_range).await?;
                 }
                 CommitAckMode::Fast => {
-                    // NOTE: Fast mode has a known limitation - if auto-seal triggers during
-                    // apply_staged_payloads, the sealed segment's WAL range won't include this
-                    // transaction's frames (they're recorded asynchronously). This is acceptable
-                    // for Fast mode as it prioritizes latency over strict durability ordering.
                     apply_staged_payloads(
                         &*db,
                         upsert_payload.take(),
@@ -667,7 +664,8 @@ where
                     )?;
                     let publish_ctx = db.txn_publish_context(prev_live_floor);
                     let executor = Arc::clone(db.executor());
-                    spawn_publish_task(executor, publish_ctx, tickets);
+                    spawn_publish_task(executor, Arc::clone(&db), publish_ctx, tickets);
+                    maintenance_deferred = true;
                 }
             }
         } else {
@@ -690,14 +688,9 @@ where
             )?;
         }
 
-        db.maybe_seal_after_insert()
-            .map_err(TransactionCommitError::Apply)?;
-        #[cfg(test)]
-        db.maybe_run_minor_compaction()
-            .await
-            .map_err(TransactionCommitError::MinorCompaction)?;
-        #[cfg(not(test))]
-        DbInner::schedule_background_minor_compaction(Arc::clone(&db));
+        if !maintenance_deferred {
+            run_post_commit_maintenance(&db).await?;
+        }
 
         drop(key_guards);
         Ok(())
@@ -1368,6 +1361,7 @@ impl AckRange {
 
 fn spawn_publish_task<FS, E>(
     executor: Arc<E>,
+    db: Arc<DbInner<FS, E>>,
     publish_ctx: TxnWalPublishContext<FS, E>,
     tickets: WalTxnTickets<E>,
 ) where
@@ -1378,7 +1372,11 @@ fn spawn_publish_task<FS, E>(
     executor.spawn(async move {
         match tickets.await_range().await {
             Ok(range) => {
-                if let Err(err) = publish_ctx.finalize(range).await {
+                publish_ctx.record_wal_range(&range);
+                if let Err(err) = run_post_commit_maintenance(&db).await {
+                    eprintln!("transaction post-commit maintenance failed: {err}");
+                }
+                if let Err(err) = publish_ctx.finalize_manifest(range).await {
                     eprintln!("transaction post-commit publish failed: {err}");
                 }
             }
@@ -1460,15 +1458,25 @@ where
 
         Ok(())
     }
+}
 
-    /// Combined record and finalize for async publish tasks.
-    ///
-    /// This is used by the Fast mode async task which handles both
-    /// WAL range recording and manifest update together.
-    async fn finalize(&self, wal_range: WalFrameRange) -> Result<(), TransactionCommitError> {
-        self.record_wal_range(&wal_range);
-        self.finalize_manifest(wal_range).await
-    }
+async fn run_post_commit_maintenance<FS, E>(
+    db: &Arc<DbInner<FS, E>>,
+) -> Result<(), TransactionCommitError>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    db.maybe_seal_after_insert()
+        .map_err(TransactionCommitError::Apply)?;
+    #[cfg(test)]
+    db.maybe_run_minor_compaction()
+        .await
+        .map_err(TransactionCommitError::MinorCompaction)?;
+    #[cfg(not(test))]
+    DbInner::schedule_background_minor_compaction(Arc::clone(db));
+    Ok(())
 }
 
 /// Errors raised while staging transactional mutations.

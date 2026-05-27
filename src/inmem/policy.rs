@@ -95,7 +95,7 @@ impl SealPolicy for NeverSeal {
 ///
 /// These values aim to provide sensible out-of-the-box behavior while avoiding
 /// overly aggressive sealing for small workloads. Callers can override this
-/// policy via `DB::set_seal_policy`.
+/// policy at build time via `DbBuilder::with_seal_policy`.
 pub fn default_policy() -> Arc<dyn SealPolicy + Send + Sync> {
     use std::time::Duration;
     Arc::new(AnyOf::new(vec![
