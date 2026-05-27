@@ -1216,13 +1216,20 @@ where
         let target_version = versions.iter().find(|v| v.commit_timestamp <= timestamp);
 
         let (manifest_snapshot, manifest_pin) = if let Some(version) = target_version {
-            // Register the historical version before loading it so SST GC sees the version as
-            // protected while the manifest snapshot is in flight.
+            // Pin the target manifest timestamp before loading its snapshot, so SST GC sees the
+            // version as protected during the in-flight load.
             let manifest_pin = Some(self.pin_snapshot_version(version.commit_timestamp));
             let manifest_snapshot = self
                 .manifest
                 .snapshot_at_version(self.manifest_table, version.commit_timestamp)
                 .await?;
+            debug_assert_eq!(
+                manifest_snapshot
+                    .latest_version
+                    .as_ref()
+                    .map(|snapshot_version| snapshot_version.commit_timestamp()),
+                Some(version.commit_timestamp)
+            );
             (manifest_snapshot, manifest_pin)
         } else if versions.is_empty() {
             // No committed manifest versions exist yet, so only the current in-memory/head view can

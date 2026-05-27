@@ -36,7 +36,9 @@ use crate::{
         scheduler::{CompactionScheduleError, CompactionScheduler, ScheduledCompaction},
     },
     db::{CasBackoffConfig, CascadeConfig, SnapshotPinRegistry},
-    manifest::{ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef},
+    manifest::{
+        GcSstRef, ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest, WalSegmentRef,
+    },
     observability::{log_debug, log_info, log_warn},
     ondisk::sstable::manifest_storage_path,
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
@@ -300,6 +302,15 @@ where
 
         let attempted_candidates = authorized_ssts.len();
         for candidate in authorized_ssts {
+            if !self.sst_candidate_is_still_authorized(&candidate).await? {
+                log_debug!(
+                    component = "compaction",
+                    event = "sst_sweep_candidate_reblocked",
+                    table_id = ?self.table_id,
+                    path = candidate.data_path.as_ref(),
+                );
+                continue;
+            }
             match self.sweep_candidate(&candidate, &mut summary).await {
                 Ok(()) => reclaimed_ssts.push(candidate),
                 Err(_requeue_candidate) => {}
@@ -439,9 +450,9 @@ where
 
     async fn sweep_candidate(
         &self,
-        candidate: &crate::manifest::GcSstRef,
+        candidate: &GcSstRef,
         summary: &mut SstSweepSummary,
-    ) -> Result<(), crate::manifest::GcSstRef> {
+    ) -> Result<(), GcSstRef> {
         let mut success = true;
         let data_path = self.resolve_sst_path(&candidate.data_path);
         if self
@@ -467,6 +478,23 @@ where
         } else {
             Err(candidate.clone())
         }
+    }
+
+    async fn sst_candidate_is_still_authorized(
+        &self,
+        candidate: &GcSstRef,
+    ) -> ManifestResult<bool> {
+        let active_pins = self.snapshot_pins.active_versions();
+        let root_set = self
+            .manifest
+            .current_root_set_with_pins(self.table_id, &active_pins)
+            .await?;
+
+        Ok(!root_set.contains_path(&candidate.data_path)
+            && candidate
+                .delete_path
+                .as_ref()
+                .is_none_or(|path| !root_set.contains_path(path)))
     }
 
     fn resolve_sst_path(&self, relative: &Path) -> Path {
