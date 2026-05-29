@@ -38,7 +38,7 @@ s3-smoke = []
 
 [dependencies]
 anyhow = "1"
-aisle = { version = "0.2.0", git = "https://github.com/tonbo-io/aisle", branch = "main" }
+aisle = { version = "0.2.1", git = "https://github.com/tonbo-io/aisle", branch = "main" }
 arrow-array = "57.1.0"
 arrow-buffer = "57.1.0"
 arrow-ipc = "57.1.0"
@@ -48,16 +48,16 @@ bytes = "1"
 crc32c = "0.6"
 crossbeam-skiplist = "0.1"
 datafusion-common = "51.0.0"
-fusio = { version = "0.6.0", git = "https://github.com/tonbo-io/fusio", rev = "62738727bd5be6e7591fb5d5de008959ed45a20d", default-features = false, features = [
+fusio = { version = "0.6.1", git = "https://github.com/tonbo-io/fusio", rev = "c33a96c8a124c17500924823658541ec1d4bbfb3", default-features = false, features = [
     "aws",
     "dyn",
     "executor",
     "fs",
 ] }
-fusio-manifest = { version = "0.6.0", git = "https://github.com/tonbo-io/fusio", rev = "62738727bd5be6e7591fb5d5de008959ed45a20d", package = "fusio-manifest", default-features = false, features = [
+fusio-manifest = { version = "0.6.1", git = "https://github.com/tonbo-io/fusio", rev = "c33a96c8a124c17500924823658541ec1d4bbfb3", package = "fusio-manifest", default-features = false, features = [
     "std",
 ] }
-fusio-parquet = { version = "0.6.0", git = "https://github.com/tonbo-io/fusio", rev = "62738727bd5be6e7591fb5d5de008959ed45a20d", package = "fusio-parquet" }
+fusio-parquet = { version = "0.6.1", git = "https://github.com/tonbo-io/fusio", rev = "c33a96c8a124c17500924823658541ec1d4bbfb3", package = "fusio-parquet" }
 futures = "0.3"
 lockable = "0.2"
 once_cell = "1"
