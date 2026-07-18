@@ -2,7 +2,7 @@
 edition = "2024"
 name = "tonbo"
 resolver = "2"
-version = "0.4.0-a1"
+version = "0.4.0-a2"
 description = "Embedded database for serverless and edge runtimes, storing data as Parquet on S3"
 license = "Apache-2.0"
 repository = "https://github.com/tonbo-io/tonbo"
@@ -80,8 +80,8 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ], optional = true }
-typed-arrow = { version = "0.6.0", default-features = false, features = ["arrow-57", "ext-hooks", "views"], optional = true }
-typed-arrow-dyn = { version = "0.0.7", default-features = false, features = ["arrow-57", "serde"] }
+typed-arrow = { version = "0.7.1", default-features = false, features = ["arrow-57", "ext-hooks", "views"], optional = true }
+typed-arrow-dyn = { version = "0.0.8", default-features = false, features = ["arrow-57", "serde"] }
 ulid = { version = "1", features = ["serde"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -96,7 +96,7 @@ futures = "0.3"
 tempfile = "3"
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-typed-arrow = { version = "0.6.0", default-features = false, features = ["arrow-57", "ext-hooks", "views"] }
+typed-arrow = { version = "0.7.1", default-features = false, features = ["arrow-57", "ext-hooks", "views"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = "0.5"

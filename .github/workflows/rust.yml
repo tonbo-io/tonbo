@@ -48,6 +48,9 @@ jobs:
       - name: Run cargo test
         run: cargo test --verbose --workspace
 
+      - name: Check prelude-only typed-arrow derives
+        run: cargo check --manifest-path tests/fixtures/prelude_consumer/Cargo.toml
+
   compaction-correctness-deterministic:
     name: compaction correctness (required deterministic baseline)
     runs-on: ubuntu-latest
