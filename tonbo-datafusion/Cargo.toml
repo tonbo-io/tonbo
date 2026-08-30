@@ -8,6 +8,10 @@ datafusion = { version = "51.0.0", default-features = false } # aisle depends on
 aisle = { version = "0.2.1", features = ["datafusion"] }
 async-trait = "0.1.89"
 fusio = { version = "0.6.1", features = ["tokio"] }
-tonbo = "=0.4.0-a2" # tonbo 0.4.0-a1 depends on arrow 57 so, we use use df version that uses same arrow version, which is 51.0.0
+tonbo = "=0.4.0-a2" # tonbo 0.4.0-a2 depends on arrow 57 so, we use use df version that uses same arrow version, which is 51.0.0
 tokio-util = { version = "0.7.18", features = ["rt"] }
 futures = "0.3.33"
+
+[dev-dependencies]
+datafusion = { version = "51.0.0", default-features = false, features = ["sql"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
