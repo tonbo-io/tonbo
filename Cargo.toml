@@ -9,7 +9,7 @@ repository = "https://github.com/tonbo-io/tonbo"
 readme = "README.md"
 
 [workspace]
-members = ["."]
+members = [".", "tonbo-datafusion"]
 
 
 [features]
