@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
-use arrow_schema::{ArrowError, DataType, Fields, Schema, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Field, Fields, Schema, SchemaRef};
 use typed_arrow_dyn::{DynCell, DynProjection, DynRow, DynSchema, DynViewError};
 
 use super::{KeyProjection, errors::KeyExtractError};
@@ -64,6 +64,9 @@ impl DynKeyProjection {
         }
         for &col in &columns {
             ensure_supported_type(schema.field(col).data_type(), col)?;
+        }
+        for field in schema.fields() {
+            ensure_parquet_encodable(field.name(), field.data_type())?;
         }
 
         let projection =
@@ -150,13 +153,37 @@ fn ensure_supported_type(data_type: &DataType, col: usize) -> Result<(), KeyExtr
         | DataType::LargeUtf8
         | DataType::Binary
         | DataType::LargeBinary
-        | DataType::Union(_, _)
         | DataType::FixedSizeBinary(_) => Ok(()),
         other => Err(KeyExtractError::UnsupportedType {
             col,
             data_type: other.clone(),
         }),
     }
+}
+
+fn ensure_parquet_encodable(path: &str, data_type: &DataType) -> Result<(), KeyExtractError> {
+    match data_type {
+        DataType::Union(_, _)
+        | DataType::ListView(_)
+        | DataType::LargeListView(_)
+        | DataType::RunEndEncoded(_, _) => Err(KeyExtractError::UnsupportedDurableType {
+            path: path.to_string(),
+            data_type: data_type.clone(),
+        }),
+        DataType::Struct(fields) => fields
+            .iter()
+            .try_for_each(|field| ensure_child_encodable(path, field)),
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => ensure_child_encodable(path, field),
+        DataType::Dictionary(_, values) => ensure_parquet_encodable(path, values),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_child_encodable(parent: &str, field: &Field) -> Result<(), KeyExtractError> {
+    ensure_parquet_encodable(&format!("{parent}.{}", field.name()), field.data_type())
 }
 
 fn map_key_row_err(err: KeyRowError, row: usize, fields: &Fields) -> KeyExtractError {

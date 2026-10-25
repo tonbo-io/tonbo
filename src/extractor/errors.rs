@@ -30,6 +30,17 @@ pub enum KeyExtractError {
         /// The Arrow data type that is not supported.
         data_type: DataType,
     },
+    /// Schema field uses an Arrow type that Parquet SSTs cannot encode.
+    #[error(
+        "unsupported durable field type at `{path}`: Arrow {data_type} columns cannot currently \
+         be encoded in Parquet SSTs"
+    )]
+    UnsupportedDurableType {
+        /// Dot-separated path to the offending field, including nested children.
+        path: String,
+        /// The Arrow data type without a Parquet mapping.
+        data_type: DataType,
+    },
     /// Referenced field by name was not found in the schema.
     #[error("no such field in schema: {name}")]
     NoSuchField {

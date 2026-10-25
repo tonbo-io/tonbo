@@ -478,6 +478,7 @@ Tonbo is **Arrow-native in memory** and **Parquet on disk**: Arrow gives a typed
 - **Sorted by primary key**: compaction rewrites SSTs with stable key order to bound read amplification.
 - **Row groups & pages**: use min/max stats, column indexes/bloom for **Phase-1** pruning.
 - **Page-level index & page sizing (object-storage aware)**: we **heavily rely on page-level indexes** for fine-grained pruning; to reduce remote round-trips and exploit S3 range-GET throughput, **increase Parquet data page size** beyond defaults — **~8–16 MB per data page** is a good starting point (trade-off: larger pages may over-read when predicates are extremely selective).
+- **Type support**: the WAL (Arrow IPC) can carry any Arrow type, but Parquet has no mapping for `Union`, `ListView`/`LargeListView` or `RunEndEncoded`. Schemas containing these types, at any nesting depth, are rejected at schema initialization instead of failing at flush or compaction.
 - **Encodings & compression**: Parquet encodings (dict, RLE/bitpack) and compression (ZSTD/LZ4) are writer options.
 - **Sidecar indexes (planned)**: vector / inverted / graph indexes will be stored as sibling objects keyed to the SST generation (not yet implemented).
 
